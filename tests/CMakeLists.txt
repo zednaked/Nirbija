@@ -41,3 +41,7 @@ add_test(NAME midi_synth COMMAND nirbija_midi_synth)
 add_executable(nirbija_midi_jack midi_jack.cpp)
 target_link_libraries(nirbija_midi_jack PRIVATE nirbija_core)
 add_test(NAME midi_jack COMMAND nirbija_midi_jack)
+
+# Manual tool, not a ctest target: needs a MIDI source and someone to play it.
+add_executable(nirbija_live live_session.cpp)
+target_link_libraries(nirbija_live PRIVATE nirbija_core)
