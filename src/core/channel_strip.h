@@ -37,6 +37,9 @@ class ChannelStrip {
                const TransportInfo* transport = nullptr);
 
   const std::string& name() const { return name_; }
+  // UI thread only. The recorder reads this when a take starts, so a renamed
+  // channel records to a file with the name you gave it.
+  void set_name(std::string name) { name_ = std::move(name); }
   int channel_count() const { return channel_count_; }
 
   // Audio-thread setters: plain stores, no allocation.

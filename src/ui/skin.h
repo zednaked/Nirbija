@@ -56,12 +56,22 @@ class Skin : public QObject {
   int radius() const { return 3; }
   int barHeight() const { return 44; }
 
-  // Meters go green, then yellow, then red near the top of the scale.
+  // Meters go green, then yellow, then red. The thresholds are in decibels —
+  // yellow from -6 dBFS, red from -1 — converted to the same 0..1 the fader
+  // uses. Comparing raw fractions here made an ordinary signal look like it was
+  // about to clip.
   Q_INVOKABLE QColor meterColor(qreal level) const {
-    if (level > 0.89) return meterHigh();
-    if (level > 0.6) return meterMid();
+    if (level > kRedPosition) return meterHigh();
+    if (level > kYellowPosition) return meterMid();
     return meterLow();
   }
+
+ private:
+  // Must match MixerModel's fader range.
+  static constexpr qreal kMinDb = -70.0;
+  static constexpr qreal kMaxDb = 6.0;
+  static constexpr qreal kYellowPosition = (-6.0 - kMinDb) / (kMaxDb - kMinDb);
+  static constexpr qreal kRedPosition = (-1.0 - kMinDb) / (kMaxDb - kMinDb);
 };
 
 }  // namespace nirbija

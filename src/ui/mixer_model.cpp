@@ -101,11 +101,15 @@ QHash<int, QByteArray> MixerModel::roleNames() const {
 }
 
 void MixerModel::addChannel(const QString& name, int channels) {
-  const QString label = name.isEmpty()
-                            ? tr("Channel %1").arg(channels_.size() + 1)
-                            : name;
-  const size_t index = engine_.add_channel(label.toStdString(), channels);
+  // Named after the graph slot rather than the row count. Slots are never
+  // reused, so removing a channel and adding another cannot produce two
+  // channels with the same name — and the name then matches the JACK ports.
+  const size_t index = engine_.add_channel("channel", channels);
   if (index == kMaxChannels) return;
+
+  const QString label =
+      name.isEmpty() ? tr("Channel %1").arg(index + 1) : name;
+  engine_.graph().channel(index).set_name(label.toStdString());
 
   beginInsertRows({}, static_cast<int>(channels_.size()),
                   static_cast<int>(channels_.size()));
@@ -143,6 +147,31 @@ void MixerModel::removeChannel(int row) {
 void MixerModel::renameChannel(int row, const QString& name) {
   if (row < 0 || row >= static_cast<int>(channels_.size()) || name.isEmpty()) return;
   channels_[row].name = name;
+  if (ChannelStrip* strip = stripFor(row)) strip->set_name(name.toStdString());
+
+  // A send row shows the name of the bus it feeds, so those have to follow.
+  for (int other = 0; other < static_cast<int>(channels_.size()); ++other) {
+    QVariantList& sends = channels_[other].sends;
+    bool touched = false;
+    for (int slot = 0; slot < sends.size(); ++slot) {
+      QVariantMap send = sends[slot].toMap();
+      if (!channels_[row].is_bus) break;
+      if (send.value(QStringLiteral("bus")).toInt() !=
+          static_cast<int>(channels_[row].slot))
+        continue;
+      send[QStringLiteral("name")] = name;
+      sends[slot] = send;
+      touched = true;
+    }
+    if (channels_[other].is_bus &&
+        channels_[other].destination == static_cast<int>(channels_[row].slot))
+      channels_[other].output_label = name;
+    if (touched) {
+      const QModelIndex other_idx = index(other);
+      emit dataChanged(other_idx, other_idx, {SendsRole, OutputLabelRole});
+    }
+  }
+
   const QModelIndex idx = index(row);
   emit dataChanged(idx, idx, {NameRole});
   markDirty();
@@ -164,10 +193,11 @@ ChannelStrip* MixerModel::stripFor(int row) const {
 }
 
 void MixerModel::addBus(const QString& name) {
-  const QString label =
-      name.isEmpty() ? tr("Bus %1").arg(busCount() + 1) : name;
-  const size_t index = engine_.add_bus(label.toStdString());
+  const size_t index = engine_.add_bus("bus");
   if (index == kMaxBuses) return;
+
+  const QString label = name.isEmpty() ? tr("Bus %1").arg(index + 1) : name;
+  engine_.graph().bus(index).set_name(label.toStdString());
 
   beginInsertRows({}, static_cast<int>(channels_.size()),
                   static_cast<int>(channels_.size()));
