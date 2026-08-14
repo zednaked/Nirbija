@@ -88,6 +88,21 @@ struct WorkMessage {
   std::array<uint8_t, kWorkPayloadBytes> data{};
 };
 
+// Atom traffic between a plugin's DSP and its own editor, crossing threads.
+// Analysers live on this: the DSP streams spectrum frames to the UI through an
+// atom output port, and the UI asks for them through an atom input port. The
+// host has to carry both, or the editor draws an empty grid forever.
+struct AtomBridge {
+  struct Message {
+    uint32_t port = 0;
+    uint32_t size = 0;
+    std::array<uint8_t, 8192> data{};
+  };
+
+  RtQueue<Message, 128> to_ui;
+  RtQueue<Message, 16> to_plugin;
+};
+
 enum class PortKind { Ignored, AudioIn, AudioOut, ControlIn, ControlOut, AtomIn, AtomOut };
 
 struct PortInfo {
@@ -151,12 +166,14 @@ class Lv2Gui : public PluginGui {
  public:
   Lv2Gui(std::shared_ptr<Lv2World> world, const LilvPlugin* plugin,
          LilvInstance* instance, std::vector<float>* control_values,
-         std::vector<PortInfo> control_ports)
+         std::vector<PortInfo> control_ports, AtomBridge* bridge)
       : world_(std::move(world)),
         plugin_(plugin),
         instance_(instance),
         control_values_(control_values),
-        control_ports_(std::move(control_ports)) {}
+        control_ports_(std::move(control_ports)),
+        bridge_(bridge),
+        event_transfer_urid_(world_->urids.map_string(LV2_ATOM__eventTransfer)) {}
 
   ~Lv2Gui() override { detach(); }
 
@@ -217,6 +234,17 @@ class Lv2Gui : public PluginGui {
   void idle() override {
     if (handle_ == nullptr) return;
     push_changed_ports();
+
+    // Whatever the DSP produced for its editor since the last tick.
+    if (bridge_ != nullptr && descriptor_ != nullptr &&
+        descriptor_->port_event != nullptr) {
+      AtomBridge::Message message;
+      while (bridge_->to_ui.pop(message)) {
+        descriptor_->port_event(handle_, message.port, message.size,
+                                event_transfer_urid_, message.data.data());
+      }
+    }
+
     if (idle_iface_ != nullptr) idle_iface_->idle(handle_);
   }
 
@@ -351,11 +379,24 @@ class Lv2Gui : public PluginGui {
     return 0;
   }
 
-  // The editor writes a control value back to the host. Only plain float
-  // control ports are handled; anything atom-shaped needs the MIDI work first.
+  // The editor writes back to the host: plain floats for control ports, and
+  // atom events for everything an analyser or sequencer UI needs to tell its
+  // DSP — including the "I am visible, start streaming" handshake.
   static void write_port(LV2UI_Controller controller, uint32_t port_index,
                          uint32_t buffer_size, uint32_t format, const void* buffer) {
     auto* self = static_cast<Lv2Gui*>(controller);
+
+    if (format == self->event_transfer_urid_) {
+      if (self->bridge_ == nullptr) return;
+      AtomBridge::Message message;
+      if (buffer_size > message.data.size()) return;
+      message.port = port_index;
+      message.size = buffer_size;
+      std::memcpy(message.data.data(), buffer, buffer_size);
+      self->bridge_->to_plugin.push(message);
+      return;
+    }
+
     if (format != 0 || buffer_size != sizeof(float)) return;
 
     const float value = *static_cast<const float*>(buffer);
@@ -379,6 +420,8 @@ class Lv2Gui : public PluginGui {
   const LV2UI_Idle_Interface* idle_iface_ = nullptr;
   // What the editor has already been told, so idle only sends what moved.
   std::vector<float> last_sent_;
+  AtomBridge* bridge_;
+  LV2_URID event_transfer_urid_;
   LV2_Feature parent_feature_{}, instance_feature_{}, idle_feature_{};
   LV2_Feature resize_feature_{}, map_feature_{}, unmap_feature_{};
   LV2UI_Resize resize_{};
@@ -489,6 +532,7 @@ class Lv2Instance : public PluginInstance {
     write_input_events();
     lilv_instance_run(instance_, frames);
     deliver_worker_responses();
+    forward_atoms_to_ui();
 
     const size_t out_base = audio_in_.size();
     for (int ch = 0; ch < strip_channels; ++ch) {
@@ -567,8 +611,15 @@ class Lv2Instance : public PluginInstance {
   std::unique_ptr<PluginGui> create_gui() override {
     if (instance_ == nullptr) return nullptr;
     if (!Lv2Gui::available(world_->world, plugin_)) return nullptr;
+
+    // The bridge outlives the editor: closing and reopening the window reuses
+    // it, and the audio thread may be mid-block with it either way.
+    if (bridge_ == nullptr) {
+      bridge_ = std::make_unique<AtomBridge>();
+      bridge_live_.store(bridge_.get(), std::memory_order_release);
+    }
     return std::make_unique<Lv2Gui>(world_, plugin_, instance_, &control_values_,
-                                    control_in_);
+                                    control_in_, bridge_.get());
   }
 
  private:
@@ -765,6 +816,19 @@ class Lv2Instance : public PluginInstance {
 
     if (has_transport_) write_transport();
 
+    // Anything the editor asked to reach the DSP, injected as events at the
+    // start of the block.
+    if (AtomBridge* bridge = bridge_live_.load(std::memory_order_acquire)) {
+      AtomBridge::Message message;
+      while (bridge->to_plugin.pop(message)) {
+        if (message.port != atom_in_[0].index) continue;
+        const auto* atom = reinterpret_cast<const LV2_Atom*>(message.data.data());
+        lv2_atom_forge_frame_time(&forge_, 0);
+        lv2_atom_forge_raw(&forge_, atom, sizeof(LV2_Atom) + atom->size);
+        lv2_atom_forge_pad(&forge_, sizeof(LV2_Atom) + atom->size);
+      }
+    }
+
     for (size_t i = 0; i < pending_midi_count_; ++i) {
       const MidiEvent& event = pending_midi_[i];
       lv2_atom_forge_frame_time(&forge_, event.frame);
@@ -816,6 +880,29 @@ class Lv2Instance : public PluginInstance {
     lv2_atom_forge_float(&forge_, static_cast<float>(transport_.tempo_bpm));
 
     lv2_atom_forge_pop(&forge_, &object);
+  }
+
+  // Copies what the DSP wrote to its atom outputs into the ring the editor
+  // drains, keeping the port index so the UI knows which port spoke.
+  void forward_atoms_to_ui() {
+    AtomBridge* bridge = bridge_live_.load(std::memory_order_acquire);
+    if (bridge == nullptr) return;
+
+    for (size_t out = 0; out < atom_out_.size(); ++out) {
+      const auto* sequence = reinterpret_cast<const LV2_Atom_Sequence*>(
+          atom_buffers_[atom_in_.size() + out].data());
+      if (sequence->atom.type != sequence_urid_) continue;
+
+      LV2_ATOM_SEQUENCE_FOREACH(sequence, event) {
+        const uint32_t total = sizeof(LV2_Atom) + event->body.size;
+        AtomBridge::Message message;
+        if (total > message.data.size()) continue;  // oversized frame, skip
+        message.port = atom_out_[out].index;
+        message.size = total;
+        std::memcpy(message.data.data(), &event->body, total);
+        if (!bridge->to_ui.push(message)) return;  // ring full, UI will catch up
+      }
+    }
   }
 
   // An atom input port must present a valid, empty sequence every block, or the
@@ -881,6 +968,8 @@ class Lv2Instance : public PluginInstance {
   std::vector<const LV2_Feature*> features_;
 
   const LV2_Worker_Interface* worker_iface_ = nullptr;
+  std::unique_ptr<AtomBridge> bridge_;
+  std::atomic<AtomBridge*> bridge_live_{nullptr};
   std::thread worker_thread_;
   std::atomic<bool> worker_running_{false};
   std::counting_semaphore<> work_signal_{0};
