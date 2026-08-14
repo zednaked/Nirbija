@@ -124,6 +124,12 @@ class MixerModel : public QAbstractListModel {
   // ships no editor this host can embed, which is common.
   Q_INVOKABLE bool openInsertEditor(int row, int slot);
 
+  // For plugins that ship no editor this host can embed: the parameter list,
+  // ready to draw as sliders. [{id, name, min, max, value}]
+  Q_INVOKABLE QVariantList insertParameters(int row, int slot) const;
+  Q_INVOKABLE void setInsertParameter(int row, int slot, int id, qreal value);
+  Q_INVOKABLE QString insertName(int row, int slot) const;
+
   // --- routing ------------------------------------------------------------
   // Ports a channel can be fed from, ready to show in a picker. `midi` picks
   // between MIDI sources and audio ones.
@@ -192,6 +198,7 @@ class MixerModel : public QAbstractListModel {
   };
 
   ChannelStrip* stripFor(int row) const;
+  PluginInstance* insertFor(int row, int slot) const;
   int busCount() const;
   void pollLevels();
   void refreshRouting(int row);

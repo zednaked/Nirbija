@@ -32,6 +32,7 @@ qt_add_qml_module(nirbija
     qml/Fader.qml
     qml/PeakDots.qml
     qml/StripButton.qml
+    qml/ParamEditor.qml
     qml/PluginPicker.qml
     qml/PortPicker.qml
     qml/SendRow.qml

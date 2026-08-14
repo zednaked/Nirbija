@@ -482,9 +482,15 @@ bool MixerModel::addInsert(int row, int pluginIndex) {
   std::unique_ptr<PluginInstance> instance = plugins_->instantiate(pluginIndex);
   if (instance == nullptr) return false;
   ChannelStrip* strip = stripFor(row);
-  if (strip == nullptr || !strip->add_insert(std::move(instance))) return false;
+  size_t placed_at = 0;
+  if (strip == nullptr || !strip->add_insert(std::move(instance), &placed_at))
+    return false;
 
-  channels_[row].inserts.append(QString::fromStdString(descriptor->name));
+  // The label list mirrors the engine's slots, holes included, so the new
+  // plugin's label lands exactly where the engine put the plugin.
+  QStringList& labels = channels_[row].inserts;
+  while (labels.size() <= static_cast<int>(placed_at)) labels.append(QString());
+  labels[static_cast<int>(placed_at)] = QString::fromStdString(descriptor->name);
   const QModelIndex idx = index(row);
   emit dataChanged(idx, idx, {InsertsRole});
   markDirty();
@@ -610,6 +616,44 @@ void MixerModel::refreshRouting(int row) {
   emit dataChanged(idx, idx, {InputLabelRole, MidiLabelRole});
   emit routingChanged();
   markDirty();
+}
+
+// The insert behind a row and slot, or null. Shared by the generic editor
+// calls below.
+PluginInstance* MixerModel::insertFor(int row, int slot) const {
+  ChannelStrip* strip = const_cast<MixerModel*>(this)->stripFor(row);
+  if (strip == nullptr || slot < 0) return nullptr;
+  return strip->insert_at(static_cast<size_t>(slot));
+}
+
+QVariantList MixerModel::insertParameters(int row, int slot) const {
+  QVariantList out;
+  PluginInstance* insert = insertFor(row, slot);
+  if (insert == nullptr) return out;
+
+  for (const ParameterInfo& parameter : insert->parameters()) {
+    QVariantMap entry;
+    entry[QStringLiteral("id")] = parameter.id;
+    entry[QStringLiteral("name")] = QString::fromStdString(parameter.name);
+    entry[QStringLiteral("min")] = parameter.min_value;
+    entry[QStringLiteral("max")] = parameter.max_value;
+    entry[QStringLiteral("value")] = insert->parameter_value(parameter.id);
+    out.append(entry);
+  }
+  return out;
+}
+
+void MixerModel::setInsertParameter(int row, int slot, int id, qreal value) {
+  PluginInstance* insert = insertFor(row, slot);
+  if (insert == nullptr) return;
+  insert->set_parameter(static_cast<uint32_t>(id), value);
+  markDirty();
+}
+
+QString MixerModel::insertName(int row, int slot) const {
+  PluginInstance* insert = insertFor(row, slot);
+  if (insert == nullptr) return {};
+  return QString::fromStdString(insert->descriptor().name);
 }
 
 void MixerModel::pollLevels() {

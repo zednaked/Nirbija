@@ -85,7 +85,10 @@ class ChannelStrip {
   // Insert slots, safe to edit while the audio thread is rendering. The plugin
   // is fully activated before it becomes visible, and a removed one is retired
   // rather than freed, so the audio thread never touches a dead pointer.
-  bool add_insert(std::unique_ptr<PluginInstance> plugin);
+  // Fills the first hole left by a removal, or appends when there is none.
+  // `placed_at` reports where it landed, for the UI's parallel label list.
+  bool add_insert(std::unique_ptr<PluginInstance> plugin,
+                  size_t* placed_at = nullptr);
   void remove_insert(size_t index);
 
   // Swaps two slots. The audio thread may be part way through the chain when

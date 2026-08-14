@@ -96,7 +96,10 @@ ApplicationWindow {
 
                     onInsertMenuRequested: slot => slotMenu.openAt(this, [
                         { label: qsTr("Open editor"),
-                          action: () => mixer.openInsertEditor(index, slot) },
+                          action: () => {
+                              if (!mixer.openInsertEditor(index, slot))
+                                  paramEditor.openFor(index, slot)
+                          } },
                         { label: qsTr("Move up"),
                           enabled: slot > 0,
                           action: () => mixer.moveInsert(index, slot, -1) },
@@ -172,9 +175,10 @@ ApplicationWindow {
                         // one opens the picker to fill it.
                         if (slot < model.inserts.length
                                 && model.inserts[slot].length > 0) {
+                            // The plugin's own editor when it has one; sliders
+                            // built from its parameters when it does not.
                             if (!mixer.openInsertEditor(index, slot))
-                                console.warn("no embeddable editor for",
-                                             model.inserts[slot])
+                                paramEditor.openFor(index, slot)
                             return
                         }
                         picker.targetRow = index
@@ -234,6 +238,10 @@ ApplicationWindow {
 
     PluginPicker {
         id: picker
+    }
+
+    ParamEditor {
+        id: paramEditor
     }
 
     SlotMenu {

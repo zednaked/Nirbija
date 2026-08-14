@@ -117,9 +117,22 @@ float ChannelStrip::read_peak(int channel) {
   return peaks_[channel].exchange(0.0f, std::memory_order_relaxed);
 }
 
-bool ChannelStrip::add_insert(std::unique_ptr<PluginInstance> plugin) {
-  const size_t index = insert_count_.load(std::memory_order_relaxed);
-  if (index >= kMaxInserts || plugin == nullptr) return false;
+bool ChannelStrip::add_insert(std::unique_ptr<PluginInstance> plugin,
+                              size_t* placed_at) {
+  if (plugin == nullptr) return false;
+
+  // A removal leaves a null slot so the others keep their index; the next add
+  // fills the first such hole rather than growing past it, or a chain that had
+  // something removed could only ever grow downwards.
+  const size_t count = insert_count_.load(std::memory_order_relaxed);
+  size_t index = count;
+  for (size_t i = 0; i < count; ++i) {
+    if (insert_slots_[i].load(std::memory_order_relaxed) == nullptr) {
+      index = i;
+      break;
+    }
+  }
+  if (index >= kMaxInserts) return false;
 
   plugin->set_channel_layout(channel_count_);
   if (sample_rate_ > 0.0) plugin->activate(sample_rate_, max_block_frames_);
@@ -130,7 +143,8 @@ bool ChannelStrip::add_insert(std::unique_ptr<PluginInstance> plugin) {
   // Publish the slot before the count, so the audio thread can never see a
   // count that reaches a slot it cannot read yet.
   insert_slots_[index].store(raw, std::memory_order_release);
-  insert_count_.store(index + 1, std::memory_order_release);
+  if (index == count) insert_count_.store(count + 1, std::memory_order_release);
+  if (placed_at != nullptr) *placed_at = index;
   return true;
 }
 

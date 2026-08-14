@@ -97,6 +97,16 @@ int main(int argc, char* argv[]) {
       // Removal leaves the slot in place so the surviving indices stay stable.
       if (after.size() != 1 || !after.value(0).isEmpty())
         fail("removeInsert did not clear the slot label");
+
+      // Adding again fills the hole the removal left, rather than growing the
+      // chain downwards past it forever.
+      if (mixer.addInsert(0, chosen)) {
+        const QStringList refilled =
+            field(mixer, 0, nirbija::MixerModel::InsertsRole).toStringList();
+        if (refilled.size() != 1 || refilled.value(0).isEmpty())
+          fail("adding after a removal did not reuse the hole");
+        mixer.removeInsert(0, 0);
+      }
     }
   }
 
