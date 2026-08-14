@@ -110,12 +110,33 @@ struct PortClasses {
   LilvNode* output;
 };
 
+// The lilv world, its cached URIs and the URID map, kept alive by every
+// instance created from it. A plugin instance outliving its world would free
+// nodes through a dangling pointer, which is exactly what happens when the UI
+// tears down its plugin list before its engine.
+struct Lv2World {
+  Lv2World() : world(lilv_world_new()) {
+    lilv_world_load_all(world);
+    classes = std::make_unique<PortClasses>(world);
+  }
+
+  ~Lv2World() {
+    classes.reset();
+    lilv_world_free(world);
+  }
+
+  LilvWorld* world;
+  std::unique_ptr<PortClasses> classes;
+  UridMap urids;
+};
+
 class Lv2Instance : public PluginInstance {
  public:
-  Lv2Instance(PluginDescriptor desc, const LilvPlugin* plugin, UridMap& urids,
-              const PortClasses& classes)
-      : desc_(std::move(desc)), plugin_(plugin), urids_(urids) {
-    scan_ports(classes);
+  Lv2Instance(PluginDescriptor desc, const LilvPlugin* plugin,
+              std::shared_ptr<Lv2World> world)
+      : desc_(std::move(desc)), plugin_(plugin), world_(std::move(world)),
+        urids_(world_->urids) {
+    scan_ports(*world_->classes);
   }
 
   ~Lv2Instance() override { deactivate(); }
@@ -398,6 +419,7 @@ class Lv2Instance : public PluginInstance {
 
   PluginDescriptor desc_;
   const LilvPlugin* plugin_;
+  std::shared_ptr<Lv2World> world_;
   UridMap& urids_;
   LilvInstance* instance_ = nullptr;
 
@@ -429,21 +451,13 @@ class Lv2Instance : public PluginInstance {
 
 class Lv2Backend : public PluginBackend {
  public:
-  Lv2Backend() : world_(lilv_world_new()) {
-    lilv_world_load_all(world_);
-    classes_ = std::make_unique<PortClasses>(world_);
-  }
-
-  ~Lv2Backend() override {
-    classes_.reset();
-    lilv_world_free(world_);
-  }
+  Lv2Backend() : world_(std::make_shared<Lv2World>()) {}
 
   PluginFormat format() const override { return PluginFormat::Lv2; }
 
   std::vector<PluginDescriptor> scan() override {
     std::vector<PluginDescriptor> found;
-    const LilvPlugins* plugins = lilv_world_get_all_plugins(world_);
+    const LilvPlugins* plugins = lilv_world_get_all_plugins(world_->world);
     LILV_FOREACH(plugins, iter, plugins) {
       found.push_back(describe(lilv_plugins_get(plugins, iter)));
     }
@@ -451,14 +465,14 @@ class Lv2Backend : public PluginBackend {
   }
 
   std::unique_ptr<PluginInstance> instantiate(const PluginDescriptor& desc) override {
-    LilvNode* uri = lilv_new_uri(world_, desc.uid.c_str());
+    LilvNode* uri = lilv_new_uri(world_->world, desc.uid.c_str());
     if (uri == nullptr) return nullptr;
     const LilvPlugin* plugin =
-        lilv_plugins_get_by_uri(lilv_world_get_all_plugins(world_), uri);
+        lilv_plugins_get_by_uri(lilv_world_get_all_plugins(world_->world), uri);
     lilv_node_free(uri);
     if (plugin == nullptr) return nullptr;
 
-    return std::make_unique<Lv2Instance>(describe(plugin), plugin, urids_, *classes_);
+    return std::make_unique<Lv2Instance>(describe(plugin), plugin, world_);
   }
 
  private:
@@ -479,17 +493,15 @@ class Lv2Backend : public PluginBackend {
       desc.path = lilv_node_as_uri(bundle);
 
     desc.audio_inputs = static_cast<int>(lilv_plugin_get_num_ports_of_class(
-        plugin, classes_->input, classes_->audio, nullptr));
+        plugin, world_->classes->input, world_->classes->audio, nullptr));
     desc.audio_outputs = static_cast<int>(lilv_plugin_get_num_ports_of_class(
-        plugin, classes_->output, classes_->audio, nullptr));
+        plugin, world_->classes->output, world_->classes->audio, nullptr));
     desc.has_midi_input = lilv_plugin_get_num_ports_of_class(
-                              plugin, classes_->input, classes_->atom, nullptr) > 0;
+                              plugin, world_->classes->input, world_->classes->atom, nullptr) > 0;
     return desc;
   }
 
-  LilvWorld* world_;
-  std::unique_ptr<PortClasses> classes_;
-  UridMap urids_;
+  std::shared_ptr<Lv2World> world_;
 };
 
 }  // namespace

@@ -27,7 +27,7 @@ void ChannelStrip::prepare(double sample_rate, uint32_t max_block_frames) {
   smoothed_pan_ = pan_.load(std::memory_order_relaxed);
 
   plugin_io_.assign(static_cast<size_t>(channel_count_), nullptr);
-  for (auto& insert : inserts_) {
+  for (auto& insert : owned_inserts_) {
     insert->set_channel_layout(channel_count_);
     insert->activate(sample_rate, max_block_frames);
   }
@@ -39,10 +39,6 @@ void ChannelStrip::process(float* const* buffers, uint32_t frames) {
       std::fill_n(buffers[ch], frames, 0.0f);
     return;
   }
-
-  for (int ch = 0; ch < channel_count_; ++ch) plugin_io_[ch] = buffers[ch];
-  for (auto& insert : inserts_)
-    insert->process(plugin_io_.data(), plugin_io_.data(), frames);
 
   const float target_gain = gain_.load(std::memory_order_relaxed);
   const float target_pan = pan_.load(std::memory_order_relaxed);
@@ -64,6 +60,17 @@ void ChannelStrip::process(float* const* buffers, uint32_t frames) {
     }
   }
 
+  // Inserts run after the fader, which is AUM's default and what the strip
+  // layout shows: the slots sit below the fader, on the way to the output.
+  // TODO(phase-6): per-slot pre/post, toggled by long-pressing the slot.
+  for (int ch = 0; ch < channel_count_; ++ch) plugin_io_[ch] = buffers[ch];
+  const size_t insert_count = insert_count_.load(std::memory_order_acquire);
+  for (size_t i = 0; i < insert_count; ++i) {
+    PluginInstance* insert = insert_slots_[i].load(std::memory_order_acquire);
+    if (insert != nullptr)
+      insert->process(plugin_io_.data(), plugin_io_.data(), frames);
+  }
+
   for (int ch = 0; ch < channel_count_; ++ch) {
     float peak = 0.0f;
     for (uint32_t i = 0; i < frames; ++i)
@@ -77,16 +84,41 @@ float ChannelStrip::read_peak(int channel) {
   return peaks_[channel].exchange(0.0f, std::memory_order_relaxed);
 }
 
-void ChannelStrip::add_insert(std::unique_ptr<PluginInstance> plugin) {
+bool ChannelStrip::add_insert(std::unique_ptr<PluginInstance> plugin) {
+  const size_t index = insert_count_.load(std::memory_order_relaxed);
+  if (index >= kMaxInserts || plugin == nullptr) return false;
+
   plugin->set_channel_layout(channel_count_);
   if (sample_rate_ > 0.0) plugin->activate(sample_rate_, max_block_frames_);
-  inserts_.push_back(std::move(plugin));
+
+  PluginInstance* raw = plugin.get();
+  owned_inserts_.push_back(std::move(plugin));
+
+  // Publish the slot before the count, so the audio thread can never see a
+  // count that reaches a slot it cannot read yet.
+  insert_slots_[index].store(raw, std::memory_order_release);
+  insert_count_.store(index + 1, std::memory_order_release);
+  return true;
 }
 
 void ChannelStrip::remove_insert(size_t index) {
-  if (index >= inserts_.size()) return;
-  inserts_[index]->deactivate();
-  inserts_.erase(inserts_.begin() + static_cast<ptrdiff_t>(index));
+  if (index >= insert_count_.load(std::memory_order_relaxed)) return;
+  PluginInstance* raw = insert_slots_[index].exchange(nullptr, std::memory_order_release);
+  if (raw == nullptr) return;
+
+  // The audio thread may be inside this plugin right now, so it is retired
+  // rather than destroyed, and is left activated for the same reason.
+  auto it = std::find_if(owned_inserts_.begin(), owned_inserts_.end(),
+                         [raw](const auto& owned) { return owned.get() == raw; });
+  if (it != owned_inserts_.end()) {
+    retired_.push_back(std::move(*it));
+    owned_inserts_.erase(it);
+  }
+}
+
+PluginInstance* ChannelStrip::insert_at(size_t index) const {
+  if (index >= insert_count_.load(std::memory_order_acquire)) return nullptr;
+  return insert_slots_[index].load(std::memory_order_acquire);
 }
 
 }  // namespace nirbija

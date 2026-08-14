@@ -1,0 +1,105 @@
+import QtQuick
+import QtQuick.Controls.Basic
+
+ApplicationWindow {
+    id: window
+
+    width: 1100
+    height: 640
+    visible: true
+    title: qsTr("Nirbija")
+    color: Skin.background
+
+    TopBar {
+        id: topBar
+        width: parent.width
+        peakLeft: mixer.masterPeakLeft
+        peakRight: mixer.masterPeakRight
+        status: mixer.status
+    }
+
+    // Strips scroll horizontally as a session grows, which is the one direction
+    // a mixer ever needs to grow in.
+    Flickable {
+        id: mixerArea
+        anchors.top: topBar.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.margins: Skin.gap * 2
+        contentWidth: stripRow.width
+        flickableDirection: Flickable.HorizontalFlick
+        clip: true
+
+        Row {
+            id: stripRow
+            height: mixerArea.height
+            spacing: Skin.gap
+
+            Repeater {
+                model: mixer
+
+                ChannelStrip {
+                    height: mixerArea.height
+                    row: index
+                    channelName: name
+                    gain: model.gain
+                    muted: model.muted
+                    soloed: model.soloed
+                    armed: model.armed
+                    peakLeft: model.peakLeft
+                    peakRight: model.peakRight
+                    inputLabel: model.inputLabel
+                    outputLabel: model.outputLabel
+                    inserts: model.inserts
+                    accent: model.accent
+
+                    onInsertSlotClicked: slot => {
+                        if (slot < model.inserts.length)
+                            return
+                        picker.targetRow = index
+                        picker.targetSlot = slot
+                        picker.open()
+                    }
+                }
+            }
+
+            // AUM's big square "+" that adds a channel, always at the end of the
+            // row so it moves along as the session grows.
+            Rectangle {
+                width: Skin.stripWidth
+                height: mixerArea.height
+                radius: Skin.radius
+                color: Skin.strip
+                opacity: addArea.containsMouse ? 1.0 : 0.65
+
+                Text {
+                    anchors.centerIn: parent
+                    text: "+"
+                    color: Skin.textDim
+                    font.pixelSize: 40
+                }
+
+                MouseArea {
+                    id: addArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    onClicked: mixer.addChannel("", 2)
+                }
+            }
+        }
+    }
+
+    PluginPicker {
+        id: picker
+    }
+
+    // A session that opens empty gives nothing to look at, and AUM starts with
+    // a strip on screen too.
+    Component.onCompleted: {
+        if (mixer.rowCount() === 0) {
+            mixer.addChannel("", 2)
+            mixer.addChannel("", 2)
+        }
+    }
+}
