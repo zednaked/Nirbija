@@ -21,16 +21,28 @@ ApplicationWindow {
         playing: mixer.playing
         recording: mixer.recording
         recordingLabel: mixer.recordingLabel
-        onMasterOutputClicked: portPicker.openFor("sink", -1)
+        onMasterOutputClicked: portPicker.openFor("sink", -1, topBar)
     }
 
     // Strips scroll horizontally as a session grows, which is the one direction
     // a mixer ever needs to grow in.
+    MasterStrip {
+        id: masterStrip
+        anchors.top: topBar.bottom
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        gain: mixer.masterGain
+        peakLeft: mixer.masterPeakLeft
+        peakRight: mixer.masterPeakRight
+        sink: mixer.masterSink
+        onOutputClicked: portPicker.openFor("sink", -1, masterStrip)
+    }
+
     Flickable {
         id: mixerArea
         anchors.top: topBar.bottom
         anchors.left: parent.left
-        anchors.right: parent.right
+        anchors.right: masterStrip.left
         anchors.bottom: parent.bottom
         anchors.margins: Skin.gap * 2
         contentWidth: stripRow.width
@@ -63,12 +75,12 @@ ApplicationWindow {
                     isBus: model.isBus
                     sends: model.sends
 
-                    onInputSlotClicked: portPicker.openFor("audio", index)
-                    onMidiSlotClicked: portPicker.openFor("midi", index)
+                    onInputSlotClicked: portPicker.openFor("audio", index, this)
+                    onMidiSlotClicked: portPicker.openFor("midi", index, this)
 
                     onInputMenuRequested: slotMenu.openAt(this, [
                         { label: qsTr("Change input…"),
-                          action: () => portPicker.openFor("audio", index) },
+                          action: () => portPicker.openFor("audio", index, this) },
                         { label: qsTr("Disconnect"), danger: true,
                           enabled: model.inputLabel !== qsTr("no input"),
                           action: () => mixer.connectSource(index, "", false) }
@@ -76,7 +88,7 @@ ApplicationWindow {
 
                     onMidiMenuRequested: slotMenu.openAt(this, [
                         { label: qsTr("Change MIDI source…"),
-                          action: () => portPicker.openFor("midi", index) },
+                          action: () => portPicker.openFor("midi", index, this) },
                         { label: qsTr("Disconnect"), danger: true,
                           enabled: model.midiLabel !== qsTr("no MIDI"),
                           action: () => mixer.connectSource(index, "", true) }

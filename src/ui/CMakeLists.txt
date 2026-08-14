@@ -26,6 +26,7 @@ qt_add_qml_module(nirbija
     qml/Main.qml
     qml/TopBar.qml
     qml/ChannelStrip.qml
+    qml/MasterStrip.qml
     qml/NodeSlot.qml
     qml/InsertSlot.qml
     qml/Fader.qml

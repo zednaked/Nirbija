@@ -17,7 +17,6 @@ Popup {
     width: 460
     height: 420
     modal: true
-    anchors.centerIn: Overlay.overlay
     padding: 0
 
     background: Rectangle {
@@ -27,10 +26,22 @@ Popup {
         radius: Skin.radius
     }
 
-    function openFor(kind, row) {
+    // Anchored to the slot that asked for it rather than centred on the window:
+    // plugin editors are separate top-level windows and sit over the middle of
+    // the screen, where a centred picker would open underneath them.
+    function openFor(kind, row, item) {
         root.kind = kind
         root.targetRow = row
         root.ports = kind === "sink" ? mixer.sinks() : mixer.sources(kind === "midi")
+
+        if (item !== undefined && item !== null) {
+            const point = item.mapToItem(Overlay.overlay, 0, item.height)
+            root.x = Math.max(4, Math.min(point.x, Overlay.overlay.width - root.width - 4))
+            root.y = Math.max(4, Math.min(point.y, Overlay.overlay.height - root.height - 4))
+        } else {
+            root.x = (Overlay.overlay.width - root.width) / 2
+            root.y = (Overlay.overlay.height - root.height) / 2
+        }
         root.open()
     }
 
