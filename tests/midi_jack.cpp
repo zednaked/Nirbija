@@ -130,12 +130,16 @@ int main(int argc, char* argv[]) {
 
   // The server owns the final port names — it may rename a client to keep names
   // unique — so they are looked up rather than assumed.
+  // Scoped to this client: another Nirbija running on the same machine also has
+  // ports called midi_in, and connecting the sender to that one would leave this
+  // engine silent and the failure baffling.
+  const std::string own = std::string(jack_get_client_name(engine.client())) + ":";
   const char** inputs = jack_get_ports(engine.client(), nullptr,
                                        JACK_DEFAULT_MIDI_TYPE, JackPortIsInput);
   std::string target;
   for (const char** port = inputs; port != nullptr && *port != nullptr; ++port) {
     const std::string name = *port;
-    if (name.find("midi_in") != std::string::npos) {
+    if (name.rfind(own, 0) == 0 && name.find("midi_in") != std::string::npos) {
       target = name;
       break;
     }
