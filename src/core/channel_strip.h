@@ -41,6 +41,13 @@ class ChannelStrip {
   void set_muted(bool muted) { muted_.store(muted, std::memory_order_relaxed); }
   void set_soloed(bool soloed) { soloed_.store(soloed, std::memory_order_relaxed); }
   bool soloed() const { return soloed_.load(std::memory_order_relaxed); }
+  // Where this strip sends its output: -1 is the master bus, anything else is
+  // the index of a mix bus.
+  void set_destination(int destination) {
+    destination_.store(destination, std::memory_order_relaxed);
+  }
+  int destination() const { return destination_.load(std::memory_order_relaxed); }
+
   void set_armed(bool armed) { armed_.store(armed, std::memory_order_relaxed); }
   bool armed() const { return armed_.load(std::memory_order_relaxed); }
 
@@ -76,6 +83,7 @@ class ChannelStrip {
   std::atomic<bool> muted_{false};
   std::atomic<bool> soloed_{false};
   std::atomic<bool> armed_{false};
+  std::atomic<int> destination_{-1};
   std::atomic<int> record_track_{-1};
 
   // One smoothed value per parameter so a fader move does not click.

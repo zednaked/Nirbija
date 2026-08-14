@@ -16,6 +16,10 @@ namespace nirbija {
 // `active_` and stops there.
 inline constexpr size_t kMaxChannels = 64;
 
+// Mix buses. A bus is a strip like any other, fed by whatever channels point at
+// it rather than by a port.
+inline constexpr size_t kMaxBuses = 16;
+
 class AudioGraph {
  public:
   AudioGraph();
@@ -53,6 +57,14 @@ class AudioGraph {
   // the audio thread may be inside it at this very moment.
   void remove_channel(size_t index);
 
+  // --- mix buses ----------------------------------------------------------
+  // Returns the bus index, or kMaxBuses when there is no room.
+  size_t add_bus(std::string name);
+  size_t bus_count() const { return bus_active_.load(std::memory_order_acquire); }
+  bool bus_alive(size_t index) const;
+  ChannelStrip& bus(size_t index) { return *buses_[index]; }
+  void remove_bus(size_t index);
+
   void set_master_gain(float linear) {
     master_gain_.store(linear, std::memory_order_relaxed);
   }
@@ -63,6 +75,13 @@ class AudioGraph {
   bool any_soloed(size_t count) const;
   void record_master(float* const* master, uint32_t frames);
 
+  // Sums a strip's output into wherever it is pointed, widening a mono strip on
+  // the way.
+  void mix_into(float* const* target, const ChannelStrip& strip, int width,
+                uint32_t frames);
+  float* const* destination_for(int destination, float* const* master,
+                                size_t after_bus);
+
   std::array<std::unique_ptr<ChannelStrip>, kMaxChannels> channels_;
   std::array<std::unique_ptr<AudioSource>, kMaxChannels> sources_;
   std::array<std::unique_ptr<MidiSource>, kMaxChannels> midi_sources_;
@@ -71,6 +90,15 @@ class AudioGraph {
   // skipped; the owning pointers above are what keep the object alive.
   std::array<std::atomic<ChannelStrip*>, kMaxChannels> live_{};
   std::atomic<size_t> active_{0};
+
+  std::array<std::unique_ptr<ChannelStrip>, kMaxBuses> buses_;
+  std::array<std::atomic<ChannelStrip*>, kMaxBuses> live_buses_{};
+  std::atomic<size_t> bus_active_{0};
+
+  // What the channels sum into before their bus processes them. Sized in
+  // prepare() and reused every block.
+  std::array<std::vector<std::vector<float>>, kMaxBuses> bus_buffers_;
+  std::array<std::vector<float*>, kMaxBuses> bus_ptrs_;
 
   // UI thread only. Removed strips wait here: freeing one while the audio
   // thread is inside it would be a use-after-free.

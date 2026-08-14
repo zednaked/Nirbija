@@ -147,6 +147,20 @@ int main(int argc, char* argv[]) {
   const float after = loudest_over(strip, 24);
   if (after <= 1e-4f) fail("note-on produced no audio");
 
+  // The fader has to work on a channel whose sound comes from an insert. It
+  // used to run before the inserts, so an instrument overwrote the buffer and
+  // the fader did nothing at all.
+  strip.set_gain(0.0f);
+  loudest_over(strip, 24);  // let the fader's smoothing settle
+  const float faded = loudest_over(strip, 8);
+  if (faded > after * 0.1f)
+    fail("pulling the fader down did not quieten a channel fed by an insert");
+
+  strip.set_gain(1.0f);
+  loudest_over(strip, 24);
+  const float restored = loudest_over(strip, 8);
+  if (restored <= 1e-4f) fail("bringing the fader back up produced no sound");
+
   {
     const nirbija::MidiEvent off = note(0x80, 60, 0);
     Block block;

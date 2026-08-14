@@ -153,6 +153,40 @@ int main(int argc, char* argv[]) {
     }
   }
 
+  // --- mix buses ------------------------------------------------------------
+  {
+    const int before = mixer.rowCount();
+    mixer.addBus(QStringLiteral("Drums"));
+    if (mixer.rowCount() != before + 1) {
+      fail("adding a bus did not add a row");
+    } else {
+      const int bus = mixer.rowCount() - 1;
+      if (!field(mixer, bus, nirbija::MixerModel::IsBusRole).toBool())
+        fail("the new row is not marked as a bus");
+
+      // A channel can send to the bus.
+      const QVariantList options = mixer.destinationsFor(0);
+      if (options.size() < 2) fail("the bus is not offered as a destination");
+
+      const int destination =
+          options.last().toMap().value(QStringLiteral("destination")).toInt();
+      mixer.setDestination(0, destination);
+      if (field(mixer, 0, nirbija::MixerModel::DestinationRole).toInt() != destination)
+        fail("the channel did not take the new destination");
+      if (field(mixer, 0, nirbija::MixerModel::OutputLabelRole).toString() != "Drums")
+        fail("the output label did not follow the destination");
+
+      // A bus may not feed itself, so it is never in its own list.
+      for (const QVariant& option : mixer.destinationsFor(bus)) {
+        if (option.toMap().value(QStringLiteral("destination")).toInt() ==
+            destination)
+          fail("a bus was offered itself as a destination");
+      }
+
+      mixer.setDestination(0, -1);
+    }
+  }
+
   // --- routing --------------------------------------------------------------
   // The master should already be connected: a mixer that opens silent is not
   // finished opening.

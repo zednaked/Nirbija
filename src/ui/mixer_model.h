@@ -2,6 +2,7 @@
 
 #include <QAbstractListModel>
 #include <QStringList>
+#include <QVariantList>
 #include <QTimer>
 
 #include <memory>
@@ -49,6 +50,8 @@ class MixerModel : public QAbstractListModel {
     InsertsRole,
     WidthRole,
     AccentRole,
+    IsBusRole,
+    DestinationRole,
   };
 
   explicit MixerModel(QObject* parent = nullptr);
@@ -84,6 +87,14 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE void rewind();
 
   Q_INVOKABLE void addChannel(const QString& name, int channels);
+  Q_INVOKABLE void addBus(const QString& name);
+
+  // Where a row sends its output: -1 is the master, otherwise a bus index.
+  Q_INVOKABLE void setDestination(int row, int destination);
+
+  // Rows a given row is allowed to send to, as [{label, destination}]. A bus
+  // may only feed a bus that renders after it, or the master.
+  Q_INVOKABLE QVariantList destinationsFor(int row) const;
   Q_INVOKABLE void removeChannel(int row);
   Q_INVOKABLE void renameChannel(int row, const QString& name);
   Q_INVOKABLE void setGain(int row, qreal gain);
@@ -144,6 +155,10 @@ class MixerModel : public QAbstractListModel {
     // it where they were, so the two indices drift apart and only this mapping
     // is safe to hand the engine.
     size_t slot = 0;
+    // A bus is a strip fed by other strips rather than by a port, and lives in
+    // the graph's own bus list, so the slot means a different thing.
+    bool is_bus = false;
+    int destination = -1;
     QString name;
     int width = 2;
     qreal gain = 1.0;
@@ -159,6 +174,8 @@ class MixerModel : public QAbstractListModel {
     QString accent;
   };
 
+  ChannelStrip* stripFor(int row) const;
+  int busCount() const;
   void pollLevels();
   void refreshRouting(int row);
 

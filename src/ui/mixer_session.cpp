@@ -60,6 +60,8 @@ void MixerModel::saveSession() const {
 
     QJsonObject entry;
     entry[QStringLiteral("name")] = channel.name;
+    entry[QStringLiteral("isBus")] = channel.is_bus;
+    entry[QStringLiteral("destination")] = channel.destination;
     entry[QStringLiteral("width")] = channel.width;
     entry[QStringLiteral("gain")] = channel.gain;
     entry[QStringLiteral("pan")] = channel.pan;
@@ -67,15 +69,21 @@ void MixerModel::saveSession() const {
     entry[QStringLiteral("soloed")] = channel.soloed;
 
     // Ports are stored by name. A source that is gone when the session reopens
-    // simply stays unconnected rather than blocking the load.
-    entry[QStringLiteral("audioSource")] =
-        QString::fromStdString(engine_.current_source(channel.slot, false));
-    entry[QStringLiteral("midiSource")] =
-        QString::fromStdString(engine_.current_source(channel.slot, true));
+    // simply stays unconnected rather than blocking the load. A bus has none.
+    if (!channel.is_bus) {
+      entry[QStringLiteral("audioSource")] =
+          QString::fromStdString(engine_.current_source(channel.slot, false));
+      entry[QStringLiteral("midiSource")] =
+          QString::fromStdString(engine_.current_source(channel.slot, true));
+    }
 
     QJsonArray inserts;
-    ChannelStrip& strip =
-        const_cast<Engine&>(engine_).graph().channel(channel.slot);
+    ChannelStrip* strip_ptr = stripFor(static_cast<int>(row));
+    if (strip_ptr == nullptr) {
+      channels.append(entry);
+      continue;
+    }
+    ChannelStrip& strip = *strip_ptr;
     for (size_t slot = 0; slot < strip.insert_count(); ++slot) {
       PluginInstance* insert = strip.insert_at(slot);
       if (insert == nullptr) continue;  // a hole left by a removal
@@ -145,7 +153,16 @@ void MixerModel::loadSession() {
     const QJsonObject entry = value.toObject();
 
     const int width = entry[QStringLiteral("width")].toInt(2);
-    addChannel(entry[QStringLiteral("name")].toString(), width);
+    const bool is_bus = entry[QStringLiteral("isBus")].toBool();
+    const QString name = entry[QStringLiteral("name")].toString();
+
+    // Buses are added in the same pass, and they keep their order because a bus
+    // may only feed one that comes after it.
+    if (is_bus) {
+      addBus(name);
+    } else {
+      addChannel(name, width);
+    }
     const int row = rowCount() - 1;
     if (row < 0) break;  // the graph is full
 
@@ -154,6 +171,8 @@ void MixerModel::loadSession() {
     if (entry[QStringLiteral("muted")].toBool()) toggleMute(row);
     if (entry[QStringLiteral("soloed")].toBool()) toggleSolo(row);
 
+    // Applied after every row exists, further down, since a destination can
+    // name a bus that has not been created yet.
     const QString audio = entry[QStringLiteral("audioSource")].toString();
     if (!audio.isEmpty()) connectSource(row, audio, false);
     const QString midi = entry[QStringLiteral("midiSource")].toString();
@@ -189,6 +208,15 @@ void MixerModel::loadSession() {
       if (!insert->load_state(blob))
         qWarning("session: %s refused its own saved state", uid.c_str());
     }
+  }
+
+  // Destinations last: a channel may point at a bus that appears later in the
+  // list, and only now is every row in place.
+  int row = 0;
+  for (const QJsonValue& value : channels) {
+    const int destination = value.toObject()[QStringLiteral("destination")].toInt(-1);
+    if (destination >= 0) setDestination(row, destination);
+    ++row;
   }
 
   const double tempo = root[QStringLiteral("tempo")].toDouble(120.0);

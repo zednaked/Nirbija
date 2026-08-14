@@ -23,7 +23,11 @@ int main() {
     return 1;
   }
 
-  if (!engine.post({nirbija::EngineCommand::Kind::SetGain, 0, 0.5f})) {
+  nirbija::EngineCommand fader;
+  fader.kind = nirbija::EngineCommand::Kind::SetGain;
+  fader.channel = 0;
+  fader.value = 0.5f;
+  if (!engine.post(fader)) {
     std::fprintf(stderr, "command queue full\n");
     return 1;
   }

@@ -349,8 +349,15 @@ void Engine::drain_commands() {
       transport_changed_ = true;
       continue;
     }
-    if (command.channel >= graph_->channel_count()) continue;
-    ChannelStrip& strip = graph_->channel(command.channel);
+    if (command.bus) {
+      if (command.channel >= graph_->bus_count()) continue;
+      if (!graph_->bus_alive(command.channel)) continue;
+    } else {
+      if (command.channel >= graph_->channel_count()) continue;
+      if (!graph_->channel_alive(command.channel)) continue;
+    }
+    ChannelStrip& strip = command.bus ? graph_->bus(command.channel)
+                                      : graph_->channel(command.channel);
     switch (command.kind) {
       case EngineCommand::Kind::SetGain: strip.set_gain(command.value); break;
       case EngineCommand::Kind::SetPan: strip.set_pan(command.value); break;

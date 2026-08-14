@@ -60,6 +60,7 @@ ApplicationWindow {
                     outputLabel: model.outputLabel
                     inserts: model.inserts
                     accent: model.accent
+                    isBus: model.isBus
 
                     onInputSlotClicked: portPicker.openFor("audio", index)
                     onMidiSlotClicked: portPicker.openFor("midi", index)
@@ -98,6 +99,21 @@ ApplicationWindow {
                         { label: qsTr("Remove"), danger: true,
                           action: () => mixer.removeInsert(index, slot) }
                     ], model.inserts[slot])
+
+                    onOutputSlotClicked: {
+                        const options = mixer.destinationsFor(index)
+                        const entries = []
+                        for (let i = 0; i < options.length; ++i) {
+                            const option = options[i]
+                            entries.push({
+                                label: option.label,
+                                enabled: option.destination !== model.destination,
+                                action: () => mixer.setDestination(index,
+                                                                   option.destination)
+                            })
+                        }
+                        slotMenu.openAt(this, entries, qsTr("Send to"))
+                    }
 
                     onTitleClicked: slotMenu.openAt(this, [
                         { label: qsTr("Rename…"),
@@ -143,7 +159,29 @@ ApplicationWindow {
                     id: addArea
                     anchors.fill: parent
                     hoverEnabled: true
-                    onClicked: mixer.addChannel("", 2)
+                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                    onClicked: mouse => {
+                        if (mouse.button === Qt.LeftButton) {
+                            mixer.addChannel("", 2)
+                            return
+                        }
+                        slotMenu.openAt(parent, [
+                            { label: qsTr("Stereo channel"),
+                              action: () => mixer.addChannel("", 2) },
+                            { label: qsTr("Mono channel"),
+                              action: () => mixer.addChannel("", 1) },
+                            { label: qsTr("Mix bus"),
+                              action: () => mixer.addBus("") }
+                        ], qsTr("Add"))
+                    }
+                    onPressAndHold: slotMenu.openAt(parent, [
+                        { label: qsTr("Stereo channel"),
+                          action: () => mixer.addChannel("", 2) },
+                        { label: qsTr("Mono channel"),
+                          action: () => mixer.addChannel("", 1) },
+                        { label: qsTr("Mix bus"),
+                          action: () => mixer.addBus("") }
+                    ], qsTr("Add"))
                 }
             }
         }

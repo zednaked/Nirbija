@@ -79,6 +79,8 @@ QVariant MixerModel::data(const QModelIndex& index, int role) const {
     case InsertsRole: return channel.inserts;
     case WidthRole: return channel.width;
     case AccentRole: return channel.accent;
+    case IsBusRole: return channel.is_bus;
+    case DestinationRole: return channel.destination;
     default: return {};
   }
 }
@@ -92,7 +94,8 @@ QHash<int, QByteArray> MixerModel::roleNames() const {
       {InputLabelRole, "inputLabel"}, {OutputLabelRole, "outputLabel"},
       {MidiLabelRole, "midiLabel"},
       {InsertsRole, "inserts"},     {WidthRole, "channelWidth"},
-      {AccentRole, "accent"},
+      {AccentRole, "accent"},   {IsBusRole, "isBus"},
+      {DestinationRole, "destination"},
   };
 }
 
@@ -144,10 +147,97 @@ void MixerModel::renameChannel(int row, const QString& name) {
   markDirty();
 }
 
+// A row is either a channel or a bus, and they live in different lists in the
+// graph. Everything that acts on a strip goes through here.
+ChannelStrip* MixerModel::stripFor(int row) const {
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return nullptr;
+  const ChannelUi& channel = channels_[row];
+  AudioGraph& graph = const_cast<Engine&>(engine_).graph();
+
+  if (channel.is_bus) {
+    if (!graph.bus_alive(channel.slot)) return nullptr;
+    return &graph.bus(channel.slot);
+  }
+  if (!graph.channel_alive(channel.slot)) return nullptr;
+  return &graph.channel(channel.slot);
+}
+
+void MixerModel::addBus(const QString& name) {
+  const QString label =
+      name.isEmpty() ? tr("Bus %1").arg(busCount() + 1) : name;
+  const size_t index = engine_.add_bus(label.toStdString());
+  if (index == kMaxBuses) return;
+
+  beginInsertRows({}, static_cast<int>(channels_.size()),
+                  static_cast<int>(channels_.size()));
+  ChannelUi bus;
+  bus.slot = index;
+  bus.is_bus = true;
+  bus.name = label;
+  bus.width = 2;
+  bus.input_label = tr("bus input");
+  bus.midi_label = tr("no MIDI");
+  bus.output_label = tr("Master");
+  bus.accent = kAccents[(static_cast<int>(index) + 3) % kAccents.size()];
+  channels_.push_back(std::move(bus));
+  endInsertRows();
+  markDirty();
+}
+
+int MixerModel::busCount() const {
+  int count = 0;
+  for (const ChannelUi& channel : channels_)
+    if (channel.is_bus) ++count;
+  return count;
+}
+
+QVariantList MixerModel::destinationsFor(int row) const {
+  QVariantList out;
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return out;
+
+  QVariantMap master;
+  master[QStringLiteral("label")] = tr("Master");
+  master[QStringLiteral("destination")] = -1;
+  out.append(master);
+
+  const ChannelUi& source = channels_[row];
+  for (const ChannelUi& candidate : channels_) {
+    if (!candidate.is_bus) continue;
+    // A bus may only feed a bus that renders after it. Anything else would be
+    // a loop, and a loop in a mixer is a scream.
+    if (source.is_bus && candidate.slot <= source.slot) continue;
+
+    QVariantMap entry;
+    entry[QStringLiteral("label")] = candidate.name;
+    entry[QStringLiteral("destination")] = static_cast<int>(candidate.slot);
+    out.append(entry);
+  }
+  return out;
+}
+
+void MixerModel::setDestination(int row, int destination) {
+  ChannelStrip* strip = stripFor(row);
+  if (strip == nullptr) return;
+
+  strip->set_destination(destination);
+  channels_[row].destination = destination;
+
+  QString label = tr("Master");
+  for (const ChannelUi& candidate : channels_)
+    if (candidate.is_bus && static_cast<int>(candidate.slot) == destination)
+      label = candidate.name;
+  channels_[row].output_label = label;
+
+  const QModelIndex idx = index(row);
+  emit dataChanged(idx, idx, {DestinationRole, OutputLabelRole});
+  markDirty();
+}
+
 void MixerModel::post(EngineCommand::Kind kind, int row, float value) {
   EngineCommand command;
   command.kind = kind;
   command.channel = channels_[row].slot;
+  command.bus = channels_[row].is_bus;
   command.value = value;
   engine_.post(command);
 }
@@ -195,7 +285,7 @@ void MixerModel::toggleArm(int row) {
   // Arming mid-take does nothing until the next one: tracks are decided when
   // recording starts, and adding a file part way through would leave a take
   // whose files no longer line up.
-  engine_.graph().channel(channels_[row].slot).set_armed(channels_[row].armed);
+  if (ChannelStrip* strip = stripFor(row)) strip->set_armed(channels_[row].armed);
   const QModelIndex idx = index(row);
   emit dataChanged(idx, idx, {ArmedRole});
 }
@@ -282,8 +372,8 @@ bool MixerModel::addInsert(int row, int pluginIndex) {
   // publishes the insert to the audio thread once it is ready to run.
   std::unique_ptr<PluginInstance> instance = plugins_->instantiate(pluginIndex);
   if (instance == nullptr) return false;
-  if (!engine_.graph().channel(channels_[row].slot).add_insert(std::move(instance)))
-    return false;
+  ChannelStrip* strip = stripFor(row);
+  if (strip == nullptr || !strip->add_insert(std::move(instance))) return false;
 
   channels_[row].inserts.append(QString::fromStdString(descriptor->name));
   const QModelIndex idx = index(row);
@@ -296,7 +386,9 @@ void MixerModel::removeInsert(int row, int slot) {
   if (row < 0 || row >= static_cast<int>(channels_.size())) return;
   if (slot < 0 || slot >= channels_[row].inserts.size()) return;
 
-  engine_.graph().channel(channels_[row].slot).remove_insert(static_cast<size_t>(slot));
+  ChannelStrip* strip = stripFor(row);
+  if (strip == nullptr) return;
+  strip->remove_insert(static_cast<size_t>(slot));
   // The engine leaves a hole so the surviving indices stay put; the label list
   // has to keep the same shape or the two would drift apart.
   channels_[row].inserts[slot].clear();
@@ -313,8 +405,9 @@ void MixerModel::moveInsert(int row, int slot, int direction) {
   if (slot < 0 || slot >= labels.size()) return;
   if (target < 0 || target >= labels.size()) return;
 
-  engine_.graph().channel(channels_[row].slot).swap_inserts(
-      static_cast<size_t>(slot), static_cast<size_t>(target));
+  ChannelStrip* strip = stripFor(row);
+  if (strip == nullptr) return;
+  strip->swap_inserts(static_cast<size_t>(slot), static_cast<size_t>(target));
   labels.swapItemsAt(slot, target);
 
   const QModelIndex idx = index(row);
@@ -325,8 +418,9 @@ void MixerModel::moveInsert(int row, int slot, int direction) {
 bool MixerModel::openInsertEditor(int row, int slot) {
   if (row < 0 || row >= static_cast<int>(channels_.size())) return false;
 
-  PluginInstance* insert = engine_.graph().channel(channels_[row].slot).insert_at(
-      static_cast<size_t>(slot));
+  ChannelStrip* strip = stripFor(row);
+  if (strip == nullptr) return false;
+  PluginInstance* insert = strip->insert_at(static_cast<size_t>(slot));
   if (insert == nullptr) return false;
 
   std::unique_ptr<PluginGui> gui = insert->create_gui();
@@ -393,6 +487,7 @@ QString MixerModel::shortPortName(const QString& port) {
 void MixerModel::refreshRouting(int row) {
   if (row < 0 || row >= static_cast<int>(channels_.size())) return;
   ChannelUi& channel = channels_[row];
+  if (channel.is_bus) return;  // fed by strips, not by ports
 
   const QString audio = shortPortName(
       QString::fromStdString(engine_.current_source(channel.slot, false)));
@@ -411,14 +506,13 @@ void MixerModel::refreshRouting(int row) {
 void MixerModel::pollLevels() {
   if (!engine_.running()) return;
 
-  AudioGraph& graph = engine_.graph();
   for (size_t row = 0; row < channels_.size(); ++row) {
     ChannelUi& channel = channels_[row];
-    if (!graph.channel_alive(channel.slot)) continue;
+    ChannelStrip* strip = stripFor(static_cast<int>(row));
+    if (strip == nullptr) continue;
 
-    ChannelStrip& strip = graph.channel(channel.slot);
     for (int ch = 0; ch < channel.width; ++ch)
-      channel.peak[ch] = strip.read_peak(ch);
+      channel.peak[ch] = strip->read_peak(ch);
     if (channel.width == 1) channel.peak[1] = channel.peak[0];
   }
   if (!channels_.empty()) {
@@ -426,8 +520,8 @@ void MixerModel::pollLevels() {
                      {PeakLeftRole, PeakRightRole});
   }
 
-  master_peak_[0] = graph.read_master_peak(0);
-  master_peak_[1] = graph.read_master_peak(1);
+  master_peak_[0] = engine_.graph().read_master_peak(0);
+  master_peak_[1] = engine_.graph().read_master_peak(1);
   emit levelsChanged();
 }
 

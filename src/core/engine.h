@@ -28,6 +28,8 @@ struct EngineCommand {
     Rewind,
   } kind = Kind::None;
   size_t channel = 0;
+  // Buses live in their own list in the graph, so the index alone is ambiguous.
+  bool bus = false;
   float value = 0.0f;
 };
 
@@ -97,6 +99,9 @@ class Engine {
   // stay registered: a render pass already inside the channel would still be
   // reading them, and an unused port is cheaper than that risk.
   void remove_channel(size_t channel);
+
+  // A bus needs no ports: it is fed by the channels that point at it.
+  size_t add_bus(const std::string& name) { return graph_->add_bus(name); }
 
   // UI thread. Returns false if the queue is full, meaning the audio thread has
   // stalled — the caller should surface that, not silently retry.

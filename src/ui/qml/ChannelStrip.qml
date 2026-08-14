@@ -18,6 +18,7 @@ Rectangle {
     property string midiLabel: ""
     property string outputLabel: ""
     property var inserts: []
+    property bool isBus: false
     property color accent: Skin.accent
 
     signal insertSlotClicked(int slot)
@@ -27,6 +28,7 @@ Rectangle {
     signal midiSlotClicked
     signal inputMenuRequested
     signal midiMenuRequested
+    signal outputSlotClicked
 
     width: Skin.stripWidth
     color: Skin.strip
@@ -49,7 +51,11 @@ Rectangle {
         anchors.topMargin: Skin.gap + 3
         spacing: Skin.gap
 
+        // A bus is fed by the strips pointed at it, so it has nothing to pick
+        // an input from.
         NodeSlot {
+            visible: !root.isBus
+            height: visible ? Skin.slotHeight : 0
             width: parent.width
             label: root.inputLabel
             filled: root.inputLabel !== qsTr("no input")
@@ -61,6 +67,8 @@ Rectangle {
         // MIDI gets its own node slot rather than hiding in a menu: on this
         // mixer any channel can host a synth, so any channel can want MIDI.
         NodeSlot {
+            visible: !root.isBus
+            height: visible ? Skin.slotHeight : 0
             width: parent.width
             label: root.midiLabel
             filled: root.midiLabel !== qsTr("no MIDI")
@@ -161,6 +169,8 @@ Rectangle {
             width: parent.width
             label: root.outputLabel
             level: Math.max(root.peakLeft, root.peakRight)
+            onClicked: root.outputSlotClicked()
+            onMenuRequested: root.outputSlotClicked()
         }
 
         // The channel title is where AUM keeps renaming and removal, so it is

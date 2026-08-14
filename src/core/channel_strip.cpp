@@ -56,29 +56,11 @@ void ChannelStrip::process(float* const* buffers, uint32_t frames,
     return;
   }
 
-  const float target_gain = gain_.load(std::memory_order_relaxed);
-  const float target_pan = pan_.load(std::memory_order_relaxed);
-  const bool stereo = channel_count_ == 2;
-
-  for (uint32_t i = 0; i < frames; ++i) {
-    smoothed_gain_ += (1.0f - smoothing_coeff_) * (target_gain - smoothed_gain_);
-    smoothed_pan_ += (1.0f - smoothing_coeff_) * (target_pan - smoothed_pan_);
-
-    // On a stereo strip pan is a balance: unity at centre, attenuating the side
-    // you turn away from. A mono strip is panned by the graph as it widens,
-    // where constant-power is the right law.
-    const float left = stereo ? std::min(1.0f, 1.0f - smoothed_pan_) : 1.0f;
-    const float right = stereo ? std::min(1.0f, 1.0f + smoothed_pan_) : 1.0f;
-
-    for (int ch = 0; ch < channel_count_; ++ch) {
-      const float pan_gain = (ch == 0) ? left : right;
-      buffers[ch][i] *= smoothed_gain_ * pan_gain;
-    }
-  }
-
-  // Inserts run after the fader, which is AUM's default and what the strip
-  // layout shows: the slots sit below the fader, on the way to the output.
-  // TODO: per-slot pre/post, toggled by long-pressing the slot.
+  // Inserts run first, then the fader. An insert can be an instrument, and an
+  // instrument overwrites the buffer rather than adding to it — with the fader
+  // ahead of it, the fader would be applied to silence and then thrown away,
+  // which is exactly what a dead volume control looks like.
+  // TODO: per-slot pre/post, so an effect can be placed after the fader.
   for (int ch = 0; ch < channel_count_; ++ch) plugin_io_[ch] = buffers[ch];
   const size_t insert_count = insert_count_.load(std::memory_order_acquire);
   for (size_t i = 0; i < insert_count; ++i) {
@@ -99,6 +81,26 @@ void ChannelStrip::process(float* const* buffers, uint32_t frames,
       midi_chain_count_ += insert->take_midi_output(
           midi_chain_.data() + midi_chain_count_,
           midi_chain_.size() - midi_chain_count_);
+    }
+  }
+
+  const float target_gain = gain_.load(std::memory_order_relaxed);
+  const float target_pan = pan_.load(std::memory_order_relaxed);
+  const bool stereo = channel_count_ == 2;
+
+  for (uint32_t i = 0; i < frames; ++i) {
+    smoothed_gain_ += (1.0f - smoothing_coeff_) * (target_gain - smoothed_gain_);
+    smoothed_pan_ += (1.0f - smoothing_coeff_) * (target_pan - smoothed_pan_);
+
+    // On a stereo strip pan is a balance: unity at centre, attenuating the side
+    // you turn away from. A mono strip is panned by the graph as it widens,
+    // where constant-power is the right law.
+    const float left = stereo ? std::min(1.0f, 1.0f - smoothed_pan_) : 1.0f;
+    const float right = stereo ? std::min(1.0f, 1.0f + smoothed_pan_) : 1.0f;
+
+    for (int ch = 0; ch < channel_count_; ++ch) {
+      const float pan_gain = (ch == 0) ? left : right;
+      buffers[ch][i] *= smoothed_gain_ * pan_gain;
     }
   }
 
