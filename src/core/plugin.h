@@ -36,6 +36,10 @@ class PluginInstance {
  public:
   virtual ~PluginInstance() = default;
 
+  // How many channels the host will hand to process(). Backends adapt their own
+  // port count to this; call it before activate().
+  virtual void set_channel_layout(int channels) = 0;
+
   virtual bool activate(double sample_rate, uint32_t max_block_frames) = 0;
   virtual void deactivate() = 0;
 

@@ -27,7 +27,10 @@ void ChannelStrip::prepare(double sample_rate, uint32_t max_block_frames) {
   smoothed_pan_ = pan_.load(std::memory_order_relaxed);
 
   plugin_io_.assign(static_cast<size_t>(channel_count_), nullptr);
-  for (auto& insert : inserts_) insert->activate(sample_rate, max_block_frames);
+  for (auto& insert : inserts_) {
+    insert->set_channel_layout(channel_count_);
+    insert->activate(sample_rate, max_block_frames);
+  }
 }
 
 void ChannelStrip::process(float* const* buffers, uint32_t frames) {
@@ -75,6 +78,7 @@ float ChannelStrip::read_peak(int channel) {
 }
 
 void ChannelStrip::add_insert(std::unique_ptr<PluginInstance> plugin) {
+  plugin->set_channel_layout(channel_count_);
   if (sample_rate_ > 0.0) plugin->activate(sample_rate_, max_block_frames_);
   inserts_.push_back(std::move(plugin));
 }

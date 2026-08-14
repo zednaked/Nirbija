@@ -1,23 +1,441 @@
 #include "hosting/lv2_backend.h"
 
 #include <lilv/lilv.h>
+#include <lv2/atom/atom.h>
+#include <lv2/buf-size/buf-size.h>
+#include <lv2/core/lv2.h>
+#include <lv2/options/options.h>
+#include <lv2/urid/urid.h>
+#include <lv2/worker/worker.h>
+
+#include <algorithm>
+#include <array>
+#include <cstring>
+#include <map>
+#include <mutex>
+#include <atomic>
+#include <semaphore>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "core/rt_queue.h"
 
 namespace nirbija {
 namespace {
+
+// urid:map, shared by every LV2 instance in the process. Plugins call map on
+// the UI thread during instantiation; the mutex never reaches the audio thread.
+class UridMap {
+ public:
+  UridMap() {
+    map_.handle = this;
+    map_.map = &UridMap::map_uri;
+    unmap_.handle = this;
+    unmap_.unmap = &UridMap::unmap_urid;
+  }
+
+  LV2_URID_Map* map_feature() { return &map_; }
+  LV2_URID_Unmap* unmap_feature() { return &unmap_; }
+
+  LV2_URID map_string(const char* uri) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = to_urid_.find(uri);
+    if (it != to_urid_.end()) return it->second;
+    const LV2_URID id = static_cast<LV2_URID>(to_uri_.size()) + 1;
+    to_urid_.emplace(uri, id);
+    to_uri_.emplace_back(uri);
+    return id;
+  }
+
+ private:
+  static LV2_URID map_uri(LV2_URID_Map_Handle handle, const char* uri) {
+    return static_cast<UridMap*>(handle)->map_string(uri);
+  }
+  static const char* unmap_urid(LV2_URID_Unmap_Handle handle, LV2_URID urid) {
+    auto* self = static_cast<UridMap*>(handle);
+    std::lock_guard<std::mutex> lock(self->mutex_);
+    if (urid == 0 || urid > self->to_uri_.size()) return nullptr;
+    return self->to_uri_[urid - 1].c_str();
+  }
+
+  std::mutex mutex_;
+  std::map<std::string, LV2_URID> to_urid_;
+  std::vector<std::string> to_uri_;
+  LV2_URID_Map map_{};
+  LV2_URID_Unmap unmap_{};
+};
+
+// A worker request or response in flight. Fixed size so neither the audio
+// thread nor the worker thread ever allocates to pass one along; plugins that
+// need more than this are refused rather than silently truncated.
+constexpr size_t kWorkPayloadBytes = 2048;
+
+struct WorkMessage {
+  uint32_t size = 0;
+  std::array<uint8_t, kWorkPayloadBytes> data{};
+};
+
+enum class PortKind { Ignored, AudioIn, AudioOut, ControlIn, ControlOut, AtomIn, AtomOut };
+
+struct PortInfo {
+  uint32_t index = 0;
+  PortKind kind = PortKind::Ignored;
+  std::string name;
+  float min_value = 0.0f;
+  float max_value = 1.0f;
+  float default_value = 0.0f;
+};
+
+// Cached lilv URIs, built once per world.
+struct PortClasses {
+  explicit PortClasses(LilvWorld* world)
+      : audio(lilv_new_uri(world, LV2_CORE__AudioPort)),
+        control(lilv_new_uri(world, LV2_CORE__ControlPort)),
+        cv(lilv_new_uri(world, LV2_CORE__CVPort)),
+        atom(lilv_new_uri(world, LV2_ATOM__AtomPort)),
+        input(lilv_new_uri(world, LV2_CORE__InputPort)),
+        output(lilv_new_uri(world, LV2_CORE__OutputPort)) {}
+
+  ~PortClasses() {
+    for (LilvNode* node : {audio, control, cv, atom, input, output})
+      lilv_node_free(node);
+  }
+
+  LilvNode* audio;
+  LilvNode* control;
+  LilvNode* cv;
+  LilvNode* atom;
+  LilvNode* input;
+  LilvNode* output;
+};
+
+class Lv2Instance : public PluginInstance {
+ public:
+  Lv2Instance(PluginDescriptor desc, const LilvPlugin* plugin, UridMap& urids,
+              const PortClasses& classes)
+      : desc_(std::move(desc)), plugin_(plugin), urids_(urids) {
+    scan_ports(classes);
+  }
+
+  ~Lv2Instance() override { deactivate(); }
+
+  bool activate(double sample_rate, uint32_t max_block_frames) override {
+    if (instance_ != nullptr) deactivate();
+    max_block_frames_ = max_block_frames;
+
+    // Features are handed to the plugin by pointer and must outlive it, so they
+    // live in members rather than locals.
+    build_features(max_block_frames);
+
+    instance_ = lilv_plugin_instantiate(plugin_, sample_rate, features_.data());
+    if (instance_ == nullptr) return false;
+
+    // Audio buffers are per-port and owned here, so a plugin with more ports
+    // than the strip is wide still gets a valid buffer for every one.
+    audio_buffers_.assign(audio_in_.size() + audio_out_.size(),
+                          std::vector<float>(max_block_frames, 0.0f));
+    // Atom ports get a small buffer each: inputs an empty sequence, outputs
+    // scratch the plugin may fill and we discard until MIDI lands.
+    atom_buffers_.assign(atom_in_.size() + atom_out_.size(),
+                         std::vector<uint8_t>(kAtomBufferBytes, 0));
+
+    connect_all();
+
+    worker_iface_ = static_cast<const LV2_Worker_Interface*>(
+        lilv_instance_get_extension_data(instance_, LV2_WORKER__interface));
+    if (worker_iface_ != nullptr) start_worker();
+
+    lilv_instance_activate(instance_);
+    return true;
+  }
+
+  void deactivate() override {
+    if (instance_ == nullptr) return;
+    lilv_instance_deactivate(instance_);
+    stop_worker();
+    worker_iface_ = nullptr;
+    lilv_instance_free(instance_);
+    instance_ = nullptr;
+  }
+
+  void process(const float* const* inputs, float* const* outputs,
+               uint32_t frames) override {
+    if (instance_ == nullptr) return;
+
+    // The strip is narrower than the plugin as often as not. Extra plugin inputs
+    // get a copy of the last channel we have rather than silence, which is what
+    // a mono source into a stereo effect should sound like.
+    const int strip_channels = strip_channels_;
+    for (size_t i = 0; i < audio_in_.size(); ++i) {
+      const int source = std::min(static_cast<int>(i), strip_channels - 1);
+      std::copy_n(inputs[source], frames, audio_buffers_[i].data());
+    }
+
+    reset_atom_inputs();
+    lilv_instance_run(instance_, frames);
+    deliver_worker_responses();
+
+    const size_t out_base = audio_in_.size();
+    for (int ch = 0; ch < strip_channels; ++ch) {
+      if (audio_out_.empty()) break;
+      const size_t source =
+          out_base + std::min(static_cast<size_t>(ch), audio_out_.size() - 1);
+      std::copy_n(audio_buffers_[source].data(), frames, outputs[ch]);
+    }
+  }
+
+  void set_channel_layout(int channels) override { strip_channels_ = channels; }
+
+  std::vector<ParameterInfo> parameters() const override {
+    std::vector<ParameterInfo> out;
+    out.reserve(control_in_.size());
+    for (size_t i = 0; i < control_in_.size(); ++i) {
+      const PortInfo& port = control_in_[i];
+      out.push_back({static_cast<uint32_t>(i), port.name, port.min_value,
+                     port.max_value, port.default_value});
+    }
+    return out;
+  }
+
+  double parameter_value(uint32_t id) const override {
+    if (id >= control_values_.size()) return 0.0;
+    return control_values_[id];
+  }
+
+  void set_parameter(uint32_t id, double value) override {
+    if (id >= control_values_.size()) return;
+    const PortInfo& port = control_in_[id];
+    control_values_[id] = std::clamp(static_cast<float>(value), port.min_value,
+                                     port.max_value);
+  }
+
+  // TODO(phase-9): real LV2 state via lilv_state_new_from_instance, which also
+  // captures anything the plugin keeps outside its control ports. Control
+  // values cover every plugin that has no state extension, which is most
+  // effects.
+  std::vector<uint8_t> save_state() const override {
+    std::vector<uint8_t> blob(control_values_.size() * sizeof(float));
+    std::memcpy(blob.data(), control_values_.data(), blob.size());
+    return blob;
+  }
+
+  bool load_state(const std::vector<uint8_t>& blob) override {
+    if (blob.size() != control_values_.size() * sizeof(float)) return false;
+    std::memcpy(control_values_.data(), blob.data(), blob.size());
+    return true;
+  }
+
+  const PluginDescriptor& descriptor() const override { return desc_; }
+
+ private:
+  static constexpr size_t kAtomBufferBytes = 4096;
+
+  void scan_ports(const PortClasses& classes) {
+    const uint32_t count = lilv_plugin_get_num_ports(plugin_);
+    std::vector<float> mins(count), maxes(count), defaults(count);
+    lilv_plugin_get_port_ranges_float(plugin_, mins.data(), maxes.data(),
+                                      defaults.data());
+
+    for (uint32_t i = 0; i < count; ++i) {
+      const LilvPort* port = lilv_plugin_get_port_by_index(plugin_, i);
+      const bool is_input = lilv_port_is_a(plugin_, port, classes.input);
+
+      PortInfo info;
+      info.index = i;
+      info.min_value = mins[i];
+      info.max_value = maxes[i];
+      info.default_value = defaults[i];
+      if (LilvNode* name = lilv_port_get_name(plugin_, port)) {
+        info.name = lilv_node_as_string(name);
+        lilv_node_free(name);
+      }
+
+      if (lilv_port_is_a(plugin_, port, classes.audio)) {
+        (is_input ? audio_in_ : audio_out_).push_back(info);
+      } else if (lilv_port_is_a(plugin_, port, classes.control)) {
+        if (is_input) {
+          control_in_.push_back(info);
+          control_values_.push_back(defaults[i]);
+        } else {
+          control_out_.push_back(info);
+        }
+      } else if (lilv_port_is_a(plugin_, port, classes.atom)) {
+        (is_input ? atom_in_ : atom_out_).push_back(info);
+      } else if (lilv_port_is_a(plugin_, port, classes.cv)) {
+        // CV is not routed yet; the port still needs a buffer so the plugin does
+        // not write through a null pointer.
+        (is_input ? audio_in_ : audio_out_).push_back(info);
+      }
+    }
+    control_outputs_scratch_.assign(control_out_.size(), 0.0f);
+  }
+
+  // --- worker -------------------------------------------------------------
+  // Plugins that load impulse responses or resize buffers do it here instead of
+  // on the audio thread. Requests cross by value through a lock-free queue.
+
+  static LV2_Worker_Status schedule_work(LV2_Worker_Schedule_Handle handle,
+                                         uint32_t size, const void* data) {
+    auto* self = static_cast<Lv2Instance*>(handle);
+    if (size > kWorkPayloadBytes) return LV2_WORKER_ERR_NO_SPACE;
+    WorkMessage message;
+    message.size = size;
+    std::memcpy(message.data.data(), data, size);
+    if (!self->work_requests_.push(message)) return LV2_WORKER_ERR_NO_SPACE;
+    self->work_signal_.release();
+    return LV2_WORKER_SUCCESS;
+  }
+
+  static LV2_Worker_Status respond(LV2_Worker_Respond_Handle handle, uint32_t size,
+                                   const void* data) {
+    auto* self = static_cast<Lv2Instance*>(handle);
+    if (size > kWorkPayloadBytes) return LV2_WORKER_ERR_NO_SPACE;
+    WorkMessage message;
+    message.size = size;
+    std::memcpy(message.data.data(), data, size);
+    return self->work_responses_.push(message) ? LV2_WORKER_SUCCESS
+                                               : LV2_WORKER_ERR_NO_SPACE;
+  }
+
+  void start_worker() {
+    worker_running_ = true;
+    worker_thread_ = std::thread([this] {
+      while (true) {
+        work_signal_.acquire();
+        if (!worker_running_) return;
+        WorkMessage message;
+        while (work_requests_.pop(message)) {
+          worker_iface_->work(lilv_instance_get_handle(instance_), &Lv2Instance::respond,
+                              this, message.size, message.data.data());
+        }
+      }
+    });
+  }
+
+  void stop_worker() {
+    if (!worker_thread_.joinable()) return;
+    worker_running_ = false;
+    work_signal_.release();
+    worker_thread_.join();
+  }
+
+  void deliver_worker_responses() {
+    if (worker_iface_ == nullptr) return;
+    WorkMessage message;
+    while (work_responses_.pop(message)) {
+      worker_iface_->work_response(lilv_instance_get_handle(instance_), message.size,
+                                   message.data.data());
+    }
+    if (worker_iface_->end_run != nullptr)
+      worker_iface_->end_run(lilv_instance_get_handle(instance_));
+  }
+
+  void build_features(uint32_t max_block_frames) {
+    map_feature_ = {LV2_URID__map, urids_.map_feature()};
+    unmap_feature_ = {LV2_URID__unmap, urids_.unmap_feature()};
+
+    const LV2_URID int_urid = urids_.map_string(LV2_ATOM__Int);
+    block_length_ = static_cast<int32_t>(max_block_frames);
+    options_ = {
+        {LV2_OPTIONS_INSTANCE, 0, urids_.map_string(LV2_BUF_SIZE__maxBlockLength),
+         sizeof(int32_t), int_urid, &block_length_},
+        {LV2_OPTIONS_INSTANCE, 0, urids_.map_string(LV2_BUF_SIZE__minBlockLength),
+         sizeof(int32_t), int_urid, &block_length_},
+        {LV2_OPTIONS_INSTANCE, 0, 0, 0, 0, nullptr},
+    };
+    options_feature_ = {LV2_OPTIONS__options, options_.data()};
+    bounded_feature_ = {LV2_BUF_SIZE__boundedBlockLength, nullptr};
+
+    schedule_ = {this, &Lv2Instance::schedule_work};
+    worker_feature_ = {LV2_WORKER__schedule, &schedule_};
+
+    features_ = {&map_feature_,  &unmap_feature_,  &options_feature_,
+                 &bounded_feature_, &worker_feature_, nullptr};
+  }
+
+  void connect_all() {
+    for (size_t i = 0; i < audio_in_.size(); ++i)
+      lilv_instance_connect_port(instance_, audio_in_[i].index,
+                                 audio_buffers_[i].data());
+    for (size_t i = 0; i < audio_out_.size(); ++i)
+      lilv_instance_connect_port(instance_, audio_out_[i].index,
+                                 audio_buffers_[audio_in_.size() + i].data());
+
+    for (size_t i = 0; i < control_in_.size(); ++i)
+      lilv_instance_connect_port(instance_, control_in_[i].index,
+                                 &control_values_[i]);
+    for (size_t i = 0; i < control_out_.size(); ++i)
+      lilv_instance_connect_port(instance_, control_out_[i].index,
+                                 &control_outputs_scratch_[i]);
+
+    for (size_t i = 0; i < atom_in_.size(); ++i)
+      lilv_instance_connect_port(instance_, atom_in_[i].index,
+                                 atom_buffers_[i].data());
+    for (size_t i = 0; i < atom_out_.size(); ++i)
+      lilv_instance_connect_port(instance_, atom_out_[i].index,
+                                 atom_buffers_[atom_in_.size() + i].data());
+  }
+
+  // An atom input port must present a valid, empty sequence every block, or the
+  // plugin reads whatever the last block left behind.
+  void reset_atom_inputs() {
+    const LV2_URID sequence_urid = sequence_urid_;
+    for (size_t i = 0; i < atom_in_.size(); ++i) {
+      auto* sequence = reinterpret_cast<LV2_Atom_Sequence*>(atom_buffers_[i].data());
+      sequence->atom.size = sizeof(LV2_Atom_Sequence_Body);
+      sequence->atom.type = sequence_urid;
+      sequence->body.unit = 0;
+      sequence->body.pad = 0;
+    }
+    for (size_t i = 0; i < atom_out_.size(); ++i) {
+      auto* sequence =
+          reinterpret_cast<LV2_Atom_Sequence*>(atom_buffers_[atom_in_.size() + i].data());
+      sequence->atom.size = kAtomBufferBytes - sizeof(LV2_Atom);
+      sequence->atom.type = sequence_urid;
+    }
+  }
+
+  PluginDescriptor desc_;
+  const LilvPlugin* plugin_;
+  UridMap& urids_;
+  LilvInstance* instance_ = nullptr;
+
+  int strip_channels_ = 2;
+  uint32_t max_block_frames_ = 0;
+
+  std::vector<PortInfo> audio_in_, audio_out_, control_in_, control_out_;
+  std::vector<PortInfo> atom_in_, atom_out_;
+  std::vector<float> control_values_;
+  std::vector<float> control_outputs_scratch_;
+  std::vector<std::vector<float>> audio_buffers_;
+  std::vector<std::vector<uint8_t>> atom_buffers_;
+
+  LV2_URID sequence_urid_ = urids_.map_string(LV2_ATOM__Sequence);
+  int32_t block_length_ = 0;
+  LV2_Feature map_feature_{}, unmap_feature_{}, options_feature_{}, bounded_feature_{};
+  LV2_Feature worker_feature_{};
+  LV2_Worker_Schedule schedule_{};
+  std::vector<LV2_Options_Option> options_;
+  std::vector<const LV2_Feature*> features_;
+
+  const LV2_Worker_Interface* worker_iface_ = nullptr;
+  std::thread worker_thread_;
+  std::atomic<bool> worker_running_{false};
+  std::counting_semaphore<> work_signal_{0};
+  RtQueue<WorkMessage, 32> work_requests_;
+  RtQueue<WorkMessage, 32> work_responses_;
+};
 
 class Lv2Backend : public PluginBackend {
  public:
   Lv2Backend() : world_(lilv_world_new()) {
     lilv_world_load_all(world_);
-    audio_port_ = lilv_new_uri(world_, LV2_CORE__AudioPort);
-    input_port_ = lilv_new_uri(world_, LV2_CORE__InputPort);
-    output_port_ = lilv_new_uri(world_, LV2_CORE__OutputPort);
+    classes_ = std::make_unique<PortClasses>(world_);
   }
 
   ~Lv2Backend() override {
-    lilv_node_free(audio_port_);
-    lilv_node_free(input_port_);
-    lilv_node_free(output_port_);
+    classes_.reset();
     lilv_world_free(world_);
   }
 
@@ -27,41 +445,51 @@ class Lv2Backend : public PluginBackend {
     std::vector<PluginDescriptor> found;
     const LilvPlugins* plugins = lilv_world_get_all_plugins(world_);
     LILV_FOREACH(plugins, iter, plugins) {
-      const LilvPlugin* plugin = lilv_plugins_get(plugins, iter);
-      PluginDescriptor desc;
-      desc.format = PluginFormat::Lv2;
-      desc.uid = lilv_node_as_uri(lilv_plugin_get_uri(plugin));
-
-      if (LilvNode* name = lilv_plugin_get_name(plugin)) {
-        desc.name = lilv_node_as_string(name);
-        lilv_node_free(name);
-      }
-      if (const LilvNode* author = lilv_plugin_get_author_name(plugin))
-        desc.vendor = lilv_node_as_string(author);
-      if (const LilvNode* bundle = lilv_plugin_get_bundle_uri(plugin))
-        desc.path = lilv_node_as_uri(bundle);
-
-      desc.audio_inputs = static_cast<int>(
-          lilv_plugin_get_num_ports_of_class(plugin, input_port_, audio_port_, nullptr));
-      desc.audio_outputs = static_cast<int>(
-          lilv_plugin_get_num_ports_of_class(plugin, output_port_, audio_port_, nullptr));
-
-      found.push_back(std::move(desc));
+      found.push_back(describe(lilv_plugins_get(plugins, iter)));
     }
     return found;
   }
 
-  std::unique_ptr<PluginInstance> instantiate(const PluginDescriptor&) override {
-    // TODO(phase-2): lilv_plugin_instantiate, port connection, LV2 features
-    // (urid map, worker, options), then activate.
-    return nullptr;
+  std::unique_ptr<PluginInstance> instantiate(const PluginDescriptor& desc) override {
+    LilvNode* uri = lilv_new_uri(world_, desc.uid.c_str());
+    if (uri == nullptr) return nullptr;
+    const LilvPlugin* plugin =
+        lilv_plugins_get_by_uri(lilv_world_get_all_plugins(world_), uri);
+    lilv_node_free(uri);
+    if (plugin == nullptr) return nullptr;
+
+    return std::make_unique<Lv2Instance>(describe(plugin), plugin, urids_, *classes_);
   }
 
  private:
+  PluginDescriptor describe(const LilvPlugin* plugin) {
+    PluginDescriptor desc;
+    desc.format = PluginFormat::Lv2;
+    desc.uid = lilv_node_as_uri(lilv_plugin_get_uri(plugin));
+
+    if (LilvNode* name = lilv_plugin_get_name(plugin)) {
+      desc.name = lilv_node_as_string(name);
+      lilv_node_free(name);
+    }
+    if (LilvNode* author = lilv_plugin_get_author_name(plugin)) {
+      desc.vendor = lilv_node_as_string(author);
+      lilv_node_free(author);
+    }
+    if (const LilvNode* bundle = lilv_plugin_get_bundle_uri(plugin))
+      desc.path = lilv_node_as_uri(bundle);
+
+    desc.audio_inputs = static_cast<int>(lilv_plugin_get_num_ports_of_class(
+        plugin, classes_->input, classes_->audio, nullptr));
+    desc.audio_outputs = static_cast<int>(lilv_plugin_get_num_ports_of_class(
+        plugin, classes_->output, classes_->audio, nullptr));
+    desc.has_midi_input = lilv_plugin_get_num_ports_of_class(
+                              plugin, classes_->input, classes_->atom, nullptr) > 0;
+    return desc;
+  }
+
   LilvWorld* world_;
-  LilvNode* audio_port_;
-  LilvNode* input_port_;
-  LilvNode* output_port_;
+  std::unique_ptr<PortClasses> classes_;
+  UridMap urids_;
 };
 
 }  // namespace
