@@ -33,7 +33,17 @@ void ChannelStrip::prepare(double sample_rate, uint32_t max_block_frames) {
   }
 }
 
-void ChannelStrip::process(float* const* buffers, uint32_t frames) {
+void ChannelStrip::process(float* const* buffers, uint32_t frames,
+                           const MidiEvent* midi, size_t midi_count) {
+  // MIDI reaches the inserts even while the strip is muted: a synth that misses
+  // a note-off because someone hit mute would hang that note forever.
+  const size_t insert_count_now = insert_count_.load(std::memory_order_acquire);
+  for (size_t i = 0; i < insert_count_now && midi_count > 0; ++i) {
+    PluginInstance* insert = insert_slots_[i].load(std::memory_order_acquire);
+    if (insert == nullptr) continue;
+    for (size_t e = 0; e < midi_count; ++e) insert->queue_midi(midi[e]);
+  }
+
   if (muted_.load(std::memory_order_relaxed)) {
     for (int ch = 0; ch < channel_count_; ++ch)
       std::fill_n(buffers[ch], frames, 0.0f);

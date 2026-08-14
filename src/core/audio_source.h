@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+#include "core/plugin.h"
+
 namespace nirbija {
 
 // Where a channel's audio comes from. Keeps the graph free of JACK so it can be
@@ -13,6 +15,17 @@ class AudioSource {
   // Realtime thread. Fills `dest` (one pointer per channel) with `frames`
   // samples. Must write every sample, including silence.
   virtual void read(float* const* dest, int channels, uint32_t frames) = 0;
+};
+
+// Where a channel's MIDI comes from. Split from AudioSource because a channel
+// can have one, the other, or both.
+class MidiSource {
+ public:
+  virtual ~MidiSource() = default;
+
+  // Realtime thread. Writes at most `capacity` events for this block into
+  // `out`, in time order, and returns how many.
+  virtual size_t read(MidiEvent* out, size_t capacity, uint32_t frames) = 0;
 };
 
 }  // namespace nirbija

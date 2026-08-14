@@ -24,8 +24,11 @@ class ChannelStrip {
 
   void prepare(double sample_rate, uint32_t max_block_frames);
 
-  // In-place on `buffers`, which holds channel_count() pointers.
-  void process(float* const* buffers, uint32_t frames);
+  // In-place on `buffers`, which holds channel_count() pointers. Any MIDI for
+  // this block is handed to the inserts first, so a synth sitting in the chain
+  // hears it in the same block.
+  void process(float* const* buffers, uint32_t frames,
+               const MidiEvent* midi = nullptr, size_t midi_count = 0);
 
   const std::string& name() const { return name_; }
   int channel_count() const { return channel_count_; }

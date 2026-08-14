@@ -21,6 +21,14 @@ struct PluginDescriptor {
   bool has_midi_input = false;
 };
 
+// A short MIDI message on its way to a plugin. Three bytes covers everything
+// except SysEx, which no mixer strip needs to pass along.
+struct MidiEvent {
+  uint32_t frame = 0;  // offset into the block this event lands on
+  uint8_t size = 0;
+  uint8_t data[3] = {0, 0, 0};
+};
+
 struct ParameterInfo {
   uint32_t id;
   std::string name;
@@ -67,6 +75,11 @@ class PluginInstance {
   // Buffers are non-interleaved, one pointer per channel, `frames` long.
   virtual void process(const float* const* inputs, float* const* outputs,
                        uint32_t frames) = 0;
+
+  // Realtime thread, called before process(). The event is delivered on the
+  // plugin's next process call, at the frame it carries. Plugins with no MIDI
+  // input ignore it.
+  virtual void queue_midi(const MidiEvent& event) { (void)event; }
 
   virtual std::vector<ParameterInfo> parameters() const = 0;
   virtual double parameter_value(uint32_t id) const = 0;

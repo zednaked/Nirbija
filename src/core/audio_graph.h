@@ -29,7 +29,8 @@ class AudioGraph {
   // to the audio thread, so no half-initialised channel is ever rendered.
   // Returns the channel index, or kMaxChannels if the graph is full.
   size_t add_channel(std::string name, int channel_count,
-                     std::unique_ptr<AudioSource> source);
+                     std::unique_ptr<AudioSource> source,
+                     std::unique_ptr<MidiSource> midi = nullptr);
 
   size_t channel_count() const { return active_.load(std::memory_order_acquire); }
   ChannelStrip& channel(size_t index) { return *channels_[index]; }
@@ -45,6 +46,7 @@ class AudioGraph {
 
   std::array<std::unique_ptr<ChannelStrip>, kMaxChannels> channels_;
   std::array<std::unique_ptr<AudioSource>, kMaxChannels> sources_;
+  std::array<std::unique_ptr<MidiSource>, kMaxChannels> midi_sources_;
   std::atomic<size_t> active_{0};
 
   double sample_rate_ = 0.0;
@@ -52,6 +54,10 @@ class AudioGraph {
 
   std::atomic<float> master_gain_{1.0f};
   std::atomic<float> master_peaks_[2]{{0.0f}, {0.0f}};
+
+  // One block's worth of MIDI, reused per channel. Deep enough for anything a
+  // sequencer sends in a single period.
+  std::array<MidiEvent, 128> midi_scratch_{};
 
   // Scratch reused every block, sized in prepare() so render() never allocates.
   std::vector<std::vector<float>> scratch_;

@@ -245,8 +245,9 @@ class ClapInstance : public PluginInstance {
     process.in_events = &in_events_.list;
     process.out_events = &out_events_;
 
-    in_events_.rebuild(pending_params_);
+    in_events_.rebuild(pending_params_, pending_midi_);
     pending_params_.clear();
+    pending_midi_.clear();
 
     plugin_->process(plugin_, &process);
     steady_time_ += frames;
@@ -278,6 +279,11 @@ class ClapInstance : public PluginInstance {
     double value = 0.0;
     if (!params_->get_value(plugin_, id, &value)) return 0.0;
     return value;
+  }
+
+  void queue_midi(const MidiEvent& event) override {
+    if (event.size == 0 || pending_midi_.size() >= kMaxBlockMidi) return;
+    pending_midi_.push_back(event);
   }
 
   void set_parameter(uint32_t id, double value) override {
@@ -379,9 +385,13 @@ class ClapInstance : public PluginInstance {
       list.get = &InEventList::get_fn;
     }
 
-    void rebuild(const std::vector<PendingParam>& pending) {
+    void rebuild(const std::vector<PendingParam>& pending,
+                 const std::vector<MidiEvent>& midi) {
       events.clear();
-      events.reserve(pending.size());
+      events.reserve(pending.size() + midi.size());
+
+      // Both kinds share one list, and CLAP wants it sorted by time. Parameter
+      // changes all land at frame 0, so putting them first keeps that true.
       for (const PendingParam& param : pending) {
         clap_event_param_value_t event{};
         event.header.size = sizeof(event);
@@ -396,7 +406,19 @@ class ClapInstance : public PluginInstance {
         event.channel = -1;
         event.key = -1;
         event.value = param.value;
-        events.push_back(event);
+        events.push_back(Event{event});
+      }
+
+      for (const MidiEvent& source : midi) {
+        clap_event_midi_t event{};
+        event.header.size = sizeof(event);
+        event.header.time = source.frame;
+        event.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+        event.header.type = CLAP_EVENT_MIDI;
+        event.header.flags = 0;
+        event.port_index = 0;
+        std::memcpy(event.data, source.data, sizeof(event.data));
+        events.push_back(Event{event});
       }
     }
 
@@ -411,8 +433,20 @@ class ClapInstance : public PluginInstance {
       return &self->events[index].header;
     }
 
+    // Parameter changes and MIDI travel in the same list, so the storage has to
+    // hold either one. Both start with a clap_event_header_t.
+    union Event {
+      Event() : header{} {}
+      explicit Event(const clap_event_param_value_t& value) : param(value) {}
+      explicit Event(const clap_event_midi_t& value) : midi(value) {}
+
+      clap_event_header_t header;
+      clap_event_param_value_t param;
+      clap_event_midi_t midi;
+    };
+
     clap_input_events_t list{};
-    std::vector<clap_event_param_value_t> events;
+    std::vector<Event> events;
   };
 
   // Plugins emit parameter gestures and latency changes here. Swallowed until
@@ -571,7 +605,9 @@ class ClapInstance : public PluginInstance {
 
   std::vector<std::vector<float>> input_channels_, output_channels_;
   std::vector<float*> input_ptrs_, output_ptrs_;
+  static constexpr size_t kMaxBlockMidi = 64;
   std::vector<PendingParam> pending_params_;
+  std::vector<MidiEvent> pending_midi_;
   InEventList in_events_;
   clap_output_events_t out_events_{nullptr, &ClapInstance::out_event_push};
 };

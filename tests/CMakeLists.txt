@@ -33,3 +33,7 @@ if(NIRBIJA_UI)
   add_executable(nirbija_gui_probe gui_probe.cpp)
   target_link_libraries(nirbija_gui_probe PRIVATE nirbija_ui)
 endif()
+
+add_executable(nirbija_midi_synth midi_synth.cpp)
+target_link_libraries(nirbija_midi_synth PRIVATE nirbija_core)
+add_test(NAME midi_synth COMMAND nirbija_midi_synth)

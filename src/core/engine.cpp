@@ -1,5 +1,7 @@
 #include "core/engine.h"
 
+#include <jack/midiport.h>
+
 #include <algorithm>
 
 namespace nirbija {
@@ -26,6 +28,37 @@ class JackInputSource : public AudioSource {
 
  private:
   jack_port_t* ports_[2];
+};
+
+// Reads a channel's MIDI straight out of its JACK port. Like the audio source,
+// it only runs inside the process callback.
+class JackMidiSource : public MidiSource {
+ public:
+  explicit JackMidiSource(jack_port_t* port) : port_(port) {}
+
+  size_t read(MidiEvent* out, size_t capacity, uint32_t frames) override {
+    void* buffer = jack_port_get_buffer(port_, frames);
+    if (buffer == nullptr) return 0;
+
+    const jack_nframes_t count = jack_midi_get_event_count(buffer);
+    size_t written = 0;
+    for (jack_nframes_t i = 0; i < count && written < capacity; ++i) {
+      jack_midi_event_t event;
+      if (jack_midi_event_get(&event, buffer, i) != 0) continue;
+      // Anything longer than three bytes is SysEx, which nothing downstream
+      // takes yet; dropping it beats truncating it into a bogus message.
+      if (event.size == 0 || event.size > 3) continue;
+
+      MidiEvent& target = out[written++];
+      target.frame = event.time;
+      target.size = static_cast<uint8_t>(event.size);
+      std::copy_n(event.buffer, event.size, target.data);
+    }
+    return written;
+  }
+
+ private:
+  jack_port_t* port_;
 };
 
 }  // namespace
@@ -89,8 +122,22 @@ size_t Engine::add_channel(const std::string& name, int channel_count) {
     }
   }
 
+  // Every channel gets a MIDI input too, so a synth can be dropped into any
+  // strip without rebuilding it. AUM does the same: MIDI is routed to a
+  // channel, not to a special kind of channel.
+  const std::string midi_name = std::to_string(index + 1) + "_midi_in";
+  jack_port_t* midi_port = jack_port_register(client_, midi_name.c_str(),
+                                              JACK_DEFAULT_MIDI_TYPE,
+                                              JackPortIsInput, 0);
+  if (midi_port == nullptr) {
+    for (int ch = 0; ch < channel_count; ++ch)
+      jack_port_unregister(client_, ports[ch]);
+    return kMaxChannels;
+  }
+
   return graph_->add_channel(name, channel_count,
-                             std::make_unique<JackInputSource>(ports[0], ports[1]));
+                             std::make_unique<JackInputSource>(ports[0], ports[1]),
+                             std::make_unique<JackMidiSource>(midi_port));
 }
 
 bool Engine::post(const EngineCommand& command) { return commands_.push(command); }

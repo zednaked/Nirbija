@@ -3,7 +3,9 @@
 #include <lilv/lilv.h>
 #include <dlfcn.h>
 #include <lv2/atom/atom.h>
+#include <lv2/atom/util.h>
 #include <lv2/instance-access/instance-access.h>
+#include <lv2/midi/midi.h>
 #include <lv2/ui/ui.h>
 #include <lv2/buf-size/buf-size.h>
 #include <lv2/core/lv2.h>
@@ -400,6 +402,12 @@ class Lv2Instance : public PluginInstance {
     instance_ = nullptr;
   }
 
+  void queue_midi(const MidiEvent& event) override {
+    if (atom_in_.empty() || event.size == 0) return;
+    if (pending_midi_count_ >= pending_midi_.size()) return;  // block overrun
+    pending_midi_[pending_midi_count_++] = event;
+  }
+
   void process(const float* const* inputs, float* const* outputs,
                uint32_t frames) override {
     if (instance_ == nullptr) return;
@@ -414,6 +422,7 @@ class Lv2Instance : public PluginInstance {
     }
 
     reset_atom_inputs();
+    write_pending_midi();
     lilv_instance_run(instance_, frames);
     deliver_worker_responses();
 
@@ -625,6 +634,34 @@ class Lv2Instance : public PluginInstance {
                                  atom_buffers_[atom_in_.size() + i].data());
   }
 
+  // Appends this block's MIDI to the first atom input port, which is where a
+  // synth listens. Events are already in order because the engine reads them
+  // from JACK in order.
+  void write_pending_midi() {
+    if (atom_in_.empty() || pending_midi_count_ == 0) return;
+
+    auto* sequence = reinterpret_cast<LV2_Atom_Sequence*>(atom_buffers_[0].data());
+    uint8_t* const base = atom_buffers_[0].data();
+    const size_t capacity = kAtomBufferBytes;
+
+    for (size_t i = 0; i < pending_midi_count_; ++i) {
+      const MidiEvent& event = pending_midi_[i];
+      const size_t offset = sizeof(LV2_Atom) + sequence->atom.size;
+      const size_t needed = sizeof(LV2_Atom_Event) + lv2_atom_pad_size(event.size);
+      if (offset + needed > capacity) break;
+
+      auto* atom_event = reinterpret_cast<LV2_Atom_Event*>(base + offset);
+      atom_event->time.frames = event.frame;
+      atom_event->body.size = event.size;
+      atom_event->body.type = midi_event_urid_;
+      std::memcpy(atom_event + 1, event.data, event.size);
+
+      sequence->atom.size += static_cast<uint32_t>(needed);
+    }
+
+    pending_midi_count_ = 0;
+  }
+
   // An atom input port must present a valid, empty sequence every block, or the
   // plugin reads whatever the last block left behind.
   void reset_atom_inputs() {
@@ -661,6 +698,12 @@ class Lv2Instance : public PluginInstance {
   std::vector<std::vector<uint8_t>> atom_buffers_;
 
   LV2_URID sequence_urid_ = urids_.map_string(LV2_ATOM__Sequence);
+  LV2_URID midi_event_urid_ = urids_.map_string(LV2_MIDI__MidiEvent);
+
+  // Fixed so queueing never allocates on the audio thread. A block carrying
+  // more than this is a chord nobody plays.
+  std::array<MidiEvent, 64> pending_midi_{};
+  size_t pending_midi_count_ = 0;
   int32_t block_length_ = 0;
   LV2_Feature map_feature_{}, unmap_feature_{}, options_feature_{}, bounded_feature_{};
   LV2_Feature worker_feature_{};

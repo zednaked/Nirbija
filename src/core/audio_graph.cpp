@@ -42,7 +42,14 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
 
     const int width = strip.channel_count();
     sources_[i]->read(scratch_ptrs_.data(), width, frames);
-    strip.process(scratch_ptrs_.data(), frames);
+
+    size_t midi_count = 0;
+    if (midi_sources_[i] != nullptr) {
+      midi_count = midi_sources_[i]->read(midi_scratch_.data(),
+                                          midi_scratch_.size(), frames);
+    }
+
+    strip.process(scratch_ptrs_.data(), frames, midi_scratch_.data(), midi_count);
 
     // A mono strip is widened here, with constant-power pan so sweeping it
     // across the image keeps the same loudness. A stereo strip already had its
@@ -76,7 +83,8 @@ float AudioGraph::read_master_peak(int channel) {
 }
 
 size_t AudioGraph::add_channel(std::string name, int channel_count,
-                               std::unique_ptr<AudioSource> source) {
+                               std::unique_ptr<AudioSource> source,
+                               std::unique_ptr<MidiSource> midi) {
   const size_t index = active_.load(std::memory_order_relaxed);
   if (index >= kMaxChannels) return kMaxChannels;
 
@@ -85,6 +93,7 @@ size_t AudioGraph::add_channel(std::string name, int channel_count,
 
   channels_[index] = std::move(strip);
   sources_[index] = std::move(source);
+  midi_sources_[index] = std::move(midi);
 
   // Release last: everything above must be visible before the audio thread can
   // reach this slot.
