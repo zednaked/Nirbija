@@ -62,6 +62,38 @@ da UI e entregue pronta por mensagem; o descarte volta pela fila de lixo.
 Ordem é dependência real, não preferência: 5 precisa de 4, 4 precisa de 2–3,
 todos precisam de 1.
 
+## Fase 5 — embedding de GUI: onde parou
+
+Feito e funcionando:
+
+- Interface `PluginGui` no núcleo (`attach`/`detach`/`idle`/`preferred_size`).
+- CLAP: extensão `gui` com `CLAP_WINDOW_API_X11`. A negociação inteira funciona —
+  `create` → `set_parent` → `get_size` → `set_size` → `show` retornam sucesso, e
+  a janela hospedeira abre no tamanho que o próprio plugin pediu (638x680 no
+  Surge XT).
+- LV2: X11UI carregada direto do binário da UI, sem suil (suil só é necessário
+  para envolver UI de toolkit diferente do host).
+- `force_x11_platform()`: o app troca para xcb quando a sessão é Wayland, senão
+  `winId()` devolve um ponteiro e a primeira chamada X do plugin morre com
+  `BadWindow`. Escape: `NIRBIJA_ALLOW_WAYLAND=1`.
+- `nirbija_gui_probe "<nome>"`: ferramenta manual que abre a editora de um
+  plugin isolada.
+
+**Não funciona ainda: a editora não desenha.** A janela abre no tamanho certo e
+fica preta.
+
+- CLAP (Surge XT): todas as chamadas retornam sucesso, nenhum pixel aparece.
+- LV2/DPF (Dragonfly): falha antes, em `Failed to realize Pugl view`.
+
+Tentado sem sucesso: mapear a janela antes do `attach`; informar o tamanho ao
+plugin com `set_size`; sincronizar o X (`processEvents` + `sync`) antes de
+entregar o handle.
+
+Hipótese para a próxima investida: um `QWindow` do xcb não é o pai que esses
+toolkits esperam. Hosts que funcionam (Carla, Ardour) criam a janela pai com
+Xlib puro e/ou implementam o protocolo XEmbed. O próximo passo é trocar
+`PluginWindow` por uma janela Xlib criada à mão, embrulhada num container Qt.
+
 ## VST3 — adiado de propósito
 
 Decisão de 14/08/2026: fica para quando o resto estiver de pé. Motivos:

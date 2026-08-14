@@ -55,8 +55,15 @@ ApplicationWindow {
                     accent: model.accent
 
                     onInsertSlotClicked: slot => {
-                        if (slot < model.inserts.length)
+                        // A filled slot opens the plugin's own editor; an empty
+                        // one opens the picker to fill it.
+                        if (slot < model.inserts.length
+                                && model.inserts[slot].length > 0) {
+                            if (!mixer.openInsertEditor(index, slot))
+                                console.warn("no embeddable editor for",
+                                             model.inserts[slot])
                             return
+                        }
                         picker.targetRow = index
                         picker.targetSlot = slot
                         picker.open()

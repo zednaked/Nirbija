@@ -29,6 +29,27 @@ struct ParameterInfo {
   double default_value;
 };
 
+// A plugin's own editor window, embedded into one of ours. Every format that
+// ships a Linux editor draws it with X11, so the parent handle is an X11
+// Window id and the host has to be running on X11 or XWayland for any of this
+// to work.
+class PluginGui {
+ public:
+  virtual ~PluginGui() = default;
+
+  // Creates the editor as a child of `parent_window`. False means the plugin
+  // has no editor this host can embed, which is common and not an error.
+  virtual bool attach(uintptr_t parent_window) = 0;
+  virtual void detach() = 0;
+
+  // Editors expect to be called back regularly on the main thread; some only
+  // repaint from here.
+  virtual void idle() = 0;
+
+  // The editor's preferred size. False leaves the caller to pick one.
+  virtual bool preferred_size(int* width, int* height) const = 0;
+};
+
 // One loaded plugin. Everything named process_* runs on the realtime thread and
 // must not allocate, lock, or touch the filesystem; everything else runs on the
 // UI thread while the instance is detached from the graph.
@@ -56,6 +77,10 @@ class PluginInstance {
   virtual bool load_state(const std::vector<uint8_t>& blob) = 0;
 
   virtual const PluginDescriptor& descriptor() const = 0;
+
+  // Null when the plugin ships no editor this host can embed. Backends that
+  // have not implemented editors yet inherit this.
+  virtual std::unique_ptr<PluginGui> create_gui() { return nullptr; }
 };
 
 // One per format. Scanning walks the disk, so it never runs on the audio thread.

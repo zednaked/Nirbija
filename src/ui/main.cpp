@@ -4,9 +4,12 @@
 #include <QQuickStyle>
 
 #include "mixer_model.h"
+#include "platform.h"
 #include "skin.h"
 
 int main(int argc, char* argv[]) {
+  nirbija::force_x11_platform();
+
   QGuiApplication app(argc, argv);
   app.setApplicationName(QStringLiteral("Nirbija"));
   app.setOrganizationName(QStringLiteral("Nirbija"));

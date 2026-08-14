@@ -1,7 +1,10 @@
 #include "hosting/lv2_backend.h"
 
 #include <lilv/lilv.h>
+#include <dlfcn.h>
 #include <lv2/atom/atom.h>
+#include <lv2/instance-access/instance-access.h>
+#include <lv2/ui/ui.h>
 #include <lv2/buf-size/buf-size.h>
 #include <lv2/core/lv2.h>
 #include <lv2/options/options.h>
@@ -130,6 +133,181 @@ struct Lv2World {
   UridMap urids;
 };
 
+// An LV2 editor that draws with X11, loaded straight from its own binary. suil
+// exists to wrap editors written for a different toolkit than the host's; an
+// X11 editor needs no wrapping, so this covers the common case without the
+// extra dependency.
+class Lv2Gui : public PluginGui {
+ public:
+  Lv2Gui(std::shared_ptr<Lv2World> world, const LilvPlugin* plugin,
+         LilvInstance* instance, std::vector<float>* control_values,
+         std::vector<PortInfo> control_ports)
+      : world_(std::move(world)),
+        plugin_(plugin),
+        instance_(instance),
+        control_values_(control_values),
+        control_ports_(std::move(control_ports)) {}
+
+  ~Lv2Gui() override { detach(); }
+
+  // Reports whether this plugin ships an editor we can embed, without loading
+  // anything yet.
+  static bool available(LilvWorld* world, const LilvPlugin* plugin) {
+    LilvNode* x11 = lilv_new_uri(world, LV2_UI__X11UI);
+    LilvUIs* uis = lilv_plugin_get_uis(plugin);
+    bool found = false;
+    if (uis != nullptr) {
+      LILV_FOREACH(uis, iter, uis) {
+        if (lilv_ui_is_a(lilv_uis_get(uis, iter), x11)) {
+          found = true;
+          break;
+        }
+      }
+      lilv_uis_free(uis);
+    }
+    lilv_node_free(x11);
+    return found;
+  }
+
+  bool attach(uintptr_t parent_window) override {
+    if (widget_ != nullptr) detach();
+
+    LilvNode* x11 = lilv_new_uri(world_->world, LV2_UI__X11UI);
+    LilvUIs* uis = lilv_plugin_get_uis(plugin_);
+    if (uis == nullptr) {
+      lilv_node_free(x11);
+      return false;
+    }
+
+    bool ok = false;
+    LILV_FOREACH(uis, iter, uis) {
+      const LilvUI* ui = lilv_uis_get(uis, iter);
+      if (!lilv_ui_is_a(ui, x11)) continue;
+      ok = load(ui, parent_window);
+      if (ok) break;
+    }
+
+    lilv_uis_free(uis);
+    lilv_node_free(x11);
+    return ok;
+  }
+
+  void detach() override {
+    if (descriptor_ != nullptr && handle_ != nullptr) descriptor_->cleanup(handle_);
+    handle_ = nullptr;
+    widget_ = nullptr;
+    descriptor_ = nullptr;
+    idle_iface_ = nullptr;
+    if (library_ != nullptr) {
+      dlclose(library_);
+      library_ = nullptr;
+    }
+  }
+
+  void idle() override {
+    if (idle_iface_ != nullptr && handle_ != nullptr) idle_iface_->idle(handle_);
+  }
+
+  // LV2 has no way to ask an editor how big it wants to be before it is shown,
+  // so the caller falls back to its own default.
+  bool preferred_size(int*, int*) const override { return false; }
+
+ private:
+  bool load(const LilvUI* ui, uintptr_t parent_window) {
+    const LilvNode* binary_node = lilv_ui_get_binary_uri(ui);
+    const LilvNode* bundle_node = lilv_ui_get_bundle_uri(ui);
+    if (binary_node == nullptr || bundle_node == nullptr) return false;
+
+    char* binary_path = lilv_file_uri_parse(lilv_node_as_uri(binary_node), nullptr);
+    char* bundle_path = lilv_file_uri_parse(lilv_node_as_uri(bundle_node), nullptr);
+    if (binary_path == nullptr || bundle_path == nullptr) {
+      lilv_free(binary_path);
+      lilv_free(bundle_path);
+      return false;
+    }
+
+    library_ = dlopen(binary_path, RTLD_LOCAL | RTLD_NOW);
+    if (library_ != nullptr) {
+      auto entry = reinterpret_cast<LV2UI_DescriptorFunction>(
+          dlsym(library_, "lv2ui_descriptor"));
+      const char* wanted = lilv_node_as_uri(lilv_ui_get_uri(ui));
+      for (uint32_t i = 0; entry != nullptr; ++i) {
+        const LV2UI_Descriptor* candidate = entry(i);
+        if (candidate == nullptr) break;
+        if (std::strcmp(candidate->URI, wanted) == 0) {
+          descriptor_ = candidate;
+          break;
+        }
+      }
+    }
+
+    if (descriptor_ != nullptr)
+      instantiate(bundle_path, parent_window);
+
+    lilv_free(binary_path);
+    lilv_free(bundle_path);
+
+    if (handle_ == nullptr) {
+      detach();
+      return false;
+    }
+    return true;
+  }
+
+  void instantiate(const char* bundle_path, uintptr_t parent_window) {
+    parent_feature_ = {LV2_UI__parent, reinterpret_cast<void*>(parent_window)};
+    instance_feature_ = {LV2_INSTANCE_ACCESS_URI,
+                         lilv_instance_get_handle(instance_)};
+    idle_feature_ = {LV2_UI__idleInterface, nullptr};
+    map_feature_ = {LV2_URID__map, world_->urids.map_feature()};
+    unmap_feature_ = {LV2_URID__unmap, world_->urids.unmap_feature()};
+
+    const LV2_Feature* features[] = {&parent_feature_,  &instance_feature_,
+                                     &idle_feature_,    &map_feature_,
+                                     &unmap_feature_,   nullptr};
+
+    handle_ = descriptor_->instantiate(descriptor_, lilv_node_as_uri(
+                                           lilv_plugin_get_uri(plugin_)),
+                                       bundle_path, &Lv2Gui::write_port, this,
+                                       &widget_, features);
+    if (handle_ == nullptr) return;
+
+    if (descriptor_->extension_data != nullptr) {
+      idle_iface_ = static_cast<const LV2UI_Idle_Interface*>(
+          descriptor_->extension_data(LV2_UI__idleInterface));
+    }
+  }
+
+  // The editor writes a control value back to the host. Only plain float
+  // control ports are handled; anything atom-shaped needs the MIDI work first.
+  static void write_port(LV2UI_Controller controller, uint32_t port_index,
+                         uint32_t buffer_size, uint32_t format, const void* buffer) {
+    auto* self = static_cast<Lv2Gui*>(controller);
+    if (format != 0 || buffer_size != sizeof(float)) return;
+
+    const float value = *static_cast<const float*>(buffer);
+    for (size_t i = 0; i < self->control_ports_.size(); ++i) {
+      if (self->control_ports_[i].index != port_index) continue;
+      (*self->control_values_)[i] = value;
+      return;
+    }
+  }
+
+  std::shared_ptr<Lv2World> world_;
+  const LilvPlugin* plugin_;
+  LilvInstance* instance_;
+  std::vector<float>* control_values_;
+  std::vector<PortInfo> control_ports_;
+
+  void* library_ = nullptr;
+  const LV2UI_Descriptor* descriptor_ = nullptr;
+  LV2UI_Handle handle_ = nullptr;
+  LV2UI_Widget widget_ = nullptr;
+  const LV2UI_Idle_Interface* idle_iface_ = nullptr;
+  LV2_Feature parent_feature_{}, instance_feature_{}, idle_feature_{};
+  LV2_Feature map_feature_{}, unmap_feature_{};
+};
+
 class Lv2Instance : public PluginInstance {
  public:
   Lv2Instance(PluginDescriptor desc, const LilvPlugin* plugin,
@@ -248,6 +426,13 @@ class Lv2Instance : public PluginInstance {
   }
 
   const PluginDescriptor& descriptor() const override { return desc_; }
+
+  std::unique_ptr<PluginGui> create_gui() override {
+    if (instance_ == nullptr) return nullptr;
+    if (!Lv2Gui::available(world_->world, plugin_)) return nullptr;
+    return std::make_unique<Lv2Gui>(world_, plugin_, instance_, &control_values_,
+                                    control_in_);
+  }
 
  private:
   static constexpr size_t kAtomBufferBytes = 4096;

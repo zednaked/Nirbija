@@ -6,6 +6,7 @@ qt_standard_project_setup(REQUIRES 6.5)
 qt_add_library(nirbija_ui STATIC
   mixer_model.cpp
   plugin_list_model.cpp
+  plugin_window.cpp
   skin.h
 )
 target_link_libraries(nirbija_ui PUBLIC nirbija_core Qt6::Quick)

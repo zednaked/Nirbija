@@ -10,6 +10,7 @@
 #include "core/engine.h"
 #include "core/plugin.h"
 #include "plugin_list_model.h"
+#include "plugin_window.h"
 
 namespace nirbija {
 
@@ -74,6 +75,10 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE bool addInsert(int row, int pluginIndex);
   Q_INVOKABLE void removeInsert(int row, int slot);
 
+  // Opens the plugin's own editor in its own window. False when the plugin
+  // ships no editor this host can embed, which is common.
+  Q_INVOKABLE bool openInsertEditor(int row, int slot);
+
   // Turns a fader position in 0..1 into a linear gain, and back. AUM's fader is
   // not linear in amplitude: most of the travel covers the top of the range.
   Q_INVOKABLE static qreal faderToGain(qreal position);
@@ -111,6 +116,8 @@ class MixerModel : public QAbstractListModel {
   Engine engine_;
   std::vector<ChannelUi> channels_;
   QTimer level_timer_;
+  // Editor windows stay owned here so closing the mixer closes them too.
+  std::vector<std::unique_ptr<PluginWindow>> editors_;
   qreal master_peak_[2] = {0.0, 0.0};
   qreal master_gain_ = 1.0;
   QString status_;

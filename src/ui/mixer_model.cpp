@@ -198,6 +198,24 @@ void MixerModel::removeInsert(int row, int slot) {
   emit dataChanged(idx, idx, {InsertsRole});
 }
 
+bool MixerModel::openInsertEditor(int row, int slot) {
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return false;
+
+  PluginInstance* insert = engine_.graph().channel(row).insert_at(
+      static_cast<size_t>(slot));
+  if (insert == nullptr) return false;
+
+  std::unique_ptr<PluginGui> gui = insert->create_gui();
+  if (gui == nullptr) return false;
+
+  auto window = std::make_unique<PluginWindow>(
+      std::move(gui), QString::fromStdString(insert->descriptor().name));
+  if (!window->open()) return false;
+
+  editors_.push_back(std::move(window));
+  return true;
+}
+
 void MixerModel::pollLevels() {
   if (!engine_.running()) return;
 

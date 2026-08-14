@@ -27,3 +27,9 @@ if(NIRBIJA_UI)
   target_link_libraries(nirbija_ui_smoke PRIVATE nirbija_ui)
   add_test(NAME ui_smoke COMMAND nirbija_ui_smoke)
 endif()
+
+if(NIRBIJA_UI)
+  # Manual tool, not a ctest target: it needs a real X11 display.
+  add_executable(nirbija_gui_probe gui_probe.cpp)
+  target_link_libraries(nirbija_gui_probe PRIVATE nirbija_ui)
+endif()

@@ -59,6 +59,64 @@ class ClapModule {
   const clap_plugin_entry_t* entry_;
 };
 
+// A CLAP editor embedded into a host window. CLAP hands the plugin a parent
+// window and lets it draw inside; nothing is reparented behind its back.
+class ClapGui : public PluginGui {
+ public:
+  ClapGui(const clap_plugin_t* plugin, const clap_plugin_gui_t* gui)
+      : plugin_(plugin), gui_(gui) {}
+
+  ~ClapGui() override { detach(); }
+
+  bool attach(uintptr_t parent_window) override {
+    if (created_) detach();
+    if (!gui_->create(plugin_, CLAP_WINDOW_API_X11, false)) return false;
+    created_ = true;
+
+    clap_window_t window{};
+    window.api = CLAP_WINDOW_API_X11;
+    window.x11 = static_cast<unsigned long>(parent_window);
+    if (!gui_->set_parent(plugin_, &window)) {
+      detach();
+      return false;
+    }
+
+    // The plugin knows what size it wants, but it will not lay itself out
+    // until the host confirms one, so ask and then tell.
+    uint32_t width = 0;
+    uint32_t height = 0;
+    if (gui_->get_size(plugin_, &width, &height) && width > 0 && height > 0)
+      gui_->set_size(plugin_, width, height);
+
+    gui_->show(plugin_);
+    return true;
+  }
+
+  void detach() override {
+    if (!created_) return;
+    gui_->hide(plugin_);
+    gui_->destroy(plugin_);
+    created_ = false;
+  }
+
+  // CLAP editors drive their own repaints, so there is nothing to pump here.
+  void idle() override {}
+
+  bool preferred_size(int* width, int* height) const override {
+    uint32_t w = 0;
+    uint32_t h = 0;
+    if (!created_ || !gui_->get_size(plugin_, &w, &h)) return false;
+    *width = static_cast<int>(w);
+    *height = static_cast<int>(h);
+    return true;
+  }
+
+ private:
+  const clap_plugin_t* plugin_;
+  const clap_plugin_gui_t* gui_;
+  bool created_ = false;
+};
+
 class ClapInstance : public PluginInstance {
  public:
   ClapInstance(PluginDescriptor desc, std::shared_ptr<ClapModule> module)
@@ -94,6 +152,8 @@ class ClapInstance : public PluginInstance {
         plugin_->get_extension(plugin_, CLAP_EXT_STATE));
     audio_ports_ = static_cast<const clap_plugin_audio_ports_t*>(
         plugin_->get_extension(plugin_, CLAP_EXT_AUDIO_PORTS));
+    gui_ = static_cast<const clap_plugin_gui_t*>(
+        plugin_->get_extension(plugin_, CLAP_EXT_GUI));
 
     read_port_counts();
     return true;
@@ -222,6 +282,14 @@ class ClapInstance : public PluginInstance {
 
   const PluginDescriptor& descriptor() const override { return desc_; }
 
+  std::unique_ptr<PluginGui> create_gui() override {
+    if (gui_ == nullptr) return nullptr;
+    // A plugin that cannot draw on X11 is no use here, and asking it to create
+    // an editor anyway tends to end in a crash rather than a clean refusal.
+    if (!gui_->is_api_supported(plugin_, CLAP_WINDOW_API_X11, false)) return nullptr;
+    return std::make_unique<ClapGui>(plugin_, gui_);
+  }
+
  private:
   struct PendingParam {
     uint32_t id;
@@ -348,6 +416,7 @@ class ClapInstance : public PluginInstance {
   const clap_plugin_params_t* params_ = nullptr;
   const clap_plugin_state_t* state_ = nullptr;
   const clap_plugin_audio_ports_t* audio_ports_ = nullptr;
+  const clap_plugin_gui_t* gui_ = nullptr;
 
   bool active_ = false;
   bool processing_ = false;
