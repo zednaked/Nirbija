@@ -3,8 +3,15 @@
 #include <clap/clap.h>
 #include <dlfcn.h>
 
+#include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
 
 namespace nirbija {
 namespace {
@@ -17,6 +24,342 @@ std::vector<fs::path> clap_search_paths() {
   if (const char* extra = std::getenv("CLAP_PATH")) paths.emplace_back(extra);
   return paths;
 }
+
+// A dlopen'd .clap module. Instances keep it alive; unloading while a plugin
+// from it is still running would pull the code out from under the audio thread.
+class ClapModule {
+ public:
+  static std::shared_ptr<ClapModule> open(const fs::path& path) {
+    void* handle = dlopen(path.c_str(), RTLD_LOCAL | RTLD_NOW);
+    if (handle == nullptr) return nullptr;
+
+    auto* entry = static_cast<const clap_plugin_entry_t*>(dlsym(handle, "clap_entry"));
+    if (entry == nullptr || !entry->init(path.c_str())) {
+      dlclose(handle);
+      return nullptr;
+    }
+    return std::shared_ptr<ClapModule>(new ClapModule(handle, entry));
+  }
+
+  ~ClapModule() {
+    entry_->deinit();
+    dlclose(handle_);
+  }
+
+  const clap_plugin_factory_t* factory() const {
+    return static_cast<const clap_plugin_factory_t*>(
+        entry_->get_factory(CLAP_PLUGIN_FACTORY_ID));
+  }
+
+ private:
+  ClapModule(void* handle, const clap_plugin_entry_t* entry)
+      : handle_(handle), entry_(entry) {}
+
+  void* handle_;
+  const clap_plugin_entry_t* entry_;
+};
+
+class ClapInstance : public PluginInstance {
+ public:
+  ClapInstance(PluginDescriptor desc, std::shared_ptr<ClapModule> module)
+      : desc_(std::move(desc)), module_(std::move(module)) {
+    host_.clap_version = CLAP_VERSION;
+    host_.host_data = this;
+    host_.name = "Nirbija";
+    host_.vendor = "Nirbija";
+    host_.url = "";
+    host_.version = "0.1.0";
+    host_.get_extension = &ClapInstance::host_get_extension;
+    host_.request_restart = &ClapInstance::host_request_restart;
+    host_.request_process = &ClapInstance::host_request_process;
+    host_.request_callback = &ClapInstance::host_request_callback;
+  }
+
+  ~ClapInstance() override { destroy(); }
+
+  bool create() {
+    const clap_plugin_factory_t* factory = module_->factory();
+    if (factory == nullptr) return false;
+    plugin_ = factory->create_plugin(factory, &host_, desc_.uid.c_str());
+    if (plugin_ == nullptr) return false;
+    if (!plugin_->init(plugin_)) {
+      plugin_->destroy(plugin_);
+      plugin_ = nullptr;
+      return false;
+    }
+
+    params_ = static_cast<const clap_plugin_params_t*>(
+        plugin_->get_extension(plugin_, CLAP_EXT_PARAMS));
+    state_ = static_cast<const clap_plugin_state_t*>(
+        plugin_->get_extension(plugin_, CLAP_EXT_STATE));
+    audio_ports_ = static_cast<const clap_plugin_audio_ports_t*>(
+        plugin_->get_extension(plugin_, CLAP_EXT_AUDIO_PORTS));
+
+    read_port_counts();
+    return true;
+  }
+
+  void set_channel_layout(int channels) override { strip_channels_ = channels; }
+
+  bool activate(double sample_rate, uint32_t max_block_frames) override {
+    if (plugin_ == nullptr) return false;
+    if (active_) deactivate();
+
+    if (!plugin_->activate(plugin_, sample_rate, 1, max_block_frames)) return false;
+    active_ = true;
+
+    input_channels_.assign(std::max(desc_.audio_inputs, 1),
+                           std::vector<float>(max_block_frames, 0.0f));
+    output_channels_.assign(std::max(desc_.audio_outputs, 1),
+                            std::vector<float>(max_block_frames, 0.0f));
+    input_ptrs_.clear();
+    output_ptrs_.clear();
+    for (auto& channel : input_channels_) input_ptrs_.push_back(channel.data());
+    for (auto& channel : output_channels_) output_ptrs_.push_back(channel.data());
+
+    if (!plugin_->start_processing(plugin_)) {
+      plugin_->deactivate(plugin_);
+      active_ = false;
+      return false;
+    }
+    processing_ = true;
+    return true;
+  }
+
+  void deactivate() override {
+    if (plugin_ == nullptr || !active_) return;
+    if (processing_) {
+      plugin_->stop_processing(plugin_);
+      processing_ = false;
+    }
+    plugin_->deactivate(plugin_);
+    active_ = false;
+  }
+
+  void process(const float* const* inputs, float* const* outputs,
+               uint32_t frames) override {
+    if (!processing_) return;
+
+    // Feed every plugin input, duplicating the last strip channel when the
+    // plugin is wider than the strip.
+    for (size_t i = 0; i < input_ptrs_.size(); ++i) {
+      const int source = std::min(static_cast<int>(i), strip_channels_ - 1);
+      std::copy_n(inputs[source], frames, input_ptrs_[i]);
+    }
+
+    clap_audio_buffer_t in_bus{};
+    in_bus.data32 = input_ptrs_.data();
+    in_bus.channel_count = static_cast<uint32_t>(input_ptrs_.size());
+
+    clap_audio_buffer_t out_bus{};
+    out_bus.data32 = output_ptrs_.data();
+    out_bus.channel_count = static_cast<uint32_t>(output_ptrs_.size());
+
+    clap_process_t process{};
+    process.steady_time = steady_time_;
+    process.frames_count = frames;
+    process.audio_inputs = desc_.audio_inputs > 0 ? &in_bus : nullptr;
+    process.audio_inputs_count = desc_.audio_inputs > 0 ? 1 : 0;
+    process.audio_outputs = desc_.audio_outputs > 0 ? &out_bus : nullptr;
+    process.audio_outputs_count = desc_.audio_outputs > 0 ? 1 : 0;
+    process.in_events = &in_events_.list;
+    process.out_events = &out_events_;
+
+    in_events_.rebuild(pending_params_);
+    pending_params_.clear();
+
+    plugin_->process(plugin_, &process);
+    steady_time_ += frames;
+
+    for (int ch = 0; ch < strip_channels_; ++ch) {
+      if (output_ptrs_.empty()) break;
+      const size_t source =
+          std::min(static_cast<size_t>(ch), output_ptrs_.size() - 1);
+      std::copy_n(output_ptrs_[source], frames, outputs[ch]);
+    }
+  }
+
+  std::vector<ParameterInfo> parameters() const override {
+    std::vector<ParameterInfo> out;
+    if (params_ == nullptr) return out;
+    const uint32_t count = params_->count(plugin_);
+    out.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+      clap_param_info_t info{};
+      if (!params_->get_info(plugin_, i, &info)) continue;
+      out.push_back({static_cast<uint32_t>(info.id), info.name, info.min_value,
+                     info.max_value, info.default_value});
+    }
+    return out;
+  }
+
+  double parameter_value(uint32_t id) const override {
+    if (params_ == nullptr) return 0.0;
+    double value = 0.0;
+    if (!params_->get_value(plugin_, id, &value)) return 0.0;
+    return value;
+  }
+
+  void set_parameter(uint32_t id, double value) override {
+    // Parameter changes reach the plugin as events on the next process call,
+    // which is the only way CLAP allows them to be sampled in time.
+    pending_params_.push_back({id, value});
+  }
+
+  std::vector<uint8_t> save_state() const override {
+    std::vector<uint8_t> blob;
+    if (state_ == nullptr) return blob;
+    OutStream stream{&blob};
+    state_->save(plugin_, &stream.stream);
+    return blob;
+  }
+
+  bool load_state(const std::vector<uint8_t>& blob) override {
+    if (state_ == nullptr || blob.empty()) return false;
+    InStream stream{&blob};
+    return state_->load(plugin_, &stream.stream);
+  }
+
+  const PluginDescriptor& descriptor() const override { return desc_; }
+
+ private:
+  struct PendingParam {
+    uint32_t id;
+    double value;
+  };
+
+  // An input event list backed by a vector the audio thread only reads. The
+  // events are built before process() runs, so nothing allocates mid-block.
+  struct InEventList {
+    InEventList() {
+      list.ctx = this;
+      list.size = &InEventList::size_fn;
+      list.get = &InEventList::get_fn;
+    }
+
+    void rebuild(const std::vector<PendingParam>& pending) {
+      events.clear();
+      events.reserve(pending.size());
+      for (const PendingParam& param : pending) {
+        clap_event_param_value_t event{};
+        event.header.size = sizeof(event);
+        event.header.time = 0;
+        event.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+        event.header.type = CLAP_EVENT_PARAM_VALUE;
+        event.header.flags = 0;
+        event.param_id = param.id;
+        event.cookie = nullptr;
+        event.note_id = -1;
+        event.port_index = -1;
+        event.channel = -1;
+        event.key = -1;
+        event.value = param.value;
+        events.push_back(event);
+      }
+    }
+
+    static uint32_t size_fn(const clap_input_events_t* list) {
+      return static_cast<uint32_t>(
+          static_cast<const InEventList*>(list->ctx)->events.size());
+    }
+    static const clap_event_header_t* get_fn(const clap_input_events_t* list,
+                                             uint32_t index) {
+      const auto* self = static_cast<const InEventList*>(list->ctx);
+      if (index >= self->events.size()) return nullptr;
+      return &self->events[index].header;
+    }
+
+    clap_input_events_t list{};
+    std::vector<clap_event_param_value_t> events;
+  };
+
+  // Plugins emit parameter gestures and latency changes here. Swallowed until
+  // the UI exists to receive them.
+  static bool out_event_push(const clap_output_events_t*, const clap_event_header_t*) {
+    return true;
+  }
+
+  struct OutStream {
+    explicit OutStream(std::vector<uint8_t>* target) : buffer(target) {
+      stream.ctx = this;
+      stream.write = &OutStream::write_fn;
+    }
+    static int64_t write_fn(const clap_ostream_t* stream, const void* data,
+                            uint64_t size) {
+      auto* self = static_cast<OutStream*>(stream->ctx);
+      const auto* bytes = static_cast<const uint8_t*>(data);
+      self->buffer->insert(self->buffer->end(), bytes, bytes + size);
+      return static_cast<int64_t>(size);
+    }
+    clap_ostream_t stream{};
+    std::vector<uint8_t>* buffer;
+  };
+
+  struct InStream {
+    explicit InStream(const std::vector<uint8_t>* source) : buffer(source) {
+      stream.ctx = this;
+      stream.read = &InStream::read_fn;
+    }
+    static int64_t read_fn(const clap_istream_t* stream, void* data, uint64_t size) {
+      auto* self = static_cast<InStream*>(stream->ctx);
+      const uint64_t remaining = self->buffer->size() - self->offset;
+      const uint64_t taken = std::min(size, remaining);
+      std::memcpy(data, self->buffer->data() + self->offset, taken);
+      self->offset += taken;
+      return static_cast<int64_t>(taken);
+    }
+    clap_istream_t stream{};
+    const std::vector<uint8_t>* buffer;
+    uint64_t offset = 0;
+  };
+
+  void read_port_counts() {
+    if (audio_ports_ == nullptr) return;
+    clap_audio_port_info_t info{};
+    if (audio_ports_->count(plugin_, true) > 0 &&
+        audio_ports_->get(plugin_, 0, true, &info))
+      desc_.audio_inputs = static_cast<int>(info.channel_count);
+    if (audio_ports_->count(plugin_, false) > 0 &&
+        audio_ports_->get(plugin_, 0, false, &info))
+      desc_.audio_outputs = static_cast<int>(info.channel_count);
+  }
+
+  void destroy() {
+    deactivate();
+    if (plugin_ != nullptr) {
+      plugin_->destroy(plugin_);
+      plugin_ = nullptr;
+    }
+  }
+
+  // Nirbija exposes no optional host extensions yet, so plugins fall back to
+  // their defaults rather than getting a half-implemented one.
+  static const void* host_get_extension(const clap_host_t*, const char*) {
+    return nullptr;
+  }
+  static void host_request_restart(const clap_host_t*) {}
+  static void host_request_process(const clap_host_t*) {}
+  static void host_request_callback(const clap_host_t*) {}
+
+  PluginDescriptor desc_;
+  std::shared_ptr<ClapModule> module_;
+  clap_host_t host_{};
+  const clap_plugin_t* plugin_ = nullptr;
+  const clap_plugin_params_t* params_ = nullptr;
+  const clap_plugin_state_t* state_ = nullptr;
+  const clap_plugin_audio_ports_t* audio_ports_ = nullptr;
+
+  bool active_ = false;
+  bool processing_ = false;
+  int strip_channels_ = 2;
+  int64_t steady_time_ = 0;
+
+  std::vector<std::vector<float>> input_channels_, output_channels_;
+  std::vector<float*> input_ptrs_, output_ptrs_;
+  std::vector<PendingParam> pending_params_;
+  InEventList in_events_;
+  clap_output_events_t out_events_{nullptr, &ClapInstance::out_event_push};
+};
 
 class ClapBackend : public PluginBackend {
  public:
@@ -35,47 +378,54 @@ class ClapBackend : public PluginBackend {
     return found;
   }
 
-  std::unique_ptr<PluginInstance> instantiate(const PluginDescriptor&) override {
-    // TODO(phase-3): create via the factory, supply a clap_host with the log,
-    // thread-check, params and state extensions, then activate.
-    return nullptr;
+  std::unique_ptr<PluginInstance> instantiate(const PluginDescriptor& desc) override {
+    std::shared_ptr<ClapModule> module = module_for(desc.path);
+    if (module == nullptr) return nullptr;
+
+    auto instance = std::make_unique<ClapInstance>(desc, std::move(module));
+    if (!instance->create()) return nullptr;
+    return instance;
   }
 
  private:
-  // A .clap module is a shared object exporting clap_entry. Scanning opens it,
-  // reads the descriptors, and closes it again so a scan leaves nothing loaded.
-  static void scan_module(const fs::path& path, std::vector<PluginDescriptor>& out) {
-    void* handle = dlopen(path.c_str(), RTLD_LOCAL | RTLD_NOW);
-    if (handle == nullptr) return;
+  // Modules are cached so loading two plugins from one bundle does not dlopen it
+  // twice, and so a module stays resident while any of its plugins is alive.
+  std::shared_ptr<ClapModule> module_for(const std::string& path) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = modules_.find(path);
+    if (it != modules_.end())
+      if (std::shared_ptr<ClapModule> alive = it->second.lock()) return alive;
 
-    auto* entry = static_cast<const clap_plugin_entry_t*>(dlsym(handle, "clap_entry"));
-    if (entry == nullptr || !entry->init(path.c_str())) {
-      dlclose(handle);
-      return;
-    }
-
-    const auto* factory = static_cast<const clap_plugin_factory_t*>(
-        entry->get_factory(CLAP_PLUGIN_FACTORY_ID));
-    if (factory != nullptr) {
-      const uint32_t count = factory->get_plugin_count(factory);
-      for (uint32_t i = 0; i < count; ++i) {
-        const clap_plugin_descriptor_t* d = factory->get_plugin_descriptor(factory, i);
-        if (d == nullptr) continue;
-        PluginDescriptor desc;
-        desc.format = PluginFormat::Clap;
-        desc.uid = d->id != nullptr ? d->id : "";
-        desc.name = d->name != nullptr ? d->name : "";
-        desc.vendor = d->vendor != nullptr ? d->vendor : "";
-        desc.path = path.string();
-        // Port counts need an instantiated plugin, so they stay zero until the
-        // plugin is actually loaded.
-        out.push_back(std::move(desc));
-      }
-    }
-
-    entry->deinit();
-    dlclose(handle);
+    std::shared_ptr<ClapModule> module = ClapModule::open(path);
+    if (module != nullptr) modules_[path] = module;
+    return module;
   }
+
+  void scan_module(const fs::path& path, std::vector<PluginDescriptor>& out) {
+    std::shared_ptr<ClapModule> module = module_for(path.string());
+    if (module == nullptr) return;
+
+    const clap_plugin_factory_t* factory = module->factory();
+    if (factory == nullptr) return;
+
+    const uint32_t count = factory->get_plugin_count(factory);
+    for (uint32_t i = 0; i < count; ++i) {
+      const clap_plugin_descriptor_t* d = factory->get_plugin_descriptor(factory, i);
+      if (d == nullptr) continue;
+      PluginDescriptor desc;
+      desc.format = PluginFormat::Clap;
+      desc.uid = d->id != nullptr ? d->id : "";
+      desc.name = d->name != nullptr ? d->name : "";
+      desc.vendor = d->vendor != nullptr ? d->vendor : "";
+      desc.path = path.string();
+      // Port counts need a live instance, so they stay zero until the plugin is
+      // actually loaded and read_port_counts fills them in.
+      out.push_back(std::move(desc));
+    }
+  }
+
+  std::mutex mutex_;
+  std::map<std::string, std::weak_ptr<ClapModule>> modules_;
 };
 
 }  // namespace
