@@ -51,16 +51,32 @@ da UI e entregue pronta por mensagem; o descarte volta pela fila de lixo.
 2. **Host LV2** — interface `PluginInstance` + backend lilv, provado por CLI
    processando áudio pelo DragonflyHallReverb.
 3. **Host CLAP** — scan de `~/.clap` e `/usr/lib/clap`, params, estado.
-4. **Host VST3** — SDK vendorizado, `IComponent`/`IAudioProcessor`/`IEditController`.
-5. **UI mixer** — strips verticais, fader+medidor, slots de insert, master, patch view.
-6. **GUI de plugin** — embedding X11: suil (LV2), extensão `gui` (CLAP), `IPlugView` (VST3).
-7. **MIDI** — portas JACK MIDI, roteamento por canal, MIDI learn.
-8. **Gravador + looper** — ring buffer realtime → thread de escrita, WAV/FLAC;
+4. **UI mixer** — strips verticais, fader+medidor, slots de insert, master, patch view.
+5. **GUI de plugin** — embedding X11: suil (LV2), extensão `gui` (CLAP).
+6. **MIDI** — portas JACK MIDI, roteamento por canal, MIDI learn.
+7. **Gravador + looper** — ring buffer realtime → thread de escrita, WAV/FLAC;
    loops com lançamento quantizado.
-9. **Sessão** — serialização do grafo + blobs opacos de estado dos plugins.
+8. **Sessão** — serialização do grafo + blobs opacos de estado dos plugins.
+9. **Host VST3** — adiado (ver abaixo).
 
-Ordem é dependência real, não preferência: 6 precisa de 5, 5 precisa de 2–4,
+Ordem é dependência real, não preferência: 5 precisa de 4, 4 precisa de 2–3,
 todos precisam de 1.
+
+## VST3 — adiado de propósito
+
+Decisão de 14/08/2026: fica para quando o resto estiver de pé. Motivos:
+
+- É o backend mais caro dos três (SDK vendorizado, API COM-like, arranjo de bus
+  a negociar) e o que menos ensina sobre a arquitetura do host — CLAP e LV2 já
+  provaram que a interface `PluginInstance` aguenta formatos diferentes.
+- Carimba **GPLv3** no projeto. Enquanto ele não entra, a licença fica em aberto.
+- Nada depende dele: a UI, o MIDI, o gravador e a sessão são todos indiferentes
+  ao formato do plugin.
+
+O que já está pronto para recebê-lo: a opção `NIRBIJA_VST3` no CMake (default
+`OFF`), o ramo em `make_all_backends()`, e `PluginFormat::Vst3` na interface.
+Falta o `src/hosting/vst3_backend.cpp` — `IComponent`/`IAudioProcessor`/
+`IEditController`, arranjo de bus, sincronismo de parâmetro.
 
 ## Como validar cada fase
 
