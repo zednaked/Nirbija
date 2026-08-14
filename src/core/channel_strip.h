@@ -41,6 +41,13 @@ class ChannelStrip {
   void set_muted(bool muted) { muted_.store(muted, std::memory_order_relaxed); }
   void set_soloed(bool soloed) { soloed_.store(soloed, std::memory_order_relaxed); }
   bool soloed() const { return soloed_.load(std::memory_order_relaxed); }
+  void set_armed(bool armed) { armed_.store(armed, std::memory_order_relaxed); }
+  bool armed() const { return armed_.load(std::memory_order_relaxed); }
+
+  // Which recorder track this strip feeds, or -1 while not recording. Set by
+  // the engine when a recording starts.
+  void set_record_track(int track) { record_track_.store(track, std::memory_order_release); }
+  int record_track() const { return record_track_.load(std::memory_order_acquire); }
 
   // Peak since the last read, for the UI meters. Reading resets it.
   float read_peak(int channel);
@@ -68,6 +75,8 @@ class ChannelStrip {
   std::atomic<float> pan_{0.0f};   // -1 left, +1 right
   std::atomic<bool> muted_{false};
   std::atomic<bool> soloed_{false};
+  std::atomic<bool> armed_{false};
+  std::atomic<int> record_track_{-1};
 
   // One smoothed value per parameter so a fader move does not click.
   float smoothed_gain_ = 1.0f;

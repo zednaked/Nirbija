@@ -3,6 +3,7 @@
 #include <jack/midiport.h>
 
 #include <algorithm>
+#include <ctime>
 
 namespace nirbija {
 namespace {
@@ -144,6 +145,55 @@ size_t Engine::add_channel(const std::string& name, int channel_count) {
   return graph_->add_channel(name, channel_count,
                              std::make_unique<JackInputSource>(ports[0], ports[1]),
                              std::make_unique<JackMidiSource>(midi_port));
+}
+
+std::string Engine::start_recording(const std::string& directory) {
+  if (client_ == nullptr || recorder_.recording()) return {};
+
+  // Armed channels first, master last, so the file numbers read in strip order.
+  std::vector<std::string> names;
+  std::vector<size_t> armed;
+  const size_t count = graph_->channel_count();
+  for (size_t i = 0; i < count; ++i) {
+    if (!graph_->channel_alive(i)) continue;
+    ChannelStrip& strip = graph_->channel(i);
+    if (!strip.armed()) continue;
+    armed.push_back(i);
+    names.push_back(strip.name());
+  }
+  names.push_back("master");
+
+  // One folder per take, named by the clock, so takes never overwrite.
+  const std::time_t now = std::time(nullptr);
+  char stamp[32] = {};
+  std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H-%M-%S", std::localtime(&now));
+  const std::string take = directory + "/" + stamp;
+
+  if (!recorder_.start(take, sample_rate_, names)) return {};
+
+  for (size_t track = 0; track < armed.size(); ++track)
+    graph_->channel(armed[track]).set_record_track(static_cast<int>(track));
+
+  graph_->set_recorder(&recorder_, static_cast<int>(names.size()) - 1);
+  return take;
+}
+
+void Engine::stop_recording() {
+  if (!recorder_.recording()) return;
+
+  // The graph stops feeding it before it is torn down, so no block can be
+  // writing into a recorder that is closing its files.
+  graph_->set_recorder(nullptr, -1);
+  const size_t count = graph_->channel_count();
+  for (size_t i = 0; i < count; ++i)
+    if (graph_->channel_alive(i)) graph_->channel(i).set_record_track(-1);
+
+  recorder_.stop();
+}
+
+double Engine::recorded_seconds() const {
+  if (sample_rate_ <= 0.0) return 0.0;
+  return static_cast<double>(recorder_.frames_written()) / sample_rate_;
 }
 
 void Engine::remove_channel(size_t channel) {

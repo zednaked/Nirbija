@@ -51,6 +51,8 @@ void AudioGraph::remove_channel(size_t index) {
 void AudioGraph::render(float* const* master, uint32_t frames) {
   for (int ch = 0; ch < 2; ++ch) std::fill_n(master[ch], frames, 0.0f);
 
+  Recorder* recorder = recorder_.load(std::memory_order_acquire);
+
   const size_t count = active_.load(std::memory_order_acquire);
   const bool solo_active = any_soloed(count);
 
@@ -71,6 +73,15 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
 
     strip.process(scratch_ptrs_.data(), frames, midi_scratch_.data(), midi_count,
                   &transport_);
+
+    // Recorded post-fader and post-insert: what the channel actually sends to
+    // the mix is what someone expects to hear back.
+    if (recorder != nullptr) {
+      const int track = strip.record_track();
+      if (track >= 0)
+        recorder->write(static_cast<size_t>(track), scratch_ptrs_.data(), width,
+                        frames);
+    }
 
     // A mono strip is widened here, with constant-power pan so sweeping it
     // across the image keeps the same loudness. A stereo strip already had its
@@ -97,6 +108,15 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
     if (peak > master_peaks_[ch].load(std::memory_order_relaxed))
       master_peaks_[ch].store(peak, std::memory_order_relaxed);
   }
+
+  record_master(master, frames);
+}
+
+void AudioGraph::record_master(float* const* master, uint32_t frames) {
+  Recorder* recorder = recorder_.load(std::memory_order_acquire);
+  if (recorder == nullptr || master_track_ < 0) return;
+  recorder->write(static_cast<size_t>(master_track_), master, 2, frames);
+  recorder->advance(frames);
 }
 
 float AudioGraph::read_master_peak(int channel) {

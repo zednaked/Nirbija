@@ -1,5 +1,7 @@
 #include "mixer_model.h"
 
+#include <QDir>
+#include <QStandardPaths>
 #include <QtMath>
 
 #include <cmath>
@@ -188,9 +190,12 @@ void MixerModel::toggleSolo(int row) {
 
 void MixerModel::toggleArm(int row) {
   if (row < 0 || row >= static_cast<int>(channels_.size())) return;
-  // Arming has no effect until the recorder lands; the button is here so the
-  // strip layout is right, and it already tracks per-channel state.
   channels_[row].armed = !channels_[row].armed;
+
+  // Arming mid-take does nothing until the next one: tracks are decided when
+  // recording starts, and adding a file part way through would leave a take
+  // whose files no longer line up.
+  engine_.graph().channel(channels_[row].slot).set_armed(channels_[row].armed);
   const QModelIndex idx = index(row);
   emit dataChanged(idx, idx, {ArmedRole});
 }
@@ -214,6 +219,40 @@ void MixerModel::togglePlay() {
   // The engine only applies this on its next block, so the property is read
   // back a moment later rather than assumed.
   QTimer::singleShot(50, this, [this] { emit transportChanged(); });
+}
+
+QString MixerModel::recordingsPath() {
+  const QString music =
+      QStandardPaths::writableLocation(QStandardPaths::MusicLocation);
+  return (music.isEmpty() ? QDir::homePath() : music) +
+         QStringLiteral("/Nirbija");
+}
+
+QString MixerModel::toggleRecord() {
+  if (engine_.recording()) {
+    engine_.stop_recording();
+    emit recordingChanged();
+    return {};
+  }
+
+  const QString take =
+      QString::fromStdString(engine_.start_recording(recordingsPath().toStdString()));
+  if (take.isEmpty()) qWarning("recorder: could not start a take");
+  emit recordingChanged();
+  return take;
+}
+
+// Elapsed time of the take, and a warning if the disk could not keep up: a
+// dropout is not something to discover after the session.
+QString MixerModel::recordingLabel() const {
+  if (!engine_.recording()) return {};
+
+  const int seconds = static_cast<int>(engine_.recorded_seconds());
+  const QString elapsed = QStringLiteral("%1:%2")
+                              .arg(seconds / 60)
+                              .arg(seconds % 60, 2, 10, QLatin1Char('0'));
+  return engine_.recording_overran() ? elapsed + tr(" · dropped samples")
+                                     : elapsed;
 }
 
 void MixerModel::rewind() {

@@ -19,6 +19,8 @@ ApplicationWindow {
         masterSink: mixer.masterSink
         tempo: mixer.tempo
         playing: mixer.playing
+        recording: mixer.recording
+        recordingLabel: mixer.recordingLabel
         onMasterOutputClicked: portPicker.openFor("sink", -1)
     }
 

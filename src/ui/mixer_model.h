@@ -28,6 +28,8 @@ class MixerModel : public QAbstractListModel {
   Q_PROPERTY(qreal masterGain READ masterGain WRITE setMasterGain NOTIFY masterGainChanged)
   Q_PROPERTY(QString masterSink READ masterSink NOTIFY routingChanged)
   Q_PROPERTY(bool playing READ playing NOTIFY transportChanged)
+  Q_PROPERTY(bool recording READ recording NOTIFY recordingChanged)
+  Q_PROPERTY(QString recordingLabel READ recordingLabel NOTIFY levelsChanged)
   Q_PROPERTY(qreal tempo READ tempo WRITE setTempo NOTIFY transportChanged)
   Q_PROPERTY(nirbija::PluginListModel* plugins READ plugins CONSTANT)
 
@@ -65,12 +67,20 @@ class MixerModel : public QAbstractListModel {
   qreal masterGain() const { return master_gain_; }
   QString masterSink() const;
   bool playing() const { return engine_.playing(); }
+  bool recording() const { return engine_.recording(); }
+  QString recordingLabel() const;
   qreal tempo() const { return engine_.tempo(); }
   void setTempo(qreal bpm);
   PluginListModel* plugins() const { return plugins_.get(); }
   void setMasterGain(qreal gain);
 
   Q_INVOKABLE void togglePlay();
+
+  // Starts recording every armed channel plus the master, or stops the take in
+  // progress. Returns the folder the take went to, empty on failure.
+  Q_INVOKABLE QString toggleRecord();
+
+  Q_INVOKABLE static QString recordingsPath();
   Q_INVOKABLE void rewind();
 
   Q_INVOKABLE void addChannel(const QString& name, int channels);
@@ -126,6 +136,7 @@ class MixerModel : public QAbstractListModel {
   void masterGainChanged();
   void routingChanged();
   void transportChanged();
+  void recordingChanged();
 
  private:
   struct ChannelUi {

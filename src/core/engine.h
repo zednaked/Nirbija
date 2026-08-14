@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "core/audio_graph.h"
+#include "core/recorder.h"
 #include "core/rt_queue.h"
 
 namespace nirbija {
@@ -72,6 +73,16 @@ class Engine {
   // opened is expected to already be audible.
   bool connect_master_to_default_output();
 
+  // --- recording ----------------------------------------------------------
+  // Records every armed channel plus the master, one file each, into a new
+  // folder under `directory`. Returns the folder, or an empty string if the
+  // recording could not be started.
+  std::string start_recording(const std::string& directory);
+  void stop_recording();
+  bool recording() const { return recorder_.recording(); }
+  bool recording_overran() const { return recorder_.overran(); }
+  double recorded_seconds() const;
+
   // --- transport ----------------------------------------------------------
   // Read from the UI thread; the audio thread owns the writing.
   bool playing() const { return playing_.load(std::memory_order_relaxed); }
@@ -115,6 +126,7 @@ class Engine {
   uint32_t block_frames_ = 0;
 
   std::unique_ptr<AudioGraph> graph_;
+  Recorder recorder_;
 
   std::atomic<bool> playing_{false};
   std::atomic<double> tempo_{120.0};

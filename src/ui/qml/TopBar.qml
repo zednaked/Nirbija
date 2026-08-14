@@ -7,6 +7,8 @@ Rectangle {
 
     property real tempo: 120
     property bool playing: false
+    property bool recording: false
+    property string recordingLabel: ""
     property real peakLeft: 0
     property real peakRight: 0
     property string status: ""
@@ -46,7 +48,17 @@ Rectangle {
             width: 30
             height: 28
             label: "●"
+            active: root.recording
             activeColor: Skin.arm
+            onClicked: mixer.toggleRecord()
+        }
+
+        Text {
+            anchors.verticalCenter: parent.verticalCenter
+            visible: root.recording
+            text: root.recordingLabel
+            color: Skin.arm
+            font.pixelSize: 11
         }
 
         // Tempo is dragged rather than typed: it is a value you nudge while

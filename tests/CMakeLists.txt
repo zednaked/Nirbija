@@ -51,3 +51,7 @@ if(NIRBIJA_UI)
   target_link_libraries(nirbija_session_roundtrip PRIVATE nirbija_ui)
   add_test(NAME session_roundtrip COMMAND nirbija_session_roundtrip)
 endif()
+
+add_executable(nirbija_recorder_take recorder_take.cpp)
+target_link_libraries(nirbija_recorder_take PRIVATE nirbija_core PkgConfig::SNDFILE)
+add_test(NAME recorder_take COMMAND nirbija_recorder_take)

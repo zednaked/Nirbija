@@ -3,9 +3,10 @@ add_library(nirbija_core
   core/channel_strip.cpp
   core/engine.cpp
   core/plugin.cpp
+  core/recorder.cpp
 )
 target_include_directories(nirbija_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(nirbija_core PUBLIC PkgConfig::JACK)
+target_link_libraries(nirbija_core PUBLIC PkgConfig::JACK PRIVATE PkgConfig::SNDFILE)
 
 if(NIRBIJA_LV2)
   target_sources(nirbija_core PRIVATE hosting/lv2_backend.cpp)

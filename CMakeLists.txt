@@ -16,6 +16,8 @@ add_compile_options(-Wall -Wextra -Wpedantic)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(JACK REQUIRED IMPORTED_TARGET jack)
+# Declared here rather than in src/ so the tests can link it too.
+pkg_check_modules(SNDFILE REQUIRED IMPORTED_TARGET sndfile)
 
 if(NIRBIJA_LV2)
   pkg_check_modules(LILV REQUIRED IMPORTED_TARGET lilv-0)

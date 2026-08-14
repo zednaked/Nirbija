@@ -7,6 +7,7 @@
 
 #include "core/audio_source.h"
 #include "core/channel_strip.h"
+#include "core/recorder.h"
 
 namespace nirbija {
 
@@ -27,6 +28,13 @@ class AudioGraph {
 
   // Realtime thread. Handed to every insert before it processes.
   void set_transport(const TransportInfo& transport) { transport_ = transport; }
+
+  // The recorder is borrowed, not owned: the engine outlives the graph's use of
+  // it and is what starts and stops it.
+  void set_recorder(Recorder* recorder, int master_track) {
+    master_track_ = master_track;
+    recorder_.store(recorder, std::memory_order_release);
+  }
 
   // UI thread. The strip is fully built and prepared before it becomes visible
   // to the audio thread, so no half-initialised channel is ever rendered.
@@ -53,6 +61,7 @@ class AudioGraph {
 
  private:
   bool any_soloed(size_t count) const;
+  void record_master(float* const* master, uint32_t frames);
 
   std::array<std::unique_ptr<ChannelStrip>, kMaxChannels> channels_;
   std::array<std::unique_ptr<AudioSource>, kMaxChannels> sources_;
@@ -72,6 +81,8 @@ class AudioGraph {
   uint32_t max_block_frames_ = 0;
 
   TransportInfo transport_;
+  std::atomic<Recorder*> recorder_{nullptr};
+  int master_track_ = -1;
   std::atomic<float> master_gain_{1.0f};
   std::atomic<float> master_peaks_[2]{{0.0f}, {0.0f}};
 
