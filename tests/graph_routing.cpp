@@ -91,6 +91,37 @@ int main() {
   settle(graph);
   expect_near("strip meter is post-fader", graph.channel(b).read_peak(0), 0.25f, 1e-3f);
 
+  // --- one channel feeding another -------------------------------------------
+  // Channel a points at channel b instead of the master; b carries both its own
+  // source and a's output.
+  {
+    graph.channel(a).set_destination(nirbija::channel_destination(b));
+    const float combined = settle(graph);
+    // a (0.75 through its fader at 1.0... reset state first)
+    graph.channel(a).set_destination(nirbija::kMasterDestination);
+    if (combined <= 0.0f) {
+      std::fprintf(stderr, "FAIL channel-to-channel produced nothing\n");
+      ++failures;
+    }
+  }
+
+  // A cleaner check with fresh numbers: a=0.5 into b=0.25 gives the master
+  // 0.75 through one path only.
+  {
+    graph.channel(a).set_gain(1.0f);
+    graph.channel(b).set_gain(1.0f);
+    graph.set_master_gain(1.0f);
+    graph.channel(a).set_destination(nirbija::channel_destination(b));
+    expect_near("a routed through b still sums to the same total",
+                settle(graph), 0.75f, 1e-3f);
+
+    // Muting b silences a too now, which is the whole point of the routing.
+    graph.channel(b).set_muted(true);
+    expect_near("muting b silences a as well", settle(graph), 0.0f, 1e-4f);
+    graph.channel(b).set_muted(false);
+    graph.channel(a).set_destination(nirbija::kMasterDestination);
+  }
+
   if (failures > 0) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return 1;

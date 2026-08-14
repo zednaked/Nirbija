@@ -250,14 +250,22 @@ QVariantList MixerModel::destinationsFor(int row) const {
 
   const ChannelUi& source = channels_[row];
   for (const ChannelUi& candidate : channels_) {
-    if (!candidate.is_bus) continue;
-    // A bus may only feed a bus that renders after it. Anything else would be
-    // a loop, and a loop in a mixer is a scream.
-    if (source.is_bus && candidate.slot <= source.slot) continue;
+    if (&candidate == &source) continue;
 
+    // The render order decides what is reachable: channels render in slot
+    // order and buses after all of them. Feeding anything already rendered
+    // would be a loop, so it is simply not offered.
     QVariantMap entry;
+    if (candidate.is_bus) {
+      if (source.is_bus && candidate.slot <= source.slot) continue;
+      entry[QStringLiteral("destination")] = static_cast<int>(candidate.slot);
+    } else {
+      if (source.is_bus) continue;  // a bus cannot feed a channel
+      if (candidate.slot <= source.slot) continue;
+      entry[QStringLiteral("destination")] =
+          channel_destination(candidate.slot);
+    }
     entry[QStringLiteral("label")] = candidate.name;
-    entry[QStringLiteral("destination")] = static_cast<int>(candidate.slot);
     out.append(entry);
   }
   return out;
@@ -321,9 +329,12 @@ void MixerModel::setDestination(int row, int destination) {
   channels_[row].destination = destination;
 
   QString label = tr("Master");
-  for (const ChannelUi& candidate : channels_)
-    if (candidate.is_bus && static_cast<int>(candidate.slot) == destination)
-      label = candidate.name;
+  for (const ChannelUi& candidate : channels_) {
+    const int id = candidate.is_bus
+                       ? static_cast<int>(candidate.slot)
+                       : channel_destination(candidate.slot);
+    if (id == destination) label = candidate.name;
+  }
   channels_[row].output_label = label;
 
   const QModelIndex idx = index(row);

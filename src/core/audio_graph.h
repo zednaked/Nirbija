@@ -20,6 +20,16 @@ inline constexpr size_t kMaxChannels = 64;
 // it rather than by a port.
 inline constexpr size_t kMaxBuses = 16;
 
+// How a strip names where it sends: -1 is the master, anything below
+// kChannelDestination is a bus index, and above it a channel slot. One number
+// so it can live in a single atomic the audio thread reads per block.
+inline constexpr int kMasterDestination = -1;
+inline constexpr int kChannelDestination = 1000;
+
+inline int channel_destination(size_t slot) {
+  return kChannelDestination + static_cast<int>(slot);
+}
+
 class AudioGraph {
  public:
   AudioGraph();
@@ -80,12 +90,19 @@ class AudioGraph {
   void mix_into(float* const* target, const ChannelStrip& strip, int width,
                 uint32_t frames, float gain = 1.0f);
 
+  // Where a strip's output goes. `rendered_channels` and `rendered_buses` are
+  // how far the pass has got, since a strip can only feed something still
+  // ahead of it — which is what makes a loop unrepresentable rather than
+  // something to detect.
+  float* const* destination_for(int destination, float* const* master,
+                                long long rendered_channels,
+                                long long rendered_buses);
+
   // Sends run after the strip has been processed, so what they carry is what
   // the strip is actually putting out, fader included.
   void apply_sends(const ChannelStrip& strip, int width, uint32_t frames,
-                   size_t after_bus);
-  float* const* destination_for(int destination, float* const* master,
-                                size_t after_bus);
+                   long long rendered_buses);
+
 
   std::array<std::unique_ptr<ChannelStrip>, kMaxChannels> channels_;
   std::array<std::unique_ptr<AudioSource>, kMaxChannels> sources_;
@@ -104,6 +121,11 @@ class AudioGraph {
   // prepare() and reused every block.
   std::array<std::vector<std::vector<float>>, kMaxBuses> bus_buffers_;
   std::array<std::vector<float*>, kMaxBuses> bus_ptrs_;
+
+  // The same idea for channels: a channel can be fed by an earlier channel, so
+  // it needs somewhere for that to land before it renders.
+  std::array<std::vector<std::vector<float>>, kMaxChannels> channel_buffers_;
+  std::array<std::vector<float*>, kMaxChannels> channel_ptrs_;
 
   // UI thread only. Removed strips wait here: freeing one while the audio
   // thread is inside it would be a use-after-free.

@@ -4,10 +4,7 @@
 #include <cmath>
 
 namespace nirbija {
-namespace {
-// Channels run before every bus, so nothing is behind them in the pass.
-constexpr size_t kNoBusYet = static_cast<size_t>(-1);
-}  // namespace
+
 
 AudioGraph::AudioGraph() = default;
 AudioGraph::~AudioGraph() = default;
@@ -28,6 +25,13 @@ void AudioGraph::prepare(double sample_rate, uint32_t max_block_frames) {
     bus_ptrs_[i].assign(2, nullptr);
     for (size_t ch = 0; ch < 2; ++ch)
       bus_ptrs_[i][ch] = bus_buffers_[i][ch].data();
+  }
+
+  for (size_t i = 0; i < kMaxChannels; ++i) {
+    channel_buffers_[i].assign(2, std::vector<float>(max_block_frames, 0.0f));
+    channel_ptrs_[i].assign(2, nullptr);
+    for (size_t ch = 0; ch < 2; ++ch)
+      channel_ptrs_[i][ch] = channel_buffers_[i][ch].data();
   }
 
   const size_t count = active_.load(std::memory_order_acquire);
@@ -117,7 +121,7 @@ void AudioGraph::mix_into(float* const* target, const ChannelStrip& strip,
 }
 
 void AudioGraph::apply_sends(const ChannelStrip& strip, int width,
-                             uint32_t frames, size_t after_bus) {
+                             uint32_t frames, long long rendered_buses) {
   for (size_t i = 0; i < kMaxSends; ++i) {
     const int bus = strip.send_bus(i);
     if (bus < 0) continue;
@@ -125,24 +129,35 @@ void AudioGraph::apply_sends(const ChannelStrip& strip, int width,
     const float level = strip.send_level(i);
     if (level <= 0.0f) continue;
 
-    const size_t index = static_cast<size_t>(bus);
+    const long long index = bus;
     // The same rule as a destination: only a bus still ahead in this pass, or
     // the send would land in a buffer that has already been rendered.
-    if (index >= bus_count() || index <= after_bus) continue;
+    if (index >= static_cast<long long>(bus_count())) continue;
+    if (index <= rendered_buses) continue;
     if (live_buses_[index].load(std::memory_order_acquire) == nullptr) continue;
 
     mix_into(bus_ptrs_[index].data(), strip, width, frames, level);
   }
 }
 
-// Master unless the destination names a live bus. `after_bus` keeps a bus from
-// feeding itself or anything upstream of it: buses render in index order, so
-// only a higher index is still ahead in the pass.
 float* const* AudioGraph::destination_for(int destination, float* const* master,
-                                          size_t after_bus) {
-  if (destination < 0) return master;
-  const size_t index = static_cast<size_t>(destination);
-  if (index >= bus_count() || index <= after_bus) return master;
+                                          long long rendered_channels,
+                                          long long rendered_buses) {
+  if (destination == kMasterDestination) return master;
+
+  if (destination >= kChannelDestination) {
+    const long long slot = destination - kChannelDestination;
+    // Only a channel this pass has not reached yet. Anything else would land in
+    // a buffer that has already been mixed away.
+    if (slot <= rendered_channels) return master;
+    if (slot >= static_cast<long long>(kMaxChannels)) return master;
+    if (live_[slot].load(std::memory_order_acquire) == nullptr) return master;
+    return channel_ptrs_[slot].data();
+  }
+
+  const long long index = destination;
+  if (index >= static_cast<long long>(bus_count())) return master;
+  if (index <= rendered_buses) return master;
   if (live_buses_[index].load(std::memory_order_acquire) == nullptr) return master;
   return bus_ptrs_[index].data();
 }
@@ -153,6 +168,10 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
   const size_t buses = bus_active_.load(std::memory_order_acquire);
   for (size_t i = 0; i < buses; ++i)
     for (int ch = 0; ch < 2; ++ch) std::fill_n(bus_ptrs_[i][ch], frames, 0.0f);
+
+  const size_t channel_slots = active_.load(std::memory_order_acquire);
+  for (size_t i = 0; i < channel_slots; ++i)
+    for (int ch = 0; ch < 2; ++ch) std::fill_n(channel_ptrs_[i][ch], frames, 0.0f);
 
   Recorder* recorder = recorder_.load(std::memory_order_acquire);
 
@@ -167,6 +186,12 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
 
     const int width = strip.channel_count();
     sources_[i]->read(scratch_ptrs_.data(), width, frames);
+
+    // Whatever an earlier channel sent here is part of this channel's input,
+    // alongside its own port.
+    for (int ch = 0; ch < width; ++ch)
+      for (uint32_t f = 0; f < frames; ++f)
+        scratch_ptrs_[ch][f] += channel_ptrs_[i][std::min(ch, 1)][f];
 
     size_t midi_count = 0;
     if (midi_sources_[i] != nullptr) {
@@ -186,10 +211,10 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
                         frames);
     }
 
-    // Channels are before every bus in the pass, so any live bus is a legal
-    // destination for them.
-    apply_sends(strip, width, frames, kNoBusYet);
-    mix_into(destination_for(strip.destination(), master, kNoBusYet),
+    // Channels run before every bus, so any live bus is still ahead of them.
+    apply_sends(strip, width, frames, -1);
+    mix_into(destination_for(strip.destination(), master,
+                             static_cast<long long>(i), -1),
              strip, width, frames);
   }
 
@@ -210,8 +235,13 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
         recorder->write(static_cast<size_t>(track), scratch_ptrs_.data(), 2, frames);
     }
 
-    apply_sends(*live, 2, frames, i);
-    mix_into(destination_for(live->destination(), master, i), *live, 2, frames);
+    apply_sends(*live, 2, frames, static_cast<long long>(i));
+    // Every channel is behind a bus by now, so a bus can only feed a later bus
+    // or the master.
+    mix_into(destination_for(live->destination(), master,
+                             static_cast<long long>(kMaxChannels),
+                             static_cast<long long>(i)),
+             *live, 2, frames);
   }
 
   const float gain = master_gain_.load(std::memory_order_relaxed);
