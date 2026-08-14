@@ -90,6 +90,10 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE void addChannel(const QString& name, int channels);
   Q_INVOKABLE void addBus(const QString& name);
 
+  // Makes a bus and points `row` at it, which is how one strip comes to feed
+  // another. Returns the new bus's row.
+  Q_INVOKABLE int sendRowToNewBus(int row);
+
   // Where a row sends its output: -1 is the master, otherwise a bus index.
   Q_INVOKABLE void setDestination(int row, int destination);
 
@@ -140,6 +144,11 @@ class MixerModel : public QAbstractListModel {
   void loadSession();
   static QString sessionPath();
 
+  // False when another Nirbija already holds the session. That instance still
+  // runs and still loads what is on disk, but never writes: two mixers taking
+  // turns overwriting one file loses whichever was edited first.
+  bool ownsSession() const { return session_fd_ >= 0; }
+
   // Turns a fader position in 0..1 into a linear gain, and back. AUM's fader is
   // not linear in amplitude: most of the travel covers the top of the range.
   Q_INVOKABLE static qreal faderToGain(qreal position);
@@ -189,6 +198,7 @@ class MixerModel : public QAbstractListModel {
 
   // Coalesces the writes: a fader drag would otherwise save on every frame.
   void markDirty();
+  void claimSession();
   void post(EngineCommand::Kind kind, int row, float value);
 
   // Declared before the engine so it outlives it: strips hold plugin instances
@@ -201,6 +211,8 @@ class MixerModel : public QAbstractListModel {
   // Restoring fires the same setters the UI does; without this every one of
   // them would queue another save of what was just loaded.
   bool restoring_ = false;
+  // Held for the life of the process; the kernel drops it if we die badly.
+  int session_fd_ = -1;
   // Editor windows stay owned here so closing the mixer closes them too. The
   // slot tags each one, so removing a channel closes only its own editors.
   struct OpenEditor {

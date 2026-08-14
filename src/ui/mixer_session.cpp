@@ -10,6 +10,10 @@
 #include <QJsonObject>
 #include <QStandardPaths>
 
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+
 #include "mixer_model.h"
 
 namespace nirbija {
@@ -51,8 +55,29 @@ QString MixerModel::sessionPath() {
   return dir + QStringLiteral("/session.json");
 }
 
+// Takes the session lock, or reports that someone else has it. Called once,
+// before anything is loaded.
+void MixerModel::claimSession() {
+  const QString path = sessionPath() + QStringLiteral(".lock");
+  QDir().mkpath(QFileInfo(path).absolutePath());
+
+  const int fd = ::open(path.toLocal8Bit().constData(), O_RDWR | O_CREAT, 0644);
+  if (fd < 0) return;
+
+  // Non-blocking: if another instance holds it, this one carries on read-only
+  // rather than waiting for a mixer that may never close.
+  if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
+    ::close(fd);
+    return;
+  }
+  session_fd_ = fd;
+}
+
 void MixerModel::saveSession() const {
   if (!engine_.running()) return;
+  // Another instance owns the file. Loading it was useful; writing it would
+  // throw away whatever that instance is doing.
+  if (session_fd_ < 0) return;
 
   QJsonArray channels;
   for (size_t row = 0; row < channels_.size(); ++row) {

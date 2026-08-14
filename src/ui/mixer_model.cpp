@@ -47,7 +47,13 @@ MixerModel::MixerModel(QObject* parent) : QAbstractListModel(parent) {
   autosave_timer_.setInterval(1000);
   connect(&autosave_timer_, &QTimer::timeout, this, &MixerModel::saveSession);
 
+  claimSession();
   loadSession();
+
+  if (!ownsSession()) {
+    status_ += tr(" · session read-only (another Nirbija has it)");
+    emit statusChanged();
+  }
 }
 
 MixerModel::~MixerModel() {
@@ -213,6 +219,17 @@ void MixerModel::addBus(const QString& name) {
   channels_.push_back(std::move(bus));
   endInsertRows();
   markDirty();
+}
+
+int MixerModel::sendRowToNewBus(int row) {
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return -1;
+
+  addBus(QString());
+  const int bus_row = rowCount() - 1;
+  if (bus_row < 0 || !channels_[bus_row].is_bus) return -1;
+
+  setDestination(row, static_cast<int>(channels_[bus_row].slot));
+  return bus_row;
 }
 
 int MixerModel::busCount() const {

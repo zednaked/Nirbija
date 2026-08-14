@@ -141,6 +141,14 @@ ApplicationWindow {
                             })
                         }
 
+                        // Always reachable, so a session with no bus yet is not
+                        // a dead end: this is how one strip comes to feed
+                        // another.
+                        entries.push({
+                            label: qsTr("New mix bus…"),
+                            action: () => mixer.sendRowToNewBus(index)
+                        })
+
                         slotMenu.openAt(this, entries, qsTr("Output"))
                     }
 
