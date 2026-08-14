@@ -13,11 +13,19 @@ Duas coisas nele não são decoração:
 
 ## Hyprland
 
+Testado no Hyprland 0.56, cuja sintaxe de regra usa `match:class` e campos com
+valor — a forma antiga `windowrule = float, class:...` é recusada com
+`invalid field float: missing a value`.
+
 ```
 bind = $mainMod SHIFT, N, exec, env __GLX_VENDOR_LIBRARY_NAME=mesa $HOME/dev/Nirbija/build/src/ui/nirbija
 
-windowrule = float, class:^(nirbija-plugin)$
-windowrule = center, class:^(nirbija-plugin)$
+windowrule {
+    name = nirbija_plugin_editor
+    match:class = ^(nirbija-plugin)$
+    float = true
+    center = true
+}
 ```
 
 A regra de flutuante importa: as editoras de plugin são janelas X11 próprias, e
