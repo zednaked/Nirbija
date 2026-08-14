@@ -9,7 +9,9 @@ Rectangle {
     property real peakLeft: 0
     property real peakRight: 0
     property string status: ""
+    property string masterSink: ""
 
+    signal masterOutputClicked
     signal navigatorClicked
     signal matrixClicked
     signal menuClicked
@@ -53,7 +55,15 @@ Rectangle {
     }
 
     // --- master meter -------------------------------------------------------
+    // Tapping it chooses where the master goes, which is the one routing
+    // decision that is not per channel.
+    MouseArea {
+        anchors.fill: masterMeter
+        onClicked: root.masterOutputClicked()
+    }
+
     Column {
+        id: masterMeter
         anchors.centerIn: parent
         spacing: 3
 
@@ -87,6 +97,15 @@ Rectangle {
         anchors.top: parent.top
         anchors.topMargin: 2
         text: root.status
+        color: Skin.textDim
+        font.pixelSize: 9
+    }
+
+    Text {
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 3
+        text: root.masterSink.length > 0 ? root.masterSink : qsTr("no output")
         color: Skin.textDim
         font.pixelSize: 9
     }

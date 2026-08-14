@@ -15,11 +15,14 @@ Rectangle {
     property real peakLeft: 0
     property real peakRight: 0
     property string inputLabel: ""
+    property string midiLabel: ""
     property string outputLabel: ""
     property var inserts: []
     property color accent: Skin.accent
 
     signal insertSlotClicked(int slot)
+    signal inputSlotClicked
+    signal midiSlotClicked
 
     width: Skin.stripWidth
     color: Skin.strip
@@ -45,7 +48,19 @@ Rectangle {
         NodeSlot {
             width: parent.width
             label: root.inputLabel
+            filled: root.inputLabel !== qsTr("no input")
             level: Math.max(root.peakLeft, root.peakRight)
+            onClicked: root.inputSlotClicked()
+        }
+
+        // MIDI gets its own node slot rather than hiding in a menu: on this
+        // mixer any channel can host a synth, so any channel can want MIDI.
+        NodeSlot {
+            width: parent.width
+            label: root.midiLabel
+            filled: root.midiLabel !== qsTr("no MIDI")
+            level: 0
+            onClicked: root.midiSlotClicked()
         }
 
         // --- fader, mute and solo -------------------------------------------

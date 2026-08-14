@@ -135,9 +135,118 @@ size_t Engine::add_channel(const std::string& name, int channel_count) {
     return kMaxChannels;
   }
 
+  ChannelPorts record;
+  record.audio[0] = ports[0];
+  record.audio[1] = ports[1];
+  record.midi = midi_port;
+  channel_ports_.push_back(record);
+
   return graph_->add_channel(name, channel_count,
                              std::make_unique<JackInputSource>(ports[0], ports[1]),
                              std::make_unique<JackMidiSource>(midi_port));
+}
+
+std::vector<std::string> Engine::ports_matching(unsigned long flags,
+                                                const char* type,
+                                                bool physical_only) const {
+  if (client_ == nullptr) return {};
+
+  if (physical_only) flags |= JackPortIsPhysical;
+  const char** ports = jack_get_ports(client_, nullptr, type, flags);
+
+  std::vector<std::string> found;
+  for (const char** port = ports; port != nullptr && *port != nullptr; ++port) {
+    const std::string name = *port;
+    // Our own ports are never worth offering: connecting the mixer to itself
+    // is either a no-op or a feedback loop.
+    if (name.rfind(jack_get_client_name(client_), 0) == 0) continue;
+    found.push_back(name);
+  }
+  if (ports != nullptr) jack_free(ports);
+  return found;
+}
+
+std::vector<std::string> Engine::available_sources(bool midi,
+                                                   bool physical_only) const {
+  return ports_matching(JackPortIsOutput,
+                        midi ? JACK_DEFAULT_MIDI_TYPE : JACK_DEFAULT_AUDIO_TYPE,
+                        physical_only);
+}
+
+std::vector<std::string> Engine::available_sinks(bool physical_only) const {
+  return ports_matching(JackPortIsInput, JACK_DEFAULT_AUDIO_TYPE, physical_only);
+}
+
+bool Engine::connect_source(size_t channel, const std::string& port, bool midi) {
+  if (client_ == nullptr || channel >= channel_ports_.size()) return false;
+  const ChannelPorts& record = channel_ports_[channel];
+
+  // Picking a source replaces the old one rather than stacking on top of it,
+  // which is what choosing an input in a mixer means.
+  const int count = midi ? 1 : (record.audio[1] != nullptr ? 2 : 1);
+  for (int i = 0; i < count; ++i) {
+    jack_port_t* target = midi ? record.midi : record.audio[i];
+    if (target != nullptr) jack_port_disconnect(client_, target);
+  }
+  if (port.empty()) return true;
+
+  if (midi) return jack_connect(client_, port.c_str(), jack_port_name(record.midi)) == 0;
+
+  // A stereo channel fed from a stereo source should take both sides. The
+  // sibling is the next port of the same client, which is how JACK names them.
+  std::vector<std::string> siblings = available_sources(false);
+  const auto chosen = std::find(siblings.begin(), siblings.end(), port);
+
+  bool ok = jack_connect(client_, port.c_str(), jack_port_name(record.audio[0])) == 0;
+  if (count == 2 && chosen != siblings.end() && std::next(chosen) != siblings.end()) {
+    const std::string& next = *std::next(chosen);
+    const std::string client_of = port.substr(0, port.find(':'));
+    if (next.rfind(client_of, 0) == 0)
+      ok = jack_connect(client_, next.c_str(), jack_port_name(record.audio[1])) == 0 && ok;
+  }
+  return ok;
+}
+
+std::string Engine::current_source(size_t channel, bool midi) const {
+  if (client_ == nullptr || channel >= channel_ports_.size()) return {};
+  jack_port_t* port = midi ? channel_ports_[channel].midi
+                           : channel_ports_[channel].audio[0];
+  if (port == nullptr) return {};
+
+  const char** connections = jack_port_get_all_connections(client_, port);
+  std::string found;
+  if (connections != nullptr && connections[0] != nullptr) found = connections[0];
+  if (connections != nullptr) jack_free(connections);
+  return found;
+}
+
+bool Engine::connect_master(const std::string& left, const std::string& right) {
+  if (client_ == nullptr) return false;
+  for (jack_port_t* port : master_out_)
+    if (port != nullptr) jack_port_disconnect(client_, port);
+  if (left.empty()) return true;
+
+  bool ok = jack_connect(client_, jack_port_name(master_out_[0]), left.c_str()) == 0;
+  if (!right.empty())
+    ok = jack_connect(client_, jack_port_name(master_out_[1]), right.c_str()) == 0 && ok;
+  return ok;
+}
+
+std::string Engine::current_master_sink() const {
+  if (client_ == nullptr || master_out_[0] == nullptr) return {};
+  const char** connections = jack_port_get_all_connections(client_, master_out_[0]);
+  std::string found;
+  if (connections != nullptr && connections[0] != nullptr) found = connections[0];
+  if (connections != nullptr) jack_free(connections);
+  return found;
+}
+
+bool Engine::connect_master_to_default_output() {
+  // Physical playback ports come back in the server's own order, so the first
+  // pair is the default output.
+  const std::vector<std::string> sinks = available_sinks(true);
+  if (sinks.empty()) return false;
+  return connect_master(sinks[0], sinks.size() > 1 ? sinks[1] : std::string());
 }
 
 bool Engine::post(const EngineCommand& command) { return commands_.push(command); }

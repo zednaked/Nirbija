@@ -16,6 +16,8 @@ ApplicationWindow {
         peakLeft: mixer.masterPeakLeft
         peakRight: mixer.masterPeakRight
         status: mixer.status
+        masterSink: mixer.masterSink
+        onMasterOutputClicked: portPicker.openFor("sink", -1)
     }
 
     // Strips scroll horizontally as a session grows, which is the one direction
@@ -50,9 +52,13 @@ ApplicationWindow {
                     peakLeft: model.peakLeft
                     peakRight: model.peakRight
                     inputLabel: model.inputLabel
+                    midiLabel: model.midiLabel
                     outputLabel: model.outputLabel
                     inserts: model.inserts
                     accent: model.accent
+
+                    onInputSlotClicked: portPicker.openFor("audio", index)
+                    onMidiSlotClicked: portPicker.openFor("midi", index)
 
                     onInsertSlotClicked: slot => {
                         // A filled slot opens the plugin's own editor; an empty
@@ -99,6 +105,16 @@ ApplicationWindow {
 
     PluginPicker {
         id: picker
+    }
+
+    PortPicker {
+        id: portPicker
+        onPicked: port => {
+            if (kind === "sink")
+                mixer.connectMaster(port)
+            else
+                mixer.connectSource(targetRow, port, kind === "midi")
+        }
     }
 
     // A session that opens empty gives nothing to look at, and AUM starts with

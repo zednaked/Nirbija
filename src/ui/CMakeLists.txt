@@ -31,6 +31,7 @@ qt_add_qml_module(nirbija
     qml/PeakDots.qml
     qml/StripButton.qml
     qml/PluginPicker.qml
+    qml/PortPicker.qml
 )
 
 target_link_libraries(nirbija PRIVATE nirbija_ui Qt6::Quick Qt6::QuickControls2)

@@ -30,6 +30,10 @@ MixerModel::MixerModel(QObject* parent) : QAbstractListModel(parent) {
     status_ = tr("no audio server — start PipeWire or JACK and restart");
   }
 
+  // A mixer that just opened should already be audible, the way AUM comes up
+  // connected to the device.
+  engine_.connect_master_to_default_output();
+
   // 30 Hz is enough for a meter to look continuous and cheap enough that the
   // poll never competes with the audio thread.
   level_timer_.setInterval(33);
@@ -58,6 +62,7 @@ QVariant MixerModel::data(const QModelIndex& index, int role) const {
     case PeakRightRole: return channel.peak[1];
     case InputLabelRole: return channel.input_label;
     case OutputLabelRole: return channel.output_label;
+    case MidiLabelRole: return channel.midi_label;
     case InsertsRole: return channel.inserts;
     case WidthRole: return channel.width;
     case AccentRole: return channel.accent;
@@ -72,6 +77,7 @@ QHash<int, QByteArray> MixerModel::roleNames() const {
       {SoloedRole, "soloed"},       {ArmedRole, "armed"},
       {PeakLeftRole, "peakLeft"},   {PeakRightRole, "peakRight"},
       {InputLabelRole, "inputLabel"}, {OutputLabelRole, "outputLabel"},
+      {MidiLabelRole, "midiLabel"},
       {InsertsRole, "inserts"},     {WidthRole, "channelWidth"},
       {AccentRole, "accent"},
   };
@@ -89,8 +95,8 @@ void MixerModel::addChannel(const QString& name, int channels) {
   ChannelUi channel;
   channel.name = label;
   channel.width = channels;
-  channel.input_label = channels == 1 ? tr("%1 in").arg(index + 1)
-                                      : tr("%1 in L/R").arg(index + 1);
+  channel.input_label = tr("no input");
+  channel.midi_label = tr("no MIDI");
   channel.output_label = tr("Master");
   channel.accent = kAccents[static_cast<int>(index) % kAccents.size()];
   channels_.push_back(std::move(channel));
@@ -214,6 +220,72 @@ bool MixerModel::openInsertEditor(int row, int slot) {
 
   editors_.push_back(std::move(window));
   return true;
+}
+
+QStringList MixerModel::sources(bool midi) const {
+  QStringList out;
+  for (const std::string& port : engine_.available_sources(midi))
+    out.append(QString::fromStdString(port));
+  return out;
+}
+
+QStringList MixerModel::sinks() const {
+  QStringList out;
+  for (const std::string& port : engine_.available_sinks())
+    out.append(QString::fromStdString(port));
+  return out;
+}
+
+void MixerModel::connectSource(int row, const QString& port, bool midi) {
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return;
+  engine_.connect_source(static_cast<size_t>(row), port.toStdString(), midi);
+  refreshRouting(row);
+}
+
+void MixerModel::connectMaster(const QString& port) {
+  // A stereo sink's right side is the next port of the same client, which is
+  // how JACK names a pair.
+  const QStringList all = sinks();
+  const int index = all.indexOf(port);
+  QString right;
+  if (index >= 0 && index + 1 < all.size()) {
+    const QString client = port.section(':', 0, 0);
+    if (all[index + 1].startsWith(client + ':')) right = all[index + 1];
+  }
+  engine_.connect_master(port.toStdString(), right.toStdString());
+  emit routingChanged();
+}
+
+QString MixerModel::masterSink() const {
+  return shortPortName(QString::fromStdString(engine_.current_master_sink()));
+}
+
+// "Midi-Bridge:FM-1: MIDI 1 (capture)" is useless in a 108-pixel strip; the
+// client name alone is what identifies it at a glance.
+QString MixerModel::shortPortName(const QString& port) {
+  if (port.isEmpty()) return {};
+  const QString client = port.section(':', 0, 0);
+  const QString rest = port.section(':', 1);
+  if (client == QLatin1String("Midi-Bridge") && !rest.isEmpty())
+    return rest.section(':', 0, 0).trimmed();
+  return client;
+}
+
+void MixerModel::refreshRouting(int row) {
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return;
+  ChannelUi& channel = channels_[row];
+
+  const QString audio = shortPortName(
+      QString::fromStdString(engine_.current_source(row, false)));
+  const QString midi = shortPortName(
+      QString::fromStdString(engine_.current_source(row, true)));
+
+  channel.input_label = audio.isEmpty() ? tr("no input") : audio;
+  channel.midi_label = midi.isEmpty() ? tr("no MIDI") : midi;
+
+  const QModelIndex idx = index(row);
+  emit dataChanged(idx, idx, {InputLabelRole, MidiLabelRole});
+  emit routingChanged();
 }
 
 void MixerModel::pollLevels() {

@@ -26,6 +26,7 @@ class MixerModel : public QAbstractListModel {
   Q_PROPERTY(qreal masterPeakLeft READ masterPeakLeft NOTIFY levelsChanged)
   Q_PROPERTY(qreal masterPeakRight READ masterPeakRight NOTIFY levelsChanged)
   Q_PROPERTY(qreal masterGain READ masterGain WRITE setMasterGain NOTIFY masterGainChanged)
+  Q_PROPERTY(QString masterSink READ masterSink NOTIFY routingChanged)
   Q_PROPERTY(nirbija::PluginListModel* plugins READ plugins CONSTANT)
 
  public:
@@ -40,6 +41,7 @@ class MixerModel : public QAbstractListModel {
     PeakRightRole,
     InputLabelRole,
     OutputLabelRole,
+    MidiLabelRole,
     InsertsRole,
     WidthRole,
     AccentRole,
@@ -59,6 +61,7 @@ class MixerModel : public QAbstractListModel {
   qreal masterPeakLeft() const { return master_peak_[0]; }
   qreal masterPeakRight() const { return master_peak_[1]; }
   qreal masterGain() const { return master_gain_; }
+  QString masterSink() const;
   PluginListModel* plugins() const { return plugins_.get(); }
   void setMasterGain(qreal gain);
 
@@ -79,6 +82,18 @@ class MixerModel : public QAbstractListModel {
   // ships no editor this host can embed, which is common.
   Q_INVOKABLE bool openInsertEditor(int row, int slot);
 
+  // --- routing ------------------------------------------------------------
+  // Ports a channel can be fed from, ready to show in a picker. `midi` picks
+  // between MIDI sources and audio ones.
+  Q_INVOKABLE QStringList sources(bool midi) const;
+  Q_INVOKABLE QStringList sinks() const;
+
+  Q_INVOKABLE void connectSource(int row, const QString& port, bool midi);
+  Q_INVOKABLE void connectMaster(const QString& port);
+
+  // The short form of a port name, for a label that has to fit in a strip.
+  Q_INVOKABLE static QString shortPortName(const QString& port);
+
   // Turns a fader position in 0..1 into a linear gain, and back. AUM's fader is
   // not linear in amplitude: most of the travel covers the top of the range.
   Q_INVOKABLE static qreal faderToGain(qreal position);
@@ -90,6 +105,7 @@ class MixerModel : public QAbstractListModel {
   void statusChanged();
   void levelsChanged();
   void masterGainChanged();
+  void routingChanged();
 
  private:
   struct ChannelUi {
@@ -103,11 +119,13 @@ class MixerModel : public QAbstractListModel {
     qreal peak[2] = {0.0, 0.0};
     QString input_label;
     QString output_label;
+    QString midi_label;
     QStringList inserts;
     QString accent;
   };
 
   void pollLevels();
+  void refreshRouting(int row);
   void post(EngineCommand::Kind kind, int row, float value);
 
   // Declared before the engine so it outlives it: strips hold plugin instances

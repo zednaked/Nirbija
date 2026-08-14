@@ -88,6 +88,33 @@ int main(int argc, char* argv[]) {
     }
   }
 
+  // --- routing --------------------------------------------------------------
+  // The master should already be connected: a mixer that opens silent is not
+  // finished opening.
+  if (mixer.masterSink().isEmpty())
+    fail("master was not connected to an output on startup");
+
+  const QStringList midi_sources = mixer.sources(true);
+  if (midi_sources.isEmpty()) {
+    std::printf("no MIDI sources on this machine, skipping the routing check\n");
+  } else {
+    const QString chosen = midi_sources.first();
+    mixer.connectSource(0, chosen, true);
+
+    const QString label =
+        field(mixer, 0, nirbija::MixerModel::MidiLabelRole).toString();
+    if (label == QStringLiteral("no MIDI"))
+      fail("connecting a MIDI source did not change the strip label");
+    else
+      std::printf("  MIDI source: %s -> %s\n", chosen.toUtf8().constData(),
+                  label.toUtf8().constData());
+
+    mixer.connectSource(0, QString(), true);
+    if (field(mixer, 0, nirbija::MixerModel::MidiLabelRole).toString() !=
+        QStringLiteral("no MIDI"))
+      fail("disconnecting a MIDI source did not clear the strip label");
+  }
+
   if (failures > 0) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return 1;
