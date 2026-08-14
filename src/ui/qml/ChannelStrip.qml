@@ -19,6 +19,7 @@ Rectangle {
     property string outputLabel: ""
     property var inserts: []
     property bool isBus: false
+    property var sends: []
     property color accent: Skin.accent
 
     signal insertSlotClicked(int slot)
@@ -29,6 +30,8 @@ Rectangle {
     signal inputMenuRequested
     signal midiMenuRequested
     signal outputSlotClicked
+    signal sendLevelRequested(int slot, real level)
+    signal sendMenuRequested(int slot)
 
     width: Skin.stripWidth
     color: Skin.strip
@@ -144,7 +147,8 @@ Rectangle {
         ListView {
             id: insertList
             width: parent.width
-            height: root.height - y - outputSlot.height - title.height - Skin.gap * 3
+            height: root.height - y - outputSlot.height - title.height
+                    - root.sends.length * (20 + Skin.gap) - Skin.gap * 3
             clip: true
             spacing: Skin.gap
             // AUM keeps a few empty slots visible below the chain rather than a
@@ -160,6 +164,24 @@ Rectangle {
                     if (index < root.inserts.length
                             && root.inserts[index].length > 0)
                         root.insertMenuRequested(index)
+                }
+            }
+        }
+
+        // Sends sit just above the output, which is where they leave from.
+        Column {
+            width: parent.width
+            spacing: Skin.gap
+
+            Repeater {
+                model: root.sends
+
+                SendRow {
+                    width: parent.width
+                    busName: modelData.name
+                    level: modelData.level
+                    onLevelRequested: value => root.sendLevelRequested(index, value)
+                    onMenuRequested: root.sendMenuRequested(index)
                 }
             }
         }

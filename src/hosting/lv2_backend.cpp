@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -214,7 +215,9 @@ class Lv2Gui : public PluginGui {
   }
 
   void idle() override {
-    if (idle_iface_ != nullptr && handle_ != nullptr) idle_iface_->idle(handle_);
+    if (handle_ == nullptr) return;
+    push_changed_ports();
+    if (idle_iface_ != nullptr) idle_iface_->idle(handle_);
   }
 
   // Only known once the editor has asked for a size through ui:resize.
@@ -315,6 +318,30 @@ class Lv2Gui : public PluginGui {
       idle_iface_ = static_cast<const LV2UI_Idle_Interface*>(
           descriptor_->extension_data(LV2_UI__idleInterface));
     }
+
+    // An editor opens showing its own defaults until the host tells it what the
+    // values actually are. Without this a session restored from disk plays the
+    // right thing while its editor shows something else entirely.
+    last_sent_.assign(control_values_->size(),
+                      std::numeric_limits<float>::quiet_NaN());
+    push_changed_ports();
+  }
+
+  // Sends the editor every control value that has moved since it was last
+  // told. Also covers changes made from outside the editor — a restored
+  // session, or a parameter set from the host.
+  void push_changed_ports() {
+    if (descriptor_ == nullptr || descriptor_->port_event == nullptr) return;
+    if (handle_ == nullptr) return;
+
+    for (size_t i = 0; i < control_ports_.size() && i < control_values_->size();
+         ++i) {
+      const float value = (*control_values_)[i];
+      if (last_sent_[i] == value) continue;
+      last_sent_[i] = value;
+      descriptor_->port_event(handle_, control_ports_[i].index, sizeof(float), 0,
+                              &value);
+    }
   }
 
   static int request_resize(LV2UI_Feature_Handle handle, int width, int height) {
@@ -350,6 +377,8 @@ class Lv2Gui : public PluginGui {
   LV2UI_Handle handle_ = nullptr;
   LV2UI_Widget widget_ = nullptr;
   const LV2UI_Idle_Interface* idle_iface_ = nullptr;
+  // What the editor has already been told, so idle only sends what moved.
+  std::vector<float> last_sent_;
   LV2_Feature parent_feature_{}, instance_feature_{}, idle_feature_{};
   LV2_Feature resize_feature_{}, map_feature_{}, unmap_feature_{};
   LV2UI_Resize resize_{};

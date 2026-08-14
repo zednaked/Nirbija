@@ -78,7 +78,12 @@ class AudioGraph {
   // Sums a strip's output into wherever it is pointed, widening a mono strip on
   // the way.
   void mix_into(float* const* target, const ChannelStrip& strip, int width,
-                uint32_t frames);
+                uint32_t frames, float gain = 1.0f);
+
+  // Sends run after the strip has been processed, so what they carry is what
+  // the strip is actually putting out, fader included.
+  void apply_sends(const ChannelStrip& strip, int width, uint32_t frames,
+                   size_t after_bus);
   float* const* destination_for(int destination, float* const* master,
                                 size_t after_bus);
 

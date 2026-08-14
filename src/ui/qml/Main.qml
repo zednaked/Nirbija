@@ -61,6 +61,7 @@ ApplicationWindow {
                     inserts: model.inserts
                     accent: model.accent
                     isBus: model.isBus
+                    sends: model.sends
 
                     onInputSlotClicked: portPicker.openFor("audio", index)
                     onMidiSlotClicked: portPicker.openFor("midi", index)
@@ -112,8 +113,32 @@ ApplicationWindow {
                                                                    option.destination)
                             })
                         }
-                        slotMenu.openAt(this, entries, qsTr("Send to"))
+
+                        // A send goes to a bus on top of the destination, so
+                        // only buses can receive one.
+                        for (let i = 0; i < options.length; ++i) {
+                            const option = options[i]
+                            if (option.destination < 0)
+                                continue
+                            entries.push({
+                                label: qsTr("Send to %1").arg(option.label),
+                                enabled: model.sends.length < 4,
+                                action: () => mixer.setSend(index,
+                                                            model.sends.length,
+                                                            option.destination, 0.35)
+                            })
+                        }
+
+                        slotMenu.openAt(this, entries, qsTr("Output"))
                     }
+
+                    onSendLevelRequested: (slot, level) =>
+                        mixer.setSend(index, slot, model.sends[slot].bus, level)
+
+                    onSendMenuRequested: slot => slotMenu.openAt(this, [
+                        { label: qsTr("Remove send"), danger: true,
+                          action: () => mixer.removeSend(index, slot) }
+                    ], model.sends[slot].name)
 
                     onTitleClicked: slotMenu.openAt(this, [
                         { label: qsTr("Rename…"),

@@ -183,6 +183,24 @@ int main(int argc, char* argv[]) {
           fail("a bus was offered itself as a destination");
       }
 
+      // A send feeds the bus on top of whatever the destination is.
+      mixer.setSend(0, 0, destination, 0.5);
+      QVariantList sends =
+          field(mixer, 0, nirbija::MixerModel::SendsRole).toList();
+      if (sends.size() != 1) {
+        fail("the send did not show up on the channel");
+      } else {
+        const QVariantMap send = sends.first().toMap();
+        if (send.value(QStringLiteral("bus")).toInt() != destination)
+          fail("the send points at the wrong bus");
+        if (send.value(QStringLiteral("name")).toString() != "Drums")
+          fail("the send is not labelled with its bus");
+      }
+
+      mixer.removeSend(0, 0);
+      sends = field(mixer, 0, nirbija::MixerModel::SendsRole).toList();
+      if (!sends.isEmpty()) fail("removing the send left it in the list");
+
       mixer.setDestination(0, -1);
     }
   }

@@ -52,6 +52,7 @@ class MixerModel : public QAbstractListModel {
     AccentRole,
     IsBusRole,
     DestinationRole,
+    SendsRole,
   };
 
   explicit MixerModel(QObject* parent = nullptr);
@@ -95,6 +96,11 @@ class MixerModel : public QAbstractListModel {
   // Rows a given row is allowed to send to, as [{label, destination}]. A bus
   // may only feed a bus that renders after it, or the master.
   Q_INVOKABLE QVariantList destinationsFor(int row) const;
+
+  // A send is a scaled copy of the strip's output going to a bus, on top of
+  // whatever its destination is. `level` is linear, 0 removes the send.
+  Q_INVOKABLE void setSend(int row, int slot, int bus, qreal level);
+  Q_INVOKABLE void removeSend(int row, int slot);
   Q_INVOKABLE void removeChannel(int row);
   Q_INVOKABLE void renameChannel(int row, const QString& name);
   Q_INVOKABLE void setGain(int row, qreal gain);
@@ -171,6 +177,8 @@ class MixerModel : public QAbstractListModel {
     QString output_label;
     QString midi_label;
     QStringList inserts;
+    // [{ bus: int, name: QString, level: qreal }], in slot order.
+    QVariantList sends;
     QString accent;
   };
 

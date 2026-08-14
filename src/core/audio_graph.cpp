@@ -102,7 +102,7 @@ void AudioGraph::remove_channel(size_t index) {
 // the image keeps the same loudness. A stereo strip already had its balance
 // applied inside the strip.
 void AudioGraph::mix_into(float* const* target, const ChannelStrip& strip,
-                          int width, uint32_t frames) {
+                          int width, uint32_t frames, float gain) {
   float spread[2] = {1.0f, 1.0f};
   if (width == 1) {
     const float angle = 0.25f * 3.14159265358979f * (strip.pan() + 1.0f);
@@ -111,7 +111,27 @@ void AudioGraph::mix_into(float* const* target, const ChannelStrip& strip,
   }
   for (int ch = 0; ch < 2; ++ch) {
     const float* source = scratch_ptrs_[std::min(ch, width - 1)];
-    for (uint32_t f = 0; f < frames; ++f) target[ch][f] += source[f] * spread[ch];
+    const float amount = spread[ch] * gain;
+    for (uint32_t f = 0; f < frames; ++f) target[ch][f] += source[f] * amount;
+  }
+}
+
+void AudioGraph::apply_sends(const ChannelStrip& strip, int width,
+                             uint32_t frames, size_t after_bus) {
+  for (size_t i = 0; i < kMaxSends; ++i) {
+    const int bus = strip.send_bus(i);
+    if (bus < 0) continue;
+
+    const float level = strip.send_level(i);
+    if (level <= 0.0f) continue;
+
+    const size_t index = static_cast<size_t>(bus);
+    // The same rule as a destination: only a bus still ahead in this pass, or
+    // the send would land in a buffer that has already been rendered.
+    if (index >= bus_count() || index <= after_bus) continue;
+    if (live_buses_[index].load(std::memory_order_acquire) == nullptr) continue;
+
+    mix_into(bus_ptrs_[index].data(), strip, width, frames, level);
   }
 }
 
@@ -168,6 +188,7 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
 
     // Channels are before every bus in the pass, so any live bus is a legal
     // destination for them.
+    apply_sends(strip, width, frames, kNoBusYet);
     mix_into(destination_for(strip.destination(), master, kNoBusYet),
              strip, width, frames);
   }
@@ -189,6 +210,7 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
         recorder->write(static_cast<size_t>(track), scratch_ptrs_.data(), 2, frames);
     }
 
+    apply_sends(*live, 2, frames, i);
     mix_into(destination_for(live->destination(), master, i), *live, 2, frames);
   }
 

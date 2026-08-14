@@ -14,6 +14,11 @@ namespace nirbija {
 // what the audio thread walks, so it is fixed and generous rather than dynamic.
 inline constexpr size_t kMaxInserts = 16;
 
+// Sends per strip. A send is a scaled copy of the strip's output going to a bus
+// while the strip keeps feeding its own destination — how a reverb is shared
+// without losing the dry signal.
+inline constexpr size_t kMaxSends = 4;
+
 // One mixer channel: input -> insert chain -> gain/pan -> destination bus.
 // Owned by the graph and only ever touched by the audio thread once attached;
 // the UI mutates it through the engine's command queue.
@@ -47,6 +52,21 @@ class ChannelStrip {
     destination_.store(destination, std::memory_order_relaxed);
   }
   int destination() const { return destination_.load(std::memory_order_relaxed); }
+
+  // Sends are plain atomics: a send level is one number, and the audio thread
+  // reading a slightly stale one for a block is inaudible.
+  void set_send(size_t index, int bus, float level) {
+    if (index >= kMaxSends) return;
+    sends_[index].level.store(level, std::memory_order_relaxed);
+    sends_[index].bus.store(bus, std::memory_order_release);
+  }
+  int send_bus(size_t index) const {
+    return index < kMaxSends ? sends_[index].bus.load(std::memory_order_acquire) : -1;
+  }
+  float send_level(size_t index) const {
+    return index < kMaxSends ? sends_[index].level.load(std::memory_order_relaxed)
+                             : 0.0f;
+  }
 
   void set_armed(bool armed) { armed_.store(armed, std::memory_order_relaxed); }
   bool armed() const { return armed_.load(std::memory_order_relaxed); }
@@ -84,6 +104,12 @@ class ChannelStrip {
   std::atomic<bool> soloed_{false};
   std::atomic<bool> armed_{false};
   std::atomic<int> destination_{-1};
+
+  struct Send {
+    std::atomic<int> bus{-1};
+    std::atomic<float> level{0.0f};
+  };
+  std::array<Send, kMaxSends> sends_;
   std::atomic<int> record_track_{-1};
 
   // One smoothed value per parameter so a fader move does not click.

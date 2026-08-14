@@ -33,6 +33,7 @@ qt_add_qml_module(nirbija
     qml/StripButton.qml
     qml/PluginPicker.qml
     qml/PortPicker.qml
+    qml/SendRow.qml
     qml/SlotMenu.qml
     qml/RenameDialog.qml
 )

@@ -81,6 +81,7 @@ QVariant MixerModel::data(const QModelIndex& index, int role) const {
     case AccentRole: return channel.accent;
     case IsBusRole: return channel.is_bus;
     case DestinationRole: return channel.destination;
+    case SendsRole: return channel.sends;
     default: return {};
   }
 }
@@ -95,7 +96,7 @@ QHash<int, QByteArray> MixerModel::roleNames() const {
       {MidiLabelRole, "midiLabel"},
       {InsertsRole, "inserts"},     {WidthRole, "channelWidth"},
       {AccentRole, "accent"},   {IsBusRole, "isBus"},
-      {DestinationRole, "destination"},
+      {DestinationRole, "destination"}, {SendsRole, "sends"},
   };
 }
 
@@ -213,6 +214,56 @@ QVariantList MixerModel::destinationsFor(int row) const {
     out.append(entry);
   }
   return out;
+}
+
+void MixerModel::setSend(int row, int slot, int bus, qreal level) {
+  ChannelStrip* strip = stripFor(row);
+  if (strip == nullptr || slot < 0 || slot >= static_cast<int>(kMaxSends)) return;
+
+  strip->set_send(static_cast<size_t>(slot), bus, static_cast<float>(level));
+
+  QString name = tr("Master");
+  for (const ChannelUi& candidate : channels_)
+    if (candidate.is_bus && static_cast<int>(candidate.slot) == bus)
+      name = candidate.name;
+
+  QVariantList& sends = channels_[row].sends;
+  while (sends.size() <= slot) sends.append(QVariantMap{});
+
+  QVariantMap entry;
+  entry[QStringLiteral("bus")] = bus;
+  entry[QStringLiteral("name")] = name;
+  entry[QStringLiteral("level")] = level;
+  sends[slot] = entry;
+
+  const QModelIndex idx = index(row);
+  emit dataChanged(idx, idx, {SendsRole});
+  markDirty();
+}
+
+void MixerModel::removeSend(int row, int slot) {
+  ChannelStrip* strip = stripFor(row);
+  if (strip == nullptr || slot < 0) return;
+  if (slot >= channels_[row].sends.size()) return;
+
+  strip->set_send(static_cast<size_t>(slot), -1, 0.0f);
+
+  // The list is compacted so the rows below move up, and every send is
+  // rewritten to match: a send's slot is its index, and a hole would silently
+  // shift the ones after it.
+  channels_[row].sends.removeAt(slot);
+  for (int i = 0; i < channels_[row].sends.size(); ++i) {
+    const QVariantMap entry = channels_[row].sends[i].toMap();
+    strip->set_send(static_cast<size_t>(i),
+                    entry.value(QStringLiteral("bus")).toInt(),
+                    static_cast<float>(entry.value(QStringLiteral("level")).toReal()));
+  }
+  for (size_t i = channels_[row].sends.size(); i < kMaxSends; ++i)
+    strip->set_send(i, -1, 0.0f);
+
+  const QModelIndex idx = index(row);
+  emit dataChanged(idx, idx, {SendsRole});
+  markDirty();
 }
 
 void MixerModel::setDestination(int row, int destination) {

@@ -103,6 +103,16 @@ void MixerModel::saveSession() const {
       inserts.append(saved);
     }
     entry[QStringLiteral("inserts")] = inserts;
+
+    QJsonArray sends;
+    for (const QVariant& value : channel.sends) {
+      const QVariantMap send = value.toMap();
+      QJsonObject saved;
+      saved[QStringLiteral("bus")] = send.value(QStringLiteral("bus")).toInt();
+      saved[QStringLiteral("level")] = send.value(QStringLiteral("level")).toDouble();
+      sends.append(saved);
+    }
+    entry[QStringLiteral("sends")] = sends;
     channels.append(entry);
   }
 
@@ -210,12 +220,21 @@ void MixerModel::loadSession() {
     }
   }
 
-  // Destinations last: a channel may point at a bus that appears later in the
+  // Destinations and sends last: both can name a bus that appears later in the
   // list, and only now is every row in place.
   int row = 0;
   for (const QJsonValue& value : channels) {
-    const int destination = value.toObject()[QStringLiteral("destination")].toInt(-1);
+    const QJsonObject entry = value.toObject();
+
+    const int destination = entry[QStringLiteral("destination")].toInt(-1);
     if (destination >= 0) setDestination(row, destination);
+
+    int slot = 0;
+    for (const QJsonValue& send : entry[QStringLiteral("sends")].toArray()) {
+      const QJsonObject saved = send.toObject();
+      setSend(row, slot++, saved[QStringLiteral("bus")].toInt(-1),
+              saved[QStringLiteral("level")].toDouble(0.0));
+    }
     ++row;
   }
 
