@@ -1,6 +1,7 @@
 #include "core/audio_graph.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace nirbija {
 
@@ -11,56 +12,84 @@ void AudioGraph::prepare(double sample_rate, uint32_t max_block_frames) {
   sample_rate_ = sample_rate;
   max_block_frames_ = max_block_frames;
 
-  size_t max_channels = 2;
-  for (const auto& channel : channels_)
-    max_channels = std::max(max_channels,
-                            static_cast<size_t>(channel->channel_count()));
+  // A strip is mono or stereo, never wider, so two scratch buffers always fit.
+  // Keeping the size fixed means add_channel never reallocates behind the audio
+  // thread's back.
+  scratch_.assign(2, std::vector<float>(max_block_frames, 0.0f));
+  scratch_ptrs_.assign(2, nullptr);
+  for (size_t i = 0; i < 2; ++i) scratch_ptrs_[i] = scratch_[i].data();
 
-  scratch_.assign(max_channels, std::vector<float>(max_block_frames, 0.0f));
-  scratch_ptrs_.assign(max_channels, nullptr);
-  for (size_t i = 0; i < max_channels; ++i) scratch_ptrs_[i] = scratch_[i].data();
-
-  for (auto& channel : channels_) channel->prepare(sample_rate, max_block_frames);
+  const size_t count = active_.load(std::memory_order_acquire);
+  for (size_t i = 0; i < count; ++i)
+    channels_[i]->prepare(sample_rate, max_block_frames);
 }
 
-bool AudioGraph::any_soloed() const {
-  return std::any_of(channels_.begin(), channels_.end(),
-                     [](const auto& c) { return c->soloed(); });
+bool AudioGraph::any_soloed(size_t count) const {
+  for (size_t i = 0; i < count; ++i)
+    if (channels_[i]->soloed()) return true;
+  return false;
 }
 
 void AudioGraph::render(float* const* master, uint32_t frames) {
   for (int ch = 0; ch < 2; ++ch) std::fill_n(master[ch], frames, 0.0f);
 
-  const bool solo_active = any_soloed();
+  const size_t count = active_.load(std::memory_order_acquire);
+  const bool solo_active = any_soloed(count);
 
-  for (auto& channel : channels_) {
-    if (solo_active && !channel->soloed()) continue;
+  for (size_t i = 0; i < count; ++i) {
+    ChannelStrip& strip = *channels_[i];
+    if (solo_active && !strip.soloed()) continue;
 
-    // TODO(phase-1): fill scratch from the channel's JACK input ports. Until the
-    // engine wires real sources, every strip renders silence and this is a
-    // structural pass only.
-    const int channel_channels = channel->channel_count();
-    for (int ch = 0; ch < channel_channels; ++ch)
-      std::fill_n(scratch_ptrs_[ch], frames, 0.0f);
+    const int width = strip.channel_count();
+    sources_[i]->read(scratch_ptrs_.data(), width, frames);
+    strip.process(scratch_ptrs_.data(), frames);
 
-    channel->process(scratch_ptrs_.data(), frames);
-
-    for (int ch = 0; ch < 2; ++ch) {
-      const float* source = scratch_ptrs_[std::min(ch, channel_channels - 1)];
-      for (uint32_t i = 0; i < frames; ++i) master[ch][i] += source[i];
+    // A mono strip is widened here, with constant-power pan so sweeping it
+    // across the image keeps the same loudness. A stereo strip already had its
+    // balance applied inside the strip.
+    float spread[2] = {1.0f, 1.0f};
+    if (width == 1) {
+      const float angle = 0.25f * 3.14159265358979f * (strip.pan() + 1.0f);
+      spread[0] = std::cos(angle);
+      spread[1] = std::sin(angle);
     }
+    for (int ch = 0; ch < 2; ++ch) {
+      const float* source = scratch_ptrs_[std::min(ch, width - 1)];
+      for (uint32_t f = 0; f < frames; ++f) master[ch][f] += source[f] * spread[ch];
+    }
+  }
+
+  const float gain = master_gain_.load(std::memory_order_relaxed);
+  for (int ch = 0; ch < 2; ++ch) {
+    float peak = 0.0f;
+    for (uint32_t f = 0; f < frames; ++f) {
+      master[ch][f] *= gain;
+      peak = std::max(peak, std::fabs(master[ch][f]));
+    }
+    if (peak > master_peaks_[ch].load(std::memory_order_relaxed))
+      master_peaks_[ch].store(peak, std::memory_order_relaxed);
   }
 }
 
-ChannelStrip& AudioGraph::add_channel(std::string name, int channel_count) {
-  channels_.push_back(
-      std::make_unique<ChannelStrip>(std::move(name), channel_count));
-  ChannelStrip& added = *channels_.back();
-  if (sample_rate_ > 0.0) {
-    // Re-prepare so the scratch buffers cover the new channel's width.
-    prepare(sample_rate_, max_block_frames_);
-  }
-  return added;
+float AudioGraph::read_master_peak(int channel) {
+  return master_peaks_[channel].exchange(0.0f, std::memory_order_relaxed);
+}
+
+size_t AudioGraph::add_channel(std::string name, int channel_count,
+                               std::unique_ptr<AudioSource> source) {
+  const size_t index = active_.load(std::memory_order_relaxed);
+  if (index >= kMaxChannels) return kMaxChannels;
+
+  auto strip = std::make_unique<ChannelStrip>(std::move(name), channel_count);
+  if (sample_rate_ > 0.0) strip->prepare(sample_rate_, max_block_frames_);
+
+  channels_[index] = std::move(strip);
+  sources_[index] = std::move(source);
+
+  // Release last: everything above must be visible before the audio thread can
+  // reach this slot.
+  active_.store(index + 1, std::memory_order_release);
+  return index;
 }
 
 }  // namespace nirbija

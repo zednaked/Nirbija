@@ -49,10 +49,11 @@ void ChannelStrip::process(float* const* buffers, uint32_t frames) {
     smoothed_gain_ += (1.0f - smoothing_coeff_) * (target_gain - smoothed_gain_);
     smoothed_pan_ += (1.0f - smoothing_coeff_) * (target_pan - smoothed_pan_);
 
-    // Constant-power pan, so sweeping across the image keeps the same loudness.
-    const float angle = 0.25f * 3.14159265358979f * (smoothed_pan_ + 1.0f);
-    const float left = stereo ? std::cos(angle) : 1.0f;
-    const float right = stereo ? std::sin(angle) : 1.0f;
+    // On a stereo strip pan is a balance: unity at centre, attenuating the side
+    // you turn away from. A mono strip is panned by the graph as it widens,
+    // where constant-power is the right law.
+    const float left = stereo ? std::min(1.0f, 1.0f - smoothed_pan_) : 1.0f;
+    const float right = stereo ? std::min(1.0f, 1.0f + smoothed_pan_) : 1.0f;
 
     for (int ch = 0; ch < channel_count_; ++ch) {
       const float pan_gain = (ch == 0) ? left : right;

@@ -10,10 +10,17 @@
 
 namespace nirbija {
 
-// A structural or parameter edit travelling from the UI thread to the audio
-// thread. Anything that would allocate is built before the message is pushed.
+// A parameter edit travelling from the UI thread to the audio thread. Anything
+// that would allocate is built before the message is pushed.
 struct EngineCommand {
-  enum class Kind { None, SetGain, SetPan, SetMute, SetSolo } kind = Kind::None;
+  enum class Kind {
+    None,
+    SetGain,
+    SetPan,
+    SetMute,
+    SetSolo,
+    SetMasterGain,
+  } kind = Kind::None;
   size_t channel = 0;
   float value = 0.0f;
 };
@@ -33,12 +40,18 @@ class Engine {
 
   AudioGraph& graph() { return *graph_; }
 
+  // UI thread. Registers this channel's JACK input ports and adds the strip.
+  // Returns the channel index, or kMaxChannels if the graph is full or the
+  // ports could not be registered.
+  size_t add_channel(const std::string& name, int channel_count);
+
   // UI thread. Returns false if the queue is full, meaning the audio thread has
   // stalled — the caller should surface that, not silently retry.
   bool post(const EngineCommand& command);
 
  private:
   static int jack_process_trampoline(jack_nframes_t frames, void* arg);
+  static int jack_buffer_size_trampoline(jack_nframes_t frames, void* arg);
   int process(jack_nframes_t frames);
   void drain_commands();
 

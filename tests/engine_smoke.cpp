@@ -18,8 +18,10 @@ int main() {
   std::printf("sample rate %.0f Hz, block %u frames\n", engine.sample_rate(),
               engine.block_frames());
 
-  engine.graph().add_channel("ch 1", 2);
-  engine.graph().add_channel("ch 2", 2);
+  if (engine.add_channel("ch1", 2) != 0 || engine.add_channel("ch2", 1) != 1) {
+    std::fprintf(stderr, "failed to add channels\n");
+    return 1;
+  }
 
   if (!engine.post({nirbija::EngineCommand::Kind::SetGain, 0, 0.5f})) {
     std::fprintf(stderr, "command queue full\n");

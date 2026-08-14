@@ -28,6 +28,7 @@ class ChannelStrip {
   // Audio-thread setters: plain stores, no allocation.
   void set_gain(float linear) { gain_.store(linear, std::memory_order_relaxed); }
   void set_pan(float pan) { pan_.store(pan, std::memory_order_relaxed); }
+  float pan() const { return pan_.load(std::memory_order_relaxed); }
   void set_muted(bool muted) { muted_.store(muted, std::memory_order_relaxed); }
   void set_soloed(bool soloed) { soloed_.store(soloed, std::memory_order_relaxed); }
   bool soloed() const { return soloed_.load(std::memory_order_relaxed); }
