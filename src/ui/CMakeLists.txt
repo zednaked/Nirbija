@@ -7,6 +7,7 @@ qt_standard_project_setup(REQUIRES 6.5)
 # without the QML front end.
 qt_add_library(nirbija_ui STATIC
   mixer_model.cpp
+  mixer_session.cpp
   plugin_list_model.cpp
   plugin_window.cpp
   skin.h

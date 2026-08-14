@@ -45,3 +45,9 @@ add_test(NAME midi_jack COMMAND nirbija_midi_jack)
 # Manual tool, not a ctest target: needs a MIDI source and someone to play it.
 add_executable(nirbija_live live_session.cpp)
 target_link_libraries(nirbija_live PRIVATE nirbija_core)
+
+if(NIRBIJA_UI)
+  add_executable(nirbija_session_roundtrip session_roundtrip.cpp)
+  target_link_libraries(nirbija_session_roundtrip PRIVATE nirbija_ui)
+  add_test(NAME session_roundtrip COMMAND nirbija_session_roundtrip)
+endif()

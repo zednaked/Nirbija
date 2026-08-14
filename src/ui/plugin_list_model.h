@@ -32,6 +32,10 @@ class PluginListModel : public QAbstractListModel {
 
   Q_INVOKABLE void rescan();
 
+  // Finds the row holding a given plugin, for restoring a saved session.
+  // Returns -1 when the plugin is no longer installed.
+  int rowFor(PluginFormat format, const std::string& uid) const;
+
   // Used by MixerModel to turn a picker row into a live plugin.
   std::unique_ptr<PluginInstance> instantiate(int row) const;
   const PluginDescriptor* descriptor(int row) const;

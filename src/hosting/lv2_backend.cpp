@@ -5,6 +5,7 @@
 #include <lv2/atom/atom.h>
 #include <lv2/atom/util.h>
 #include <lv2/instance-access/instance-access.h>
+#include <lv2/state/state.h>
 #include <lv2/midi/midi.h>
 #include <lv2/ui/ui.h>
 #include <lv2/buf-size/buf-size.h>
@@ -89,6 +90,7 @@ struct PortInfo {
   uint32_t index = 0;
   PortKind kind = PortKind::Ignored;
   std::string name;
+  std::string symbol;  // LV2 state keys on this, not on the display name
   float min_value = 0.0f;
   float max_value = 1.0f;
   float default_value = 0.0f;
@@ -460,19 +462,41 @@ class Lv2Instance : public PluginInstance {
                                      port.max_value);
   }
 
-  // TODO(phase-9): real LV2 state via lilv_state_new_from_instance, which also
-  // captures anything the plugin keeps outside its control ports. Control
-  // values cover every plugin that has no state extension, which is most
-  // effects.
+  // Real LV2 state, not just the control ports: a sampler's loaded file or a
+  // synth's patch lives in the plugin's own state, and control values alone
+  // would restore an empty instrument.
   std::vector<uint8_t> save_state() const override {
-    std::vector<uint8_t> blob(control_values_.size() * sizeof(float));
-    std::memcpy(blob.data(), control_values_.data(), blob.size());
+    if (instance_ == nullptr) return {};
+
+    LilvState* state = lilv_state_new_from_instance(
+        plugin_, instance_, world_->urids.map_feature(),
+        nullptr, nullptr, nullptr, nullptr,
+        &Lv2Instance::get_port_value, const_cast<Lv2Instance*>(this),
+        LV2_STATE_IS_POD | LV2_STATE_IS_PORTABLE, nullptr);
+    if (state == nullptr) return {};
+
+    char* text = lilv_state_to_string(world_->world, world_->urids.map_feature(),
+                                      world_->urids.unmap_feature(), state,
+                                      kStateUri, nullptr);
+    lilv_state_free(state);
+    if (text == nullptr) return {};
+
+    const std::vector<uint8_t> blob(text, text + std::strlen(text));
+    lilv_free(text);
     return blob;
   }
 
   bool load_state(const std::vector<uint8_t>& blob) override {
-    if (blob.size() != control_values_.size() * sizeof(float)) return false;
-    std::memcpy(control_values_.data(), blob.data(), blob.size());
+    if (instance_ == nullptr || blob.empty()) return false;
+
+    const std::string text(blob.begin(), blob.end());
+    LilvState* state = lilv_state_new_from_string(
+        world_->world, world_->urids.map_feature(), text.c_str());
+    if (state == nullptr) return false;
+
+    lilv_state_restore(state, instance_, &Lv2Instance::set_port_value, this, 0,
+                       nullptr);
+    lilv_state_free(state);
     return true;
   }
 
@@ -487,6 +511,36 @@ class Lv2Instance : public PluginInstance {
 
  private:
   static constexpr size_t kAtomBufferBytes = 4096;
+
+  // State is kept in memory rather than in a bundle on disk, so the subject URI
+  // only has to be stable, not resolvable.
+  static constexpr const char* kStateUri = "urn:nirbija:state";
+
+  // lilv asks for and hands back port values by symbol during save and restore.
+  static const void* get_port_value(const char* port_symbol, void* user_data,
+                                    uint32_t* size, uint32_t* type) {
+    auto* self = static_cast<Lv2Instance*>(user_data);
+    for (size_t i = 0; i < self->control_in_.size(); ++i) {
+      if (self->control_in_[i].symbol != port_symbol) continue;
+      *size = sizeof(float);
+      *type = self->float_urid_;
+      return &self->control_values_[i];
+    }
+    *size = 0;
+    *type = 0;
+    return nullptr;
+  }
+
+  static void set_port_value(const char* port_symbol, void* user_data,
+                             const void* value, uint32_t size, uint32_t type) {
+    auto* self = static_cast<Lv2Instance*>(user_data);
+    if (size != sizeof(float) || type != self->float_urid_) return;
+    for (size_t i = 0; i < self->control_in_.size(); ++i) {
+      if (self->control_in_[i].symbol != port_symbol) continue;
+      self->control_values_[i] = *static_cast<const float*>(value);
+      return;
+    }
+  }
 
   void scan_ports(const PortClasses& classes) {
     const uint32_t count = lilv_plugin_get_num_ports(plugin_);
@@ -507,6 +561,8 @@ class Lv2Instance : public PluginInstance {
         info.name = lilv_node_as_string(name);
         lilv_node_free(name);
       }
+      if (const LilvNode* symbol = lilv_port_get_symbol(plugin_, port))
+        info.symbol = lilv_node_as_string(symbol);
 
       if (lilv_port_is_a(plugin_, port, classes.audio)) {
         (is_input ? audio_in_ : audio_out_).push_back(info);
@@ -699,6 +755,7 @@ class Lv2Instance : public PluginInstance {
 
   LV2_URID sequence_urid_ = urids_.map_string(LV2_ATOM__Sequence);
   LV2_URID midi_event_urid_ = urids_.map_string(LV2_MIDI__MidiEvent);
+  LV2_URID float_urid_ = urids_.map_string(LV2_ATOM__Float);
 
   // Fixed so queueing never allocates on the audio thread. A block carrying
   // more than this is a chord nobody plays.

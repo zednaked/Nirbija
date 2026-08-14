@@ -31,7 +31,7 @@ MixerModel::MixerModel(QObject* parent) : QAbstractListModel(parent) {
   }
 
   // A mixer that just opened should already be audible, the way AUM comes up
-  // connected to the device.
+  // connected to the device. A restored session overrides this below.
   engine_.connect_master_to_default_output();
 
   // 30 Hz is enough for a meter to look continuous and cheap enough that the
@@ -39,9 +39,20 @@ MixerModel::MixerModel(QObject* parent) : QAbstractListModel(parent) {
   level_timer_.setInterval(33);
   connect(&level_timer_, &QTimer::timeout, this, &MixerModel::pollLevels);
   level_timer_.start();
+
+  // One save a second at most, however hard a fader is being dragged.
+  autosave_timer_.setSingleShot(true);
+  autosave_timer_.setInterval(1000);
+  connect(&autosave_timer_, &QTimer::timeout, this, &MixerModel::saveSession);
+
+  loadSession();
 }
 
-MixerModel::~MixerModel() = default;
+MixerModel::~MixerModel() {
+  // The debounced save may still be pending, and closing the window is exactly
+  // when the session matters most.
+  saveSession();
+}
 
 int MixerModel::rowCount(const QModelIndex& parent) const {
   if (parent.isValid()) return 0;
@@ -101,6 +112,7 @@ void MixerModel::addChannel(const QString& name, int channels) {
   channel.accent = kAccents[static_cast<int>(index) % kAccents.size()];
   channels_.push_back(std::move(channel));
   endInsertRows();
+  markDirty();
 }
 
 void MixerModel::removeChannel(int row) {
@@ -115,6 +127,7 @@ void MixerModel::renameChannel(int row, const QString& name) {
   channels_[row].name = name;
   const QModelIndex idx = index(row);
   emit dataChanged(idx, idx, {NameRole});
+  markDirty();
 }
 
 void MixerModel::post(EngineCommand::Kind kind, int row, float value) {
@@ -131,6 +144,7 @@ void MixerModel::setGain(int row, qreal gain) {
   post(EngineCommand::Kind::SetGain, row, static_cast<float>(gain));
   const QModelIndex idx = index(row);
   emit dataChanged(idx, idx, {GainRole});
+  markDirty();
 }
 
 void MixerModel::setPan(int row, qreal pan) {
@@ -139,6 +153,7 @@ void MixerModel::setPan(int row, qreal pan) {
   post(EngineCommand::Kind::SetPan, row, static_cast<float>(pan));
   const QModelIndex idx = index(row);
   emit dataChanged(idx, idx, {PanRole});
+  markDirty();
 }
 
 void MixerModel::toggleMute(int row) {
@@ -147,6 +162,7 @@ void MixerModel::toggleMute(int row) {
   post(EngineCommand::Kind::SetMute, row, channels_[row].muted ? 1.0f : 0.0f);
   const QModelIndex idx = index(row);
   emit dataChanged(idx, idx, {MutedRole});
+  markDirty();
 }
 
 void MixerModel::toggleSolo(int row) {
@@ -155,6 +171,7 @@ void MixerModel::toggleSolo(int row) {
   post(EngineCommand::Kind::SetSolo, row, channels_[row].soloed ? 1.0f : 0.0f);
   const QModelIndex idx = index(row);
   emit dataChanged(idx, idx, {SoloedRole});
+  markDirty();
 }
 
 void MixerModel::toggleArm(int row) {
@@ -173,6 +190,7 @@ void MixerModel::setMasterGain(qreal gain) {
   command.value = static_cast<float>(gain);
   engine_.post(command);
   emit masterGainChanged();
+  markDirty();
 }
 
 bool MixerModel::addInsert(int row, int pluginIndex) {
@@ -189,6 +207,7 @@ bool MixerModel::addInsert(int row, int pluginIndex) {
   channels_[row].inserts.append(QString::fromStdString(descriptor->name));
   const QModelIndex idx = index(row);
   emit dataChanged(idx, idx, {InsertsRole});
+  markDirty();
   return true;
 }
 
@@ -202,6 +221,7 @@ void MixerModel::removeInsert(int row, int slot) {
   channels_[row].inserts[slot].clear();
   const QModelIndex idx = index(row);
   emit dataChanged(idx, idx, {InsertsRole});
+  markDirty();
 }
 
 bool MixerModel::openInsertEditor(int row, int slot) {
@@ -254,6 +274,7 @@ void MixerModel::connectMaster(const QString& port) {
   }
   engine_.connect_master(port.toStdString(), right.toStdString());
   emit routingChanged();
+  markDirty();
 }
 
 QString MixerModel::masterSink() const {
@@ -286,6 +307,7 @@ void MixerModel::refreshRouting(int row) {
   const QModelIndex idx = index(row);
   emit dataChanged(idx, idx, {InputLabelRole, MidiLabelRole});
   emit routingChanged();
+  markDirty();
 }
 
 void MixerModel::pollLevels() {

@@ -94,6 +94,14 @@ class MixerModel : public QAbstractListModel {
   // The short form of a port name, for a label that has to fit in a strip.
   Q_INVOKABLE static QString shortPortName(const QString& port);
 
+  // --- session ------------------------------------------------------------
+  // There is no save dialog: the session is written continuously and restored
+  // on the next start, so closing the app and reopening it lands you where you
+  // left off.
+  void saveSession() const;
+  void loadSession();
+  static QString sessionPath();
+
   // Turns a fader position in 0..1 into a linear gain, and back. AUM's fader is
   // not linear in amplitude: most of the travel covers the top of the range.
   Q_INVOKABLE static qreal faderToGain(qreal position);
@@ -126,6 +134,9 @@ class MixerModel : public QAbstractListModel {
 
   void pollLevels();
   void refreshRouting(int row);
+
+  // Coalesces the writes: a fader drag would otherwise save on every frame.
+  void markDirty();
   void post(EngineCommand::Kind kind, int row, float value);
 
   // Declared before the engine so it outlives it: strips hold plugin instances
@@ -134,6 +145,10 @@ class MixerModel : public QAbstractListModel {
   Engine engine_;
   std::vector<ChannelUi> channels_;
   QTimer level_timer_;
+  QTimer autosave_timer_;
+  // Restoring fires the same setters the UI does; without this every one of
+  // them would queue another save of what was just loaded.
+  bool restoring_ = false;
   // Editor windows stay owned here so closing the mixer closes them too.
   std::vector<std::unique_ptr<PluginWindow>> editors_;
   qreal master_peak_[2] = {0.0, 0.0};

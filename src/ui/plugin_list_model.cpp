@@ -64,6 +64,15 @@ QHash<int, QByteArray> PluginListModel::roleNames() const {
   };
 }
 
+int PluginListModel::rowFor(PluginFormat format, const std::string& uid) const {
+  for (size_t i = 0; i < entries_.size(); ++i) {
+    const PluginDescriptor& descriptor = entries_[i].descriptor;
+    if (descriptor.format == format && descriptor.uid == uid)
+      return static_cast<int>(i);
+  }
+  return -1;
+}
+
 const PluginDescriptor* PluginListModel::descriptor(int row) const {
   if (row < 0 || row >= static_cast<int>(entries_.size())) return nullptr;
   return &entries_[row].descriptor;
