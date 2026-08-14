@@ -40,6 +40,10 @@ class Engine {
 
   AudioGraph& graph() { return *graph_; }
 
+  // For wiring ports from outside, which is how a session restores its
+  // connections and how the tests plug a sender in.
+  jack_client_t* client() const { return client_; }
+
   // UI thread. Registers this channel's JACK input ports and adds the strip.
   // Returns the channel index, or kMaxChannels if the graph is full or the
   // ports could not be registered.

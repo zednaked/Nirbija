@@ -37,3 +37,7 @@ endif()
 add_executable(nirbija_midi_synth midi_synth.cpp)
 target_link_libraries(nirbija_midi_synth PRIVATE nirbija_core)
 add_test(NAME midi_synth COMMAND nirbija_midi_synth)
+
+add_executable(nirbija_midi_jack midi_jack.cpp)
+target_link_libraries(nirbija_midi_jack PRIVATE nirbija_core)
+add_test(NAME midi_jack COMMAND nirbija_midi_jack)
