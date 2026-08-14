@@ -73,6 +73,11 @@ class Engine {
   // ports could not be registered.
   size_t add_channel(const std::string& name, int channel_count);
 
+  // UI thread. Stops rendering the channel and disconnects its ports. The ports
+  // stay registered: a render pass already inside the channel would still be
+  // reading them, and an unused port is cheaper than that risk.
+  void remove_channel(size_t channel);
+
   // UI thread. Returns false if the queue is full, meaning the audio thread has
   // stalled — the caller should surface that, not silently retry.
   bool post(const EngineCommand& command);

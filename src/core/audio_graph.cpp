@@ -21,13 +21,31 @@ void AudioGraph::prepare(double sample_rate, uint32_t max_block_frames) {
 
   const size_t count = active_.load(std::memory_order_acquire);
   for (size_t i = 0; i < count; ++i)
-    channels_[i]->prepare(sample_rate, max_block_frames);
+    if (channels_[i] != nullptr) channels_[i]->prepare(sample_rate, max_block_frames);
 }
 
 bool AudioGraph::any_soloed(size_t count) const {
-  for (size_t i = 0; i < count; ++i)
-    if (channels_[i]->soloed()) return true;
+  for (size_t i = 0; i < count; ++i) {
+    const ChannelStrip* strip = live_[i].load(std::memory_order_acquire);
+    if (strip != nullptr && strip->soloed()) return true;
+  }
   return false;
+}
+
+bool AudioGraph::channel_alive(size_t index) const {
+  if (index >= kMaxChannels) return false;
+  return live_[index].load(std::memory_order_acquire) != nullptr;
+}
+
+void AudioGraph::remove_channel(size_t index) {
+  if (index >= active_.load(std::memory_order_relaxed)) return;
+
+  // Clearing the live slot hides the channel from the next render pass, but a
+  // pass already inside this slot keeps going to the end of the block. So the
+  // strip is retired rather than freed, and the sources are left exactly where
+  // they are: moving them out would pull the ground from under that pass.
+  live_[index].store(nullptr, std::memory_order_release);
+  if (channels_[index] != nullptr) retired_.push_back(std::move(channels_[index]));
 }
 
 void AudioGraph::render(float* const* master, uint32_t frames) {
@@ -37,7 +55,9 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
   const bool solo_active = any_soloed(count);
 
   for (size_t i = 0; i < count; ++i) {
-    ChannelStrip& strip = *channels_[i];
+    ChannelStrip* live = live_[i].load(std::memory_order_acquire);
+    if (live == nullptr) continue;  // removed channel
+    ChannelStrip& strip = *live;
     if (solo_active && !strip.soloed()) continue;
 
     const int width = strip.channel_count();
@@ -91,12 +111,14 @@ size_t AudioGraph::add_channel(std::string name, int channel_count,
   auto strip = std::make_unique<ChannelStrip>(std::move(name), channel_count);
   if (sample_rate_ > 0.0) strip->prepare(sample_rate_, max_block_frames_);
 
+  ChannelStrip* raw = strip.get();
   channels_[index] = std::move(strip);
   sources_[index] = std::move(source);
   midi_sources_[index] = std::move(midi);
 
-  // Release last: everything above must be visible before the audio thread can
-  // reach this slot.
+  // Release twice over: the slot has to be visible before the count that
+  // reaches it, or the audio thread could walk into a slot it cannot read yet.
+  live_[index].store(raw, std::memory_order_release);
   active_.store(index + 1, std::memory_order_release);
   return index;
 }

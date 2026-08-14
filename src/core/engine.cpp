@@ -146,6 +146,17 @@ size_t Engine::add_channel(const std::string& name, int channel_count) {
                              std::make_unique<JackMidiSource>(midi_port));
 }
 
+void Engine::remove_channel(size_t channel) {
+  if (client_ == nullptr || channel >= channel_ports_.size()) return;
+
+  const ChannelPorts& record = channel_ports_[channel];
+  for (jack_port_t* port : record.audio)
+    if (port != nullptr) jack_port_disconnect(client_, port);
+  if (record.midi != nullptr) jack_port_disconnect(client_, record.midi);
+
+  graph_->remove_channel(channel);
+}
+
 std::vector<std::string> Engine::ports_matching(unsigned long flags,
                                                 const char* type,
                                                 bool physical_only) const {

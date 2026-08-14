@@ -3,6 +3,7 @@
 // and the engine, which a compile check cannot.
 
 #include <QGuiApplication>
+#include <QTemporaryDir>
 
 #include <cstdio>
 #include <string>
@@ -27,6 +28,17 @@ QVariant field(nirbija::MixerModel& mixer, int row, int role) {
 int main(int argc, char* argv[]) {
   qputenv("QT_QPA_PLATFORM", "offscreen");
   QGuiApplication app(argc, argv);
+
+  // Point the session somewhere disposable before building a mixer: the model
+  // both loads a session on construction and saves one on destruction, so a
+  // test left on the default path would restore, and then overwrite, whatever
+  // the person using this machine had open.
+  QTemporaryDir dir;
+  if (!dir.isValid()) {
+    fail("could not make a temporary directory");
+    return 1;
+  }
+  qputenv("NIRBIJA_SESSION", (dir.path() + "/session.json").toLocal8Bit());
 
   nirbija::MixerModel mixer;
   if (!mixer.running()) {

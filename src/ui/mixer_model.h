@@ -117,6 +117,10 @@ class MixerModel : public QAbstractListModel {
 
  private:
   struct ChannelUi {
+    // Which graph slot this row drives. Removing a row leaves the slots around
+    // it where they were, so the two indices drift apart and only this mapping
+    // is safe to hand the engine.
+    size_t slot = 0;
     QString name;
     int width = 2;
     qreal gain = 1.0;
@@ -149,8 +153,13 @@ class MixerModel : public QAbstractListModel {
   // Restoring fires the same setters the UI does; without this every one of
   // them would queue another save of what was just loaded.
   bool restoring_ = false;
-  // Editor windows stay owned here so closing the mixer closes them too.
-  std::vector<std::unique_ptr<PluginWindow>> editors_;
+  // Editor windows stay owned here so closing the mixer closes them too. The
+  // slot tags each one, so removing a channel closes only its own editors.
+  struct OpenEditor {
+    size_t slot;
+    std::unique_ptr<PluginWindow> window;
+  };
+  std::vector<OpenEditor> editors_;
   qreal master_peak_[2] = {0.0, 0.0};
   qreal master_gain_ = 1.0;
   QString status_;

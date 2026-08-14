@@ -32,8 +32,15 @@ class AudioGraph {
                      std::unique_ptr<AudioSource> source,
                      std::unique_ptr<MidiSource> midi = nullptr);
 
+  // How many slots have ever been used. Removed slots keep their index so a
+  // removal never renumbers the channels around it.
   size_t channel_count() const { return active_.load(std::memory_order_acquire); }
+  bool channel_alive(size_t index) const;
   ChannelStrip& channel(size_t index) { return *channels_[index]; }
+
+  // UI thread. The strip stops being rendered immediately, but is kept alive:
+  // the audio thread may be inside it at this very moment.
+  void remove_channel(size_t index);
 
   void set_master_gain(float linear) {
     master_gain_.store(linear, std::memory_order_relaxed);
@@ -47,7 +54,16 @@ class AudioGraph {
   std::array<std::unique_ptr<ChannelStrip>, kMaxChannels> channels_;
   std::array<std::unique_ptr<AudioSource>, kMaxChannels> sources_;
   std::array<std::unique_ptr<MidiSource>, kMaxChannels> midi_sources_;
+
+  // What the audio thread actually walks. A null slot was removed and is
+  // skipped; the owning pointers above are what keep the object alive.
+  std::array<std::atomic<ChannelStrip*>, kMaxChannels> live_{};
   std::atomic<size_t> active_{0};
+
+  // UI thread only. Removed strips wait here: freeing one while the audio
+  // thread is inside it would be a use-after-free.
+  // TODO: reclaim these once the audio thread has confirmed a pass.
+  std::vector<std::unique_ptr<ChannelStrip>> retired_;
 
   double sample_rate_ = 0.0;
   uint32_t max_block_frames_ = 0;

@@ -104,6 +104,7 @@ void MixerModel::addChannel(const QString& name, int channels) {
   beginInsertRows({}, static_cast<int>(channels_.size()),
                   static_cast<int>(channels_.size()));
   ChannelUi channel;
+  channel.slot = index;
   channel.name = label;
   channel.width = channels;
   channel.input_label = tr("no input");
@@ -116,10 +117,21 @@ void MixerModel::addChannel(const QString& name, int channels) {
 }
 
 void MixerModel::removeChannel(int row) {
-  // TODO(phase-8): the engine keeps its channel slots for the lifetime of the
-  // session, so a strip can be hidden here but its ports and DSP stay live.
-  // Real removal needs the graph swap that session loading will require anyway.
-  Q_UNUSED(row);
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return;
+
+  // Editors belonging to this channel go with it: one left open would be
+  // editing a plugin that is no longer in the signal path.
+  const size_t slot = channels_[row].slot;
+  std::erase_if(editors_, [slot](const OpenEditor& editor) {
+    return editor.slot == slot;
+  });
+
+  engine_.remove_channel(channels_[row].slot);
+
+  beginRemoveRows({}, row, row);
+  channels_.erase(channels_.begin() + row);
+  endRemoveRows();
+  markDirty();
 }
 
 void MixerModel::renameChannel(int row, const QString& name) {
@@ -133,7 +145,7 @@ void MixerModel::renameChannel(int row, const QString& name) {
 void MixerModel::post(EngineCommand::Kind kind, int row, float value) {
   EngineCommand command;
   command.kind = kind;
-  command.channel = static_cast<size_t>(row);
+  command.channel = channels_[row].slot;
   command.value = value;
   engine_.post(command);
 }
@@ -202,7 +214,8 @@ bool MixerModel::addInsert(int row, int pluginIndex) {
   // publishes the insert to the audio thread once it is ready to run.
   std::unique_ptr<PluginInstance> instance = plugins_->instantiate(pluginIndex);
   if (instance == nullptr) return false;
-  if (!engine_.graph().channel(row).add_insert(std::move(instance))) return false;
+  if (!engine_.graph().channel(channels_[row].slot).add_insert(std::move(instance)))
+    return false;
 
   channels_[row].inserts.append(QString::fromStdString(descriptor->name));
   const QModelIndex idx = index(row);
@@ -215,7 +228,7 @@ void MixerModel::removeInsert(int row, int slot) {
   if (row < 0 || row >= static_cast<int>(channels_.size())) return;
   if (slot < 0 || slot >= channels_[row].inserts.size()) return;
 
-  engine_.graph().channel(row).remove_insert(static_cast<size_t>(slot));
+  engine_.graph().channel(channels_[row].slot).remove_insert(static_cast<size_t>(slot));
   // The engine leaves a hole so the surviving indices stay put; the label list
   // has to keep the same shape or the two would drift apart.
   channels_[row].inserts[slot].clear();
@@ -227,7 +240,7 @@ void MixerModel::removeInsert(int row, int slot) {
 bool MixerModel::openInsertEditor(int row, int slot) {
   if (row < 0 || row >= static_cast<int>(channels_.size())) return false;
 
-  PluginInstance* insert = engine_.graph().channel(row).insert_at(
+  PluginInstance* insert = engine_.graph().channel(channels_[row].slot).insert_at(
       static_cast<size_t>(slot));
   if (insert == nullptr) return false;
 
@@ -238,7 +251,7 @@ bool MixerModel::openInsertEditor(int row, int slot) {
       std::move(gui), QString::fromStdString(insert->descriptor().name));
   if (!window->open()) return false;
 
-  editors_.push_back(std::move(window));
+  editors_.push_back({channels_[row].slot, std::move(window)});
   return true;
 }
 
@@ -258,7 +271,7 @@ QStringList MixerModel::sinks() const {
 
 void MixerModel::connectSource(int row, const QString& port, bool midi) {
   if (row < 0 || row >= static_cast<int>(channels_.size())) return;
-  engine_.connect_source(static_cast<size_t>(row), port.toStdString(), midi);
+  engine_.connect_source(channels_[row].slot, port.toStdString(), midi);
   refreshRouting(row);
 }
 
@@ -297,9 +310,9 @@ void MixerModel::refreshRouting(int row) {
   ChannelUi& channel = channels_[row];
 
   const QString audio = shortPortName(
-      QString::fromStdString(engine_.current_source(row, false)));
+      QString::fromStdString(engine_.current_source(channel.slot, false)));
   const QString midi = shortPortName(
-      QString::fromStdString(engine_.current_source(row, true)));
+      QString::fromStdString(engine_.current_source(channel.slot, true)));
 
   channel.input_label = audio.isEmpty() ? tr("no input") : audio;
   channel.midi_label = midi.isEmpty() ? tr("no MIDI") : midi;
@@ -314,15 +327,17 @@ void MixerModel::pollLevels() {
   if (!engine_.running()) return;
 
   AudioGraph& graph = engine_.graph();
-  const size_t count = std::min(graph.channel_count(), channels_.size());
-  for (size_t i = 0; i < count; ++i) {
-    ChannelStrip& strip = graph.channel(i);
-    for (int ch = 0; ch < channels_[i].width; ++ch)
-      channels_[i].peak[ch] = strip.read_peak(ch);
-    if (channels_[i].width == 1) channels_[i].peak[1] = channels_[i].peak[0];
+  for (size_t row = 0; row < channels_.size(); ++row) {
+    ChannelUi& channel = channels_[row];
+    if (!graph.channel_alive(channel.slot)) continue;
+
+    ChannelStrip& strip = graph.channel(channel.slot);
+    for (int ch = 0; ch < channel.width; ++ch)
+      channel.peak[ch] = strip.read_peak(ch);
+    if (channel.width == 1) channel.peak[1] = channel.peak[0];
   }
-  if (count > 0) {
-    emit dataChanged(index(0), index(static_cast<int>(count) - 1),
+  if (!channels_.empty()) {
+    emit dataChanged(index(0), index(static_cast<int>(channels_.size()) - 1),
                      {PeakLeftRole, PeakRightRole});
   }
 

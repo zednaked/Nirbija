@@ -69,12 +69,13 @@ void MixerModel::saveSession() const {
     // Ports are stored by name. A source that is gone when the session reopens
     // simply stays unconnected rather than blocking the load.
     entry[QStringLiteral("audioSource")] =
-        QString::fromStdString(engine_.current_source(row, false));
+        QString::fromStdString(engine_.current_source(channel.slot, false));
     entry[QStringLiteral("midiSource")] =
-        QString::fromStdString(engine_.current_source(row, true));
+        QString::fromStdString(engine_.current_source(channel.slot, true));
 
     QJsonArray inserts;
-    ChannelStrip& strip = const_cast<Engine&>(engine_).graph().channel(row);
+    ChannelStrip& strip =
+        const_cast<Engine&>(engine_).graph().channel(channel.slot);
     for (size_t slot = 0; slot < strip.insert_count(); ++slot) {
       PluginInstance* insert = strip.insert_at(slot);
       if (insert == nullptr) continue;  // a hole left by a removal
@@ -179,9 +180,8 @@ void MixerModel::loadSession() {
       if (state.isEmpty()) continue;
 
       const QByteArray bytes = QByteArray::fromBase64(state.toLatin1());
-      PluginInstance* insert =
-          engine_.graph().channel(row).insert_at(
-              engine_.graph().channel(row).insert_count() - 1);
+      ChannelStrip& strip = engine_.graph().channel(channels_[row].slot);
+      PluginInstance* insert = strip.insert_at(strip.insert_count() - 1);
       if (insert == nullptr) continue;
 
       const std::vector<uint8_t> blob(bytes.begin(), bytes.end());
