@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Nirbija
+GenericName=Audio Mixer
+Comment=Plugin host and mixer for CLAP and LV2
+# Forcing the Mesa GLX vendor is what lets OpenGL plugin editors create a
+# context on this machine; without it they fail with BadValue and stay black.
+Exec=env __GLX_VENDOR_LIBRARY_NAME=mesa /home/zed/dev/Nirbija/build/src/ui/nirbija
+Path=/home/zed/dev/Nirbija
+Icon=audio-card
+Terminal=false
+Categories=AudioVideo;Audio;Midi;
+Keywords=mixer;plugin;lv2;clap;jack;synth;
+StartupWMClass=nirbija

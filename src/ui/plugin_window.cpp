@@ -51,6 +51,15 @@ bool PluginWindow::open() {
 
   XStoreName(display, window_, title_.toUtf8().constData());
 
+  // A window class the window manager can target. Without it these are
+  // anonymous X windows, and a tiling compositor has no way to be told to float
+  // a plugin editor.
+  const QByteArray instance_name = title_.toUtf8();
+  XClassHint hint{};
+  hint.res_name = const_cast<char*>(instance_name.constData());
+  hint.res_class = const_cast<char*>("nirbija-plugin");
+  XSetClassHint(display, window_, &hint);
+
   // Without this the window manager kills the whole connection when the user
   // closes the window, taking the mixer with it.
   delete_atom_ = XInternAtom(display, "WM_DELETE_WINDOW", False);
