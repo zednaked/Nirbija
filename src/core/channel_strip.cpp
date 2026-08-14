@@ -147,6 +147,16 @@ void ChannelStrip::remove_insert(size_t index) {
   }
 }
 
+void ChannelStrip::swap_inserts(size_t a, size_t b) {
+  const size_t count = insert_count_.load(std::memory_order_relaxed);
+  if (a >= count || b >= count || a == b) return;
+
+  PluginInstance* first = insert_slots_[a].load(std::memory_order_relaxed);
+  PluginInstance* second = insert_slots_[b].load(std::memory_order_relaxed);
+  insert_slots_[a].store(second, std::memory_order_release);
+  insert_slots_[b].store(first, std::memory_order_release);
+}
+
 PluginInstance* ChannelStrip::insert_at(size_t index) const {
   if (index >= insert_count_.load(std::memory_order_acquire)) return nullptr;
   return insert_slots_[index].load(std::memory_order_acquire);

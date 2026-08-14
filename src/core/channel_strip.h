@@ -50,6 +50,11 @@ class ChannelStrip {
   // rather than freed, so the audio thread never touches a dead pointer.
   bool add_insert(std::unique_ptr<PluginInstance> plugin);
   void remove_insert(size_t index);
+
+  // Swaps two slots. The audio thread may be part way through the chain when
+  // this lands, so a single block can render the pair in either order; nothing
+  // is dropped or freed, and the block after is correct.
+  void swap_inserts(size_t a, size_t b);
   size_t insert_count() const { return insert_count_.load(std::memory_order_acquire); }
   PluginInstance* insert_at(size_t index) const;
 

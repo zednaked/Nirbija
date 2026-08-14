@@ -62,6 +62,48 @@ ApplicationWindow {
                     onInputSlotClicked: portPicker.openFor("audio", index)
                     onMidiSlotClicked: portPicker.openFor("midi", index)
 
+                    onInputMenuRequested: slotMenu.openAt(this, [
+                        { label: qsTr("Change input…"),
+                          action: () => portPicker.openFor("audio", index) },
+                        { label: qsTr("Disconnect"), danger: true,
+                          enabled: model.inputLabel !== qsTr("no input"),
+                          action: () => mixer.connectSource(index, "", false) }
+                    ], model.inputLabel)
+
+                    onMidiMenuRequested: slotMenu.openAt(this, [
+                        { label: qsTr("Change MIDI source…"),
+                          action: () => portPicker.openFor("midi", index) },
+                        { label: qsTr("Disconnect"), danger: true,
+                          enabled: model.midiLabel !== qsTr("no MIDI"),
+                          action: () => mixer.connectSource(index, "", true) }
+                    ], model.midiLabel)
+
+                    onInsertMenuRequested: slot => slotMenu.openAt(this, [
+                        { label: qsTr("Open editor"),
+                          action: () => mixer.openInsertEditor(index, slot) },
+                        { label: qsTr("Move up"),
+                          enabled: slot > 0,
+                          action: () => mixer.moveInsert(index, slot, -1) },
+                        { label: qsTr("Move down"),
+                          enabled: slot < model.inserts.length - 1,
+                          action: () => mixer.moveInsert(index, slot, 1) },
+                        { label: qsTr("Replace…"),
+                          action: () => {
+                              mixer.removeInsert(index, slot)
+                              picker.targetRow = index
+                              picker.open()
+                          } },
+                        { label: qsTr("Remove"), danger: true,
+                          action: () => mixer.removeInsert(index, slot) }
+                    ], model.inserts[slot])
+
+                    onTitleClicked: slotMenu.openAt(this, [
+                        { label: qsTr("Rename…"),
+                          action: () => renameDialog.openFor(index, model.name) },
+                        { label: qsTr("Remove channel"), danger: true,
+                          action: () => mixer.removeChannel(index) }
+                    ], model.name)
+
                     onInsertSlotClicked: slot => {
                         // A filled slot opens the plugin's own editor; an empty
                         // one opens the picker to fill it.
@@ -107,6 +149,15 @@ ApplicationWindow {
 
     PluginPicker {
         id: picker
+    }
+
+    SlotMenu {
+        id: slotMenu
+    }
+
+    RenameDialog {
+        id: renameDialog
+        onAccepted: name => mixer.renameChannel(targetRow, name)
     }
 
     PortPicker {

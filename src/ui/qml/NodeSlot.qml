@@ -10,6 +10,7 @@ Rectangle {
     property bool filled: true
 
     signal clicked
+    signal menuRequested
 
     height: Skin.slotHeight
     radius: Skin.radius
@@ -37,6 +38,13 @@ Rectangle {
 
     MouseArea {
         anchors.fill: parent
-        onClicked: root.clicked()
+        acceptedButtons: Qt.LeftButton | Qt.RightButton
+        onClicked: mouse => {
+            if (mouse.button === Qt.RightButton)
+                root.menuRequested()
+            else
+                root.clicked()
+        }
+        onPressAndHold: root.menuRequested()
     }
 }

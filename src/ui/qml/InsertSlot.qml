@@ -10,7 +10,7 @@ Rectangle {
     readonly property bool empty: pluginName.length === 0
 
     signal clicked
-    signal longPressed
+    signal menuRequested
 
     height: Skin.slotHeight
     radius: Skin.radius
@@ -32,7 +32,15 @@ Rectangle {
 
     MouseArea {
         anchors.fill: parent
-        onClicked: root.clicked()
-        onPressAndHold: root.longPressed()
+        acceptedButtons: Qt.LeftButton | Qt.RightButton
+        onClicked: mouse => {
+            // Right click and long press both reach the menu, so the gesture
+            // works with a mouse and with a touchscreen.
+            if (mouse.button === Qt.RightButton)
+                root.menuRequested()
+            else
+                root.clicked()
+        }
+        onPressAndHold: root.menuRequested()
     }
 }

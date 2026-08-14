@@ -21,8 +21,12 @@ Rectangle {
     property color accent: Skin.accent
 
     signal insertSlotClicked(int slot)
+    signal insertMenuRequested(int slot)
+    signal titleClicked
     signal inputSlotClicked
     signal midiSlotClicked
+    signal inputMenuRequested
+    signal midiMenuRequested
 
     width: Skin.stripWidth
     color: Skin.strip
@@ -51,6 +55,7 @@ Rectangle {
             filled: root.inputLabel !== qsTr("no input")
             level: Math.max(root.peakLeft, root.peakRight)
             onClicked: root.inputSlotClicked()
+            onMenuRequested: root.inputMenuRequested()
         }
 
         // MIDI gets its own node slot rather than hiding in a menu: on this
@@ -61,6 +66,7 @@ Rectangle {
             filled: root.midiLabel !== qsTr("no MIDI")
             level: 0
             onClicked: root.midiSlotClicked()
+            onMenuRequested: root.midiMenuRequested()
         }
 
         // --- fader, mute and solo -------------------------------------------
@@ -142,9 +148,10 @@ Rectangle {
                 width: insertList.width
                 pluginName: index < root.inserts.length ? root.inserts[index] : ""
                 onClicked: root.insertSlotClicked(index)
-                onLongPressed: {
-                    if (index < root.inserts.length)
-                        mixer.removeInsert(root.row, index)
+                onMenuRequested: {
+                    if (index < root.inserts.length
+                            && root.inserts[index].length > 0)
+                        root.insertMenuRequested(index)
                 }
             }
         }
@@ -156,16 +163,31 @@ Rectangle {
             level: Math.max(root.peakLeft, root.peakRight)
         }
 
-        Text {
+        // The channel title is where AUM keeps renaming and removal, so it is
+        // a button rather than a label.
+        Item {
             id: title
             width: parent.width
             height: 18
-            text: root.channelName
-            color: Skin.text
-            font.pixelSize: 11
-            horizontalAlignment: Text.AlignHCenter
-            verticalAlignment: Text.AlignVCenter
-            elide: Text.ElideRight
+
+            Text {
+                anchors.fill: parent
+                text: root.channelName
+                color: titleHover.hovered ? Skin.text : Skin.textDim
+                font.pixelSize: 11
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+                elide: Text.ElideRight
+            }
+
+            HoverHandler {
+                id: titleHover
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                onClicked: root.titleClicked()
+            }
         }
     }
 }

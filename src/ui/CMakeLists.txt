@@ -33,6 +33,8 @@ qt_add_qml_module(nirbija
     qml/StripButton.qml
     qml/PluginPicker.qml
     qml/PortPicker.qml
+    qml/SlotMenu.qml
+    qml/RenameDialog.qml
 )
 
 target_link_libraries(nirbija PRIVATE nirbija_ui Qt6::Quick Qt6::QuickControls2)

@@ -86,6 +86,9 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE bool addInsert(int row, int pluginIndex);
   Q_INVOKABLE void removeInsert(int row, int slot);
 
+  // Moves an insert one place up or down the chain. `direction` is -1 or +1.
+  Q_INVOKABLE void moveInsert(int row, int slot, int direction);
+
   // Opens the plugin's own editor in its own window. False when the plugin
   // ships no editor this host can embed, which is common.
   Q_INVOKABLE bool openInsertEditor(int row, int slot);

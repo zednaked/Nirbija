@@ -266,6 +266,23 @@ void MixerModel::removeInsert(int row, int slot) {
   markDirty();
 }
 
+void MixerModel::moveInsert(int row, int slot, int direction) {
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return;
+  const int target = slot + direction;
+
+  QStringList& labels = channels_[row].inserts;
+  if (slot < 0 || slot >= labels.size()) return;
+  if (target < 0 || target >= labels.size()) return;
+
+  engine_.graph().channel(channels_[row].slot).swap_inserts(
+      static_cast<size_t>(slot), static_cast<size_t>(target));
+  labels.swapItemsAt(slot, target);
+
+  const QModelIndex idx = index(row);
+  emit dataChanged(idx, idx, {InsertsRole});
+  markDirty();
+}
+
 bool MixerModel::openInsertEditor(int row, int slot) {
   if (row < 0 || row >= static_cast<int>(channels_.size())) return false;
 

@@ -100,6 +100,59 @@ int main(int argc, char* argv[]) {
     }
   }
 
+  // --- editing what is already assigned --------------------------------------
+  {
+    int first = -1;
+    int second = -1;
+    for (int i = 0; i < mixer.plugins()->rowCount(); ++i) {
+      const nirbija::PluginDescriptor* descriptor = mixer.plugins()->descriptor(i);
+      if (descriptor == nullptr || descriptor->audio_inputs < 2) continue;
+      if (first < 0) {
+        first = i;
+      } else {
+        second = i;
+        break;
+      }
+    }
+
+    if (second < 0) {
+      std::printf("not enough stereo effects to test reordering, skipping\n");
+    } else {
+      mixer.addChannel(QStringLiteral("Chain"), 2);
+      const int row = mixer.rowCount() - 1;
+      mixer.addInsert(row, first);
+      mixer.addInsert(row, second);
+
+      const QString top = mixer.plugins()->descriptor(first)->name.c_str();
+      const QString bottom = mixer.plugins()->descriptor(second)->name.c_str();
+
+      QStringList inserts =
+          field(mixer, row, nirbija::MixerModel::InsertsRole).toStringList();
+      if (inserts != QStringList{top, bottom})
+        fail("inserts did not load in the order they were added");
+
+      mixer.moveInsert(row, 0, 1);
+      inserts = field(mixer, row, nirbija::MixerModel::InsertsRole).toStringList();
+      if (inserts != QStringList{bottom, top})
+        fail("moving an insert down did not reorder the chain");
+
+      // Moving past either end is a no-op rather than a wrap-around.
+      mixer.moveInsert(row, 0, -1);
+      inserts = field(mixer, row, nirbija::MixerModel::InsertsRole).toStringList();
+      if (inserts != QStringList{bottom, top})
+        fail("moving the top insert up should have done nothing");
+
+      mixer.renameChannel(row, QStringLiteral("Renamed"));
+      if (field(mixer, row, nirbija::MixerModel::NameRole).toString() != "Renamed")
+        fail("renaming a channel did not stick");
+
+      const int before_rows = mixer.rowCount();
+      mixer.removeChannel(row);
+      if (mixer.rowCount() != before_rows - 1)
+        fail("removing a channel did not drop the row");
+    }
+  }
+
   // --- routing --------------------------------------------------------------
   // The master should already be connected: a mixer that opens silent is not
   // finished opening.
