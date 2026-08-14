@@ -12,6 +12,8 @@
 #include <lv2/worker/worker.h>
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <array>
 #include <cstring>
 #include <map>
@@ -208,9 +210,13 @@ class Lv2Gui : public PluginGui {
     if (idle_iface_ != nullptr && handle_ != nullptr) idle_iface_->idle(handle_);
   }
 
-  // LV2 has no way to ask an editor how big it wants to be before it is shown,
-  // so the caller falls back to its own default.
-  bool preferred_size(int*, int*) const override { return false; }
+  // Only known once the editor has asked for a size through ui:resize.
+  bool preferred_size(int* width, int* height) const override {
+    if (requested_width_ <= 0 || requested_height_ <= 0) return false;
+    *width = requested_width_;
+    *height = requested_height_;
+    return true;
+  }
 
  private:
   bool load(const LilvUI* ui, uintptr_t parent_window) {
@@ -226,7 +232,10 @@ class Lv2Gui : public PluginGui {
       return false;
     }
 
+    const bool debug = std::getenv("NIRBIJA_DEBUG_EMBED") != nullptr;
     library_ = dlopen(binary_path, RTLD_LOCAL | RTLD_NOW);
+    if (debug && library_ == nullptr)
+      std::fprintf(stderr, "lv2 gui: dlopen failed: %s\n", dlerror());
     if (library_ != nullptr) {
       auto entry = reinterpret_cast<LV2UI_DescriptorFunction>(
           dlsym(library_, "lv2ui_descriptor"));
@@ -241,8 +250,24 @@ class Lv2Gui : public PluginGui {
       }
     }
 
+    if (debug && descriptor_ == nullptr)
+      std::fprintf(stderr, "lv2 gui: no descriptor matching %s in %s\n",
+                   lilv_node_as_uri(lilv_ui_get_uri(ui)), binary_path);
+
     if (descriptor_ != nullptr)
       instantiate(bundle_path, parent_window);
+
+    if (descriptor_ != nullptr && handle_ == nullptr) {
+      // Most LV2 editors draw with OpenGL and refuse to instantiate when GLX
+      // cannot give them a context, which is a property of the display rather
+      // than of the plugin. Worth saying out loud, since the plugin itself
+      // reports nothing.
+      std::fprintf(stderr,
+                   "lv2 gui: %s refused to instantiate. If other editors fail "
+                   "too, check GLX on this display; forcing "
+                   "__GLX_VENDOR_LIBRARY_NAME=mesa fixes it on some setups.\n",
+                   lilv_node_as_uri(lilv_ui_get_uri(ui)));
+    }
 
     lilv_free(binary_path);
     lilv_free(bundle_path);
@@ -259,12 +284,19 @@ class Lv2Gui : public PluginGui {
     instance_feature_ = {LV2_INSTANCE_ACCESS_URI,
                          lilv_instance_get_handle(instance_)};
     idle_feature_ = {LV2_UI__idleInterface, nullptr};
+
+    // Editors that lay themselves out ask the host for a size, and several
+    // refuse to instantiate at all without somewhere to ask.
+    resize_.handle = this;
+    resize_.ui_resize = &Lv2Gui::request_resize;
+    resize_feature_ = {LV2_UI__resize, &resize_};
     map_feature_ = {LV2_URID__map, world_->urids.map_feature()};
     unmap_feature_ = {LV2_URID__unmap, world_->urids.unmap_feature()};
 
-    const LV2_Feature* features[] = {&parent_feature_,  &instance_feature_,
-                                     &idle_feature_,    &map_feature_,
-                                     &unmap_feature_,   nullptr};
+    const LV2_Feature* features[] = {&parent_feature_, &instance_feature_,
+                                     &idle_feature_,   &resize_feature_,
+                                     &map_feature_,    &unmap_feature_,
+                                     nullptr};
 
     handle_ = descriptor_->instantiate(descriptor_, lilv_node_as_uri(
                                            lilv_plugin_get_uri(plugin_)),
@@ -276,6 +308,13 @@ class Lv2Gui : public PluginGui {
       idle_iface_ = static_cast<const LV2UI_Idle_Interface*>(
           descriptor_->extension_data(LV2_UI__idleInterface));
     }
+  }
+
+  static int request_resize(LV2UI_Feature_Handle handle, int width, int height) {
+    auto* self = static_cast<Lv2Gui*>(handle);
+    self->requested_width_ = width;
+    self->requested_height_ = height;
+    return 0;
   }
 
   // The editor writes a control value back to the host. Only plain float
@@ -305,7 +344,10 @@ class Lv2Gui : public PluginGui {
   LV2UI_Widget widget_ = nullptr;
   const LV2UI_Idle_Interface* idle_iface_ = nullptr;
   LV2_Feature parent_feature_{}, instance_feature_{}, idle_feature_{};
-  LV2_Feature map_feature_{}, unmap_feature_{};
+  LV2_Feature resize_feature_{}, map_feature_{}, unmap_feature_{};
+  LV2UI_Resize resize_{};
+  int requested_width_ = 0;
+  int requested_height_ = 0;
 };
 
 class Lv2Instance : public PluginInstance {

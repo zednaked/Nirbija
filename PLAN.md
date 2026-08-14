@@ -62,37 +62,51 @@ da UI e entregue pronta por mensagem; o descarte volta pela fila de lixo.
 Ordem é dependência real, não preferência: 5 precisa de 4, 4 precisa de 2–3,
 todos precisam de 1.
 
-## Fase 5 — embedding de GUI: onde parou
+## Fase 5 — embedding de GUI: funcionando
 
-Feito e funcionando:
+Editoras nativas de CLAP e LV2 desenham dentro do host. Verificado com Surge XT
+(CLAP) e Dragonfly Hall Reverb (LV2).
 
-- Interface `PluginGui` no núcleo (`attach`/`detach`/`idle`/`preferred_size`).
-- CLAP: extensão `gui` com `CLAP_WINDOW_API_X11`. A negociação inteira funciona —
-  `create` → `set_parent` → `get_size` → `set_size` → `show` retornam sucesso, e
-  a janela hospedeira abre no tamanho que o próprio plugin pediu (638x680 no
-  Surge XT).
-- LV2: X11UI carregada direto do binário da UI, sem suil (suil só é necessário
-  para envolver UI de toolkit diferente do host).
-- `force_x11_platform()`: o app troca para xcb quando a sessão é Wayland, senão
+Três coisas precisaram estar certas ao mesmo tempo, e cada uma sozinha dava
+janela preta:
+
+1. **A janela pai tem que ser Xlib pura.** Um `QWindow` do xcb não serve: os
+   toolkits de plugin realizam a view contra o handle recebido e esperam uma
+   janela X11 que possam dominar. `PluginWindow` cria a dela com
+   `XCreateSimpleWindow`, bombeia os próprios eventos e não passa pelo sistema
+   de janelas do Qt.
+2. **O host precisa rodar o event loop do plugin CLAP.** No Linux o plugin não
+   roda loop próprio: ele registra timers e file descriptors no host pelas
+   extensões `clap.timer-support` e `clap.posix-fd-support`, e espera ser
+   chamado de volta. Sem isso a editora cria a janela e nunca pinta um pixel —
+   foi exatamente o sintoma. Servidos em `ClapInstance::pump_main_thread`.
+3. **A janela filha precisa ser mapeada pelo host.** O plugin cria a dela e
+   frequentemente a deixa sem mapear (`map_state=0`); `adoptChild()` mapeia e
+   adota o tamanho dela.
+
+Diagnóstico: `NIRBIJA_DEBUG_EMBED=1` imprime a árvore de janelas filhas com
+tamanho e `map_state` — foi o que apontou o item 3.
+
+### GLX nesta máquina
+
+Editora LV2 que usa OpenGL (DPF/Pugl, robtk/x42) falhava em
+`Failed to realize Pugl view`. Não era bug nosso: `glXCreateContext` falha com
+`BadValue` neste XWayland, para qualquer programa. Provado com um probe de 20
+linhas fora do projeto.
+
+Contorno: `__GLX_VENDOR_LIBRARY_NAME=mesa`. Com isso a Dragonfly desenha. O
+host avisa disso quando uma UI LV2 recusa instanciar, já que o plugin não diz
+nada.
+
+### Ainda torto
+
+- O tamanho da janela fica a cargo do compositor. O Hyprland tila as janelas e
+  ignora `XResizeWindow` e `XSizeHints`, então sobra área morta em volta da
+  editora. Numa regra de janela flutuante isso desaparece.
+- `force_x11_platform()` troca o app para xcb quando a sessão é Wayland, senão
   `winId()` devolve um ponteiro e a primeira chamada X do plugin morre com
-  `BadWindow`. Escape: `NIRBIJA_ALLOW_WAYLAND=1`.
-- `nirbija_gui_probe "<nome>"`: ferramenta manual que abre a editora de um
-  plugin isolada.
-
-**Não funciona ainda: a editora não desenha.** A janela abre no tamanho certo e
-fica preta.
-
-- CLAP (Surge XT): todas as chamadas retornam sucesso, nenhum pixel aparece.
-- LV2/DPF (Dragonfly): falha antes, em `Failed to realize Pugl view`.
-
-Tentado sem sucesso: mapear a janela antes do `attach`; informar o tamanho ao
-plugin com `set_size`; sincronizar o X (`processEvents` + `sync`) antes de
-entregar o handle.
-
-Hipótese para a próxima investida: um `QWindow` do xcb não é o pai que esses
-toolkits esperam. Hosts que funcionam (Carla, Ardour) criam a janela pai com
-Xlib puro e/ou implementam o protocolo XEmbed. O próximo passo é trocar
-`PluginWindow` por uma janela Xlib criada à mão, embrulhada num container Qt.
+  `BadWindow`. Escape: `NIRBIJA_ALLOW_WAYLAND=1`, perdendo as editoras.
+- `nirbija_gui_probe "<nome>"` abre a editora de um plugin isolada, para teste.
 
 ## VST3 — adiado de propósito
 

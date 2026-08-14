@@ -3,7 +3,11 @@
 #include <clap/clap.h>
 #include <dlfcn.h>
 
+#include <poll.h>
+
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -61,10 +65,13 @@ class ClapModule {
 
 // A CLAP editor embedded into a host window. CLAP hands the plugin a parent
 // window and lets it draw inside; nothing is reparented behind its back.
+class ClapInstance;
+
 class ClapGui : public PluginGui {
  public:
-  ClapGui(const clap_plugin_t* plugin, const clap_plugin_gui_t* gui)
-      : plugin_(plugin), gui_(gui) {}
+  ClapGui(ClapInstance* owner, const clap_plugin_t* plugin,
+          const clap_plugin_gui_t* gui)
+      : owner_(owner), plugin_(plugin), gui_(gui) {}
 
   ~ClapGui() override { detach(); }
 
@@ -99,8 +106,10 @@ class ClapGui : public PluginGui {
     created_ = false;
   }
 
-  // CLAP editors drive their own repaints, so there is nothing to pump here.
-  void idle() override {}
+  // A CLAP plugin does not run its own event loop on Linux: it hands the host
+  // timers and file descriptors and expects to be called back. Without this an
+  // editor creates its window and then never paints a single pixel.
+  void idle() override;
 
   bool preferred_size(int* width, int* height) const override {
     uint32_t w = 0;
@@ -112,6 +121,7 @@ class ClapGui : public PluginGui {
   }
 
  private:
+  ClapInstance* owner_;
   const clap_plugin_t* plugin_;
   const clap_plugin_gui_t* gui_;
   bool created_ = false;
@@ -128,6 +138,12 @@ class ClapInstance : public PluginInstance {
     host_.url = "";
     host_.version = "0.1.0";
     host_.get_extension = &ClapInstance::host_get_extension;
+
+    timer_support_.register_timer = &ClapInstance::host_register_timer;
+    timer_support_.unregister_timer = &ClapInstance::host_unregister_timer;
+    fd_support_.register_fd = &ClapInstance::host_register_fd;
+    fd_support_.modify_fd = &ClapInstance::host_modify_fd;
+    fd_support_.unregister_fd = &ClapInstance::host_unregister_fd;
     host_.request_restart = &ClapInstance::host_request_restart;
     host_.request_process = &ClapInstance::host_request_process;
     host_.request_callback = &ClapInstance::host_request_callback;
@@ -154,6 +170,10 @@ class ClapInstance : public PluginInstance {
         plugin_->get_extension(plugin_, CLAP_EXT_AUDIO_PORTS));
     gui_ = static_cast<const clap_plugin_gui_t*>(
         plugin_->get_extension(plugin_, CLAP_EXT_GUI));
+    plugin_timers_ = static_cast<const clap_plugin_timer_support_t*>(
+        plugin_->get_extension(plugin_, CLAP_EXT_TIMER_SUPPORT));
+    plugin_fds_ = static_cast<const clap_plugin_posix_fd_support_t*>(
+        plugin_->get_extension(plugin_, CLAP_EXT_POSIX_FD_SUPPORT));
 
     read_port_counts();
     return true;
@@ -287,10 +307,64 @@ class ClapInstance : public PluginInstance {
     // A plugin that cannot draw on X11 is no use here, and asking it to create
     // an editor anyway tends to end in a crash rather than a clean refusal.
     if (!gui_->is_api_supported(plugin_, CLAP_WINDOW_API_X11, false)) return nullptr;
-    return std::make_unique<ClapGui>(plugin_, gui_);
+    return std::make_unique<ClapGui>(this, plugin_, gui_);
+  }
+
+  // Runs everything the plugin asked the host to run on the main thread: its
+  // due timers, its ready file descriptors, and any callback it requested.
+  void pump_main_thread() {
+    if (plugin_ == nullptr) return;
+
+    if (callback_requested_.exchange(false, std::memory_order_acquire))
+      plugin_->on_main_thread(plugin_);
+
+    const auto now = std::chrono::steady_clock::now();
+    if (plugin_timers_ != nullptr) {
+      for (Timer& timer : timers_) {
+        if (now - timer.last_fired < std::chrono::milliseconds(timer.period_ms))
+          continue;
+        timer.last_fired = now;
+        plugin_timers_->on_timer(plugin_, timer.id);
+      }
+    }
+
+    if (plugin_fds_ != nullptr && !fds_.empty()) {
+      poll_set_.clear();
+      poll_set_.reserve(fds_.size());
+      for (const RegisteredFd& registered : fds_) {
+        pollfd entry{};
+        entry.fd = registered.fd;
+        entry.events = 0;
+        if (registered.flags & CLAP_POSIX_FD_READ) entry.events |= POLLIN;
+        if (registered.flags & CLAP_POSIX_FD_WRITE) entry.events |= POLLOUT;
+        poll_set_.push_back(entry);
+      }
+
+      // Zero timeout: this is a poll of what is ready now, not a wait.
+      if (poll(poll_set_.data(), poll_set_.size(), 0) > 0) {
+        for (const pollfd& entry : poll_set_) {
+          clap_posix_fd_flags_t flags = 0;
+          if (entry.revents & POLLIN) flags |= CLAP_POSIX_FD_READ;
+          if (entry.revents & POLLOUT) flags |= CLAP_POSIX_FD_WRITE;
+          if (entry.revents & (POLLERR | POLLHUP)) flags |= CLAP_POSIX_FD_ERROR;
+          if (flags != 0) plugin_fds_->on_fd(plugin_, entry.fd, flags);
+        }
+      }
+    }
   }
 
  private:
+  struct Timer {
+    clap_id id;
+    uint32_t period_ms;
+    std::chrono::steady_clock::time_point last_fired;
+  };
+
+  struct RegisteredFd {
+    int fd;
+    clap_posix_fd_flags_t flags;
+  };
+
   struct PendingParam {
     uint32_t id;
     double value;
@@ -400,14 +474,76 @@ class ClapInstance : public PluginInstance {
     }
   }
 
-  // Nirbija exposes no optional host extensions yet, so plugins fall back to
-  // their defaults rather than getting a half-implemented one.
-  static const void* host_get_extension(const clap_host_t*, const char*) {
+  static ClapInstance* self_of(const clap_host_t* host) {
+    return static_cast<ClapInstance*>(host->host_data);
+  }
+
+  // Only the two event-loop extensions are offered. Anything else a plugin asks
+  // for is better left unanswered than half-implemented.
+  static const void* host_get_extension(const clap_host_t* host, const char* id) {
+    ClapInstance* self = self_of(host);
+    if (std::strcmp(id, CLAP_EXT_TIMER_SUPPORT) == 0) return &self->timer_support_;
+    if (std::strcmp(id, CLAP_EXT_POSIX_FD_SUPPORT) == 0) return &self->fd_support_;
     return nullptr;
   }
+
   static void host_request_restart(const clap_host_t*) {}
   static void host_request_process(const clap_host_t*) {}
-  static void host_request_callback(const clap_host_t*) {}
+
+  // Called from any thread, serviced on the next main-thread pump.
+  static void host_request_callback(const clap_host_t* host) {
+    self_of(host)->callback_requested_.store(true, std::memory_order_release);
+  }
+
+  static bool host_register_timer(const clap_host_t* host, uint32_t period_ms,
+                                  clap_id* timer_id) {
+    ClapInstance* self = self_of(host);
+    const clap_id id = self->next_timer_id_++;
+    // A plugin asking for a 0 ms timer means "as often as you can"; clamp it to
+    // the pump rate so it cannot spin the main thread.
+    self->timers_.push_back({id, std::max<uint32_t>(period_ms, 8),
+                             std::chrono::steady_clock::now()});
+    *timer_id = id;
+    return true;
+  }
+
+  static bool host_unregister_timer(const clap_host_t* host, clap_id timer_id) {
+    ClapInstance* self = self_of(host);
+    const auto it = std::find_if(self->timers_.begin(), self->timers_.end(),
+                                 [timer_id](const Timer& timer) {
+                                   return timer.id == timer_id;
+                                 });
+    if (it == self->timers_.end()) return false;
+    self->timers_.erase(it);
+    return true;
+  }
+
+  static bool host_register_fd(const clap_host_t* host, int fd,
+                               clap_posix_fd_flags_t flags) {
+    self_of(host)->fds_.push_back({fd, flags});
+    return true;
+  }
+
+  static bool host_modify_fd(const clap_host_t* host, int fd,
+                             clap_posix_fd_flags_t flags) {
+    ClapInstance* self = self_of(host);
+    for (RegisteredFd& registered : self->fds_) {
+      if (registered.fd != fd) continue;
+      registered.flags = flags;
+      return true;
+    }
+    return false;
+  }
+
+  static bool host_unregister_fd(const clap_host_t* host, int fd) {
+    ClapInstance* self = self_of(host);
+    const auto it = std::find_if(
+        self->fds_.begin(), self->fds_.end(),
+        [fd](const RegisteredFd& registered) { return registered.fd == fd; });
+    if (it == self->fds_.end()) return false;
+    self->fds_.erase(it);
+    return true;
+  }
 
   PluginDescriptor desc_;
   std::shared_ptr<ClapModule> module_;
@@ -417,6 +553,16 @@ class ClapInstance : public PluginInstance {
   const clap_plugin_state_t* state_ = nullptr;
   const clap_plugin_audio_ports_t* audio_ports_ = nullptr;
   const clap_plugin_gui_t* gui_ = nullptr;
+  const clap_plugin_timer_support_t* plugin_timers_ = nullptr;
+  const clap_plugin_posix_fd_support_t* plugin_fds_ = nullptr;
+
+  clap_host_timer_support_t timer_support_{};
+  clap_host_posix_fd_support_t fd_support_{};
+  std::vector<Timer> timers_;
+  std::vector<RegisteredFd> fds_;
+  std::vector<pollfd> poll_set_;
+  clap_id next_timer_id_ = 1;
+  std::atomic<bool> callback_requested_{false};
 
   bool active_ = false;
   bool processing_ = false;
@@ -429,6 +575,8 @@ class ClapInstance : public PluginInstance {
   InEventList in_events_;
   clap_output_events_t out_events_{nullptr, &ClapInstance::out_event_push};
 };
+
+void ClapGui::idle() { owner_->pump_main_thread(); }
 
 class ClapBackend : public PluginBackend {
  public:
