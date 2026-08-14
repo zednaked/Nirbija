@@ -105,6 +105,7 @@ void MixerModel::saveSession() const {
 
   QJsonObject root;
   root[QStringLiteral("version")] = kSessionVersion;
+  root[QStringLiteral("tempo")] = engine_.tempo();
   root[QStringLiteral("master")] = master;
   root[QStringLiteral("channels")] = channels;
 
@@ -189,6 +190,9 @@ void MixerModel::loadSession() {
         qWarning("session: %s refused its own saved state", uid.c_str());
     }
   }
+
+  const double tempo = root[QStringLiteral("tempo")].toDouble(120.0);
+  if (tempo > 0.0) setTempo(tempo);
 
   const QJsonObject master = root[QStringLiteral("master")].toObject();
   setMasterGain(master[QStringLiteral("gain")].toDouble(1.0));

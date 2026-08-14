@@ -27,6 +27,8 @@ class MixerModel : public QAbstractListModel {
   Q_PROPERTY(qreal masterPeakRight READ masterPeakRight NOTIFY levelsChanged)
   Q_PROPERTY(qreal masterGain READ masterGain WRITE setMasterGain NOTIFY masterGainChanged)
   Q_PROPERTY(QString masterSink READ masterSink NOTIFY routingChanged)
+  Q_PROPERTY(bool playing READ playing NOTIFY transportChanged)
+  Q_PROPERTY(qreal tempo READ tempo WRITE setTempo NOTIFY transportChanged)
   Q_PROPERTY(nirbija::PluginListModel* plugins READ plugins CONSTANT)
 
  public:
@@ -62,8 +64,14 @@ class MixerModel : public QAbstractListModel {
   qreal masterPeakRight() const { return master_peak_[1]; }
   qreal masterGain() const { return master_gain_; }
   QString masterSink() const;
+  bool playing() const { return engine_.playing(); }
+  qreal tempo() const { return engine_.tempo(); }
+  void setTempo(qreal bpm);
   PluginListModel* plugins() const { return plugins_.get(); }
   void setMasterGain(qreal gain);
+
+  Q_INVOKABLE void togglePlay();
+  Q_INVOKABLE void rewind();
 
   Q_INVOKABLE void addChannel(const QString& name, int channels);
   Q_INVOKABLE void removeChannel(int row);
@@ -114,6 +122,7 @@ class MixerModel : public QAbstractListModel {
   void levelsChanged();
   void masterGainChanged();
   void routingChanged();
+  void transportChanged();
 
  private:
   struct ChannelUi {

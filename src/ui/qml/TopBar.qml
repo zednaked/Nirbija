@@ -6,6 +6,7 @@ Rectangle {
     id: root
 
     property real tempo: 120
+    property bool playing: false
     property real peakLeft: 0
     property real peakRight: 0
     property string status: ""
@@ -35,8 +36,10 @@ Rectangle {
         StripButton {
             width: 30
             height: 28
-            label: "▶"
+            label: root.playing ? "■" : "▶"
+            active: root.playing
             activeColor: Skin.meterLow
+            onClicked: mixer.togglePlay()
         }
 
         StripButton {
@@ -46,11 +49,36 @@ Rectangle {
             activeColor: Skin.arm
         }
 
+        // Tempo is dragged rather than typed: it is a value you nudge while
+        // listening, and a text field would take the focus off the mixer.
         Text {
+            id: tempoLabel
             anchors.verticalCenter: parent.verticalCenter
-            text: root.tempo.toFixed(0) + " BPM"
-            color: Skin.textDim
+            text: root.tempo.toFixed(1) + " BPM"
+            color: tempoDrag.drag.active ? Skin.text : Skin.textDim
             font.pixelSize: 12
+
+            MouseArea {
+                id: tempoDrag
+                anchors.fill: parent
+                anchors.margins: -6
+                property real startY: 0
+                property real startTempo: 120
+
+                drag.target: null
+                onPressed: mouse => {
+                    startY = mouse.y
+                    startTempo = root.tempo
+                }
+                onPositionChanged: mouse => {
+                    if (!pressed)
+                        return
+                    // Up is faster, and a quarter BPM per pixel is fine enough
+                    // to land on a number without being slow to cross the range.
+                    mixer.tempo = startTempo + (startY - mouse.y) * 0.25
+                }
+                onDoubleClicked: mixer.rewind()
+            }
         }
     }
 

@@ -282,6 +282,23 @@ void Engine::drain_commands() {
       graph_->set_master_gain(command.value);
       continue;
     }
+    // Transport commands are not about any one channel, and each of them makes
+    // the next block a discontinuity the plugins have to be told about.
+    if (command.kind == EngineCommand::Kind::SetPlaying) {
+      playing_.store(command.value != 0.0f, std::memory_order_relaxed);
+      transport_changed_ = true;
+      continue;
+    }
+    if (command.kind == EngineCommand::Kind::SetTempo) {
+      if (command.value > 0.0f) tempo_.store(command.value, std::memory_order_relaxed);
+      transport_changed_ = true;
+      continue;
+    }
+    if (command.kind == EngineCommand::Kind::Rewind) {
+      transport_frame_ = 0;
+      transport_changed_ = true;
+      continue;
+    }
     if (command.channel >= graph_->channel_count()) continue;
     ChannelStrip& strip = graph_->channel(command.channel);
     switch (command.kind) {
@@ -290,6 +307,9 @@ void Engine::drain_commands() {
       case EngineCommand::Kind::SetMute: strip.set_muted(command.value != 0.0f); break;
       case EngineCommand::Kind::SetSolo: strip.set_soloed(command.value != 0.0f); break;
       case EngineCommand::Kind::SetMasterGain:
+      case EngineCommand::Kind::SetPlaying:
+      case EngineCommand::Kind::SetTempo:
+      case EngineCommand::Kind::Rewind:
       case EngineCommand::Kind::None:
         break;
     }
@@ -299,11 +319,31 @@ void Engine::drain_commands() {
 int Engine::process(jack_nframes_t frames) {
   drain_commands();
 
+  const bool playing = playing_.load(std::memory_order_relaxed);
+  const double tempo = tempo_.load(std::memory_order_relaxed);
+
+  TransportInfo transport;
+  transport.playing = playing;
+  transport.tempo_bpm = tempo;
+  transport.frame = transport_frame_;
+  transport.seconds = sample_rate_ > 0.0
+                          ? static_cast<double>(transport_frame_) / sample_rate_
+                          : 0.0;
+  transport.beats = transport.seconds * tempo / 60.0;
+  transport.changed = transport_changed_;
+  transport_changed_ = false;
+
+  graph_->set_transport(transport);
+
   float* master[2];
   for (int ch = 0; ch < 2; ++ch)
     master[ch] = static_cast<float*>(jack_port_get_buffer(master_out_[ch], frames));
 
   graph_->render(master, frames);
+
+  // The clock only moves while playing; stopped means parked, not paused
+  // somewhere the plugins cannot see.
+  if (playing) transport_frame_ += frames;
   return 0;
 }
 

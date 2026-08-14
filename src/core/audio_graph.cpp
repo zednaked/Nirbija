@@ -69,7 +69,8 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
                                           midi_scratch_.size(), frames);
     }
 
-    strip.process(scratch_ptrs_.data(), frames, midi_scratch_.data(), midi_count);
+    strip.process(scratch_ptrs_.data(), frames, midi_scratch_.data(), midi_count,
+                  &transport_);
 
     // A mono strip is widened here, with constant-power pan so sweeping it
     // across the image keeps the same loudness. A stereo strip already had its

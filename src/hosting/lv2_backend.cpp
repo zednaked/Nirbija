@@ -3,7 +3,9 @@
 #include <lilv/lilv.h>
 #include <dlfcn.h>
 #include <lv2/atom/atom.h>
+#include <lv2/atom/forge.h>
 #include <lv2/atom/util.h>
+#include <lv2/time/time.h>
 #include <lv2/instance-access/instance-access.h>
 #include <lv2/state/state.h>
 #include <lv2/midi/midi.h>
@@ -18,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -372,6 +375,7 @@ class Lv2Instance : public PluginInstance {
     // Features are handed to the plugin by pointer and must outlive it, so they
     // live in members rather than locals.
     build_features(max_block_frames);
+    lv2_atom_forge_init(&forge_, world_->urids.map_feature());
 
     instance_ = lilv_plugin_instantiate(plugin_, sample_rate, features_.data());
     if (instance_ == nullptr) return false;
@@ -404,10 +408,39 @@ class Lv2Instance : public PluginInstance {
     instance_ = nullptr;
   }
 
+  void set_transport(const TransportInfo& transport) override {
+    transport_ = transport;
+    has_transport_ = true;
+  }
+
   void queue_midi(const MidiEvent& event) override {
     if (atom_in_.empty() || event.size == 0) return;
     if (pending_midi_count_ >= pending_midi_.size()) return;  // block overrun
     pending_midi_[pending_midi_count_++] = event;
+  }
+
+  // Reads MIDI the plugin wrote to its first atom output port. A step
+  // sequencer's entire output lives here.
+  size_t take_midi_output(MidiEvent* out, size_t capacity) override {
+    if (atom_out_.empty() || instance_ == nullptr) return 0;
+
+    const auto* sequence = reinterpret_cast<const LV2_Atom_Sequence*>(
+        atom_buffers_[atom_in_.size()].data());
+    if (sequence->atom.type != sequence_urid_) return 0;
+
+    size_t written = 0;
+    LV2_ATOM_SEQUENCE_FOREACH(sequence, event) {
+      if (written >= capacity) break;
+      if (event->body.type != midi_event_urid_) continue;
+      if (event->body.size == 0 || event->body.size > 3) continue;
+
+      const auto* data = reinterpret_cast<const uint8_t*>(event + 1);
+      MidiEvent& target = out[written++];
+      target.frame = static_cast<uint32_t>(event->time.frames);
+      target.size = static_cast<uint8_t>(event->body.size);
+      std::copy_n(data, event->body.size, target.data);
+    }
+    return written;
   }
 
   void process(const float* const* inputs, float* const* outputs,
@@ -424,7 +457,7 @@ class Lv2Instance : public PluginInstance {
     }
 
     reset_atom_inputs();
-    write_pending_midi();
+    write_input_events();
     lilv_instance_run(instance_, frames);
     deliver_worker_responses();
 
@@ -690,32 +723,70 @@ class Lv2Instance : public PluginInstance {
                                  atom_buffers_[atom_in_.size() + i].data());
   }
 
-  // Appends this block's MIDI to the first atom input port, which is where a
-  // synth listens. Events are already in order because the engine reads them
-  // from JACK in order.
-  void write_pending_midi() {
-    if (atom_in_.empty() || pending_midi_count_ == 0) return;
+  // Builds this block's input sequence on the first atom port, which is where a
+  // synth listens: the transport first, then the MIDI. Both have to go through
+  // the forge because an atom object is not something to hand-assemble.
+  void write_input_events() {
+    if (atom_in_.empty()) return;
 
-    auto* sequence = reinterpret_cast<LV2_Atom_Sequence*>(atom_buffers_[0].data());
-    uint8_t* const base = atom_buffers_[0].data();
-    const size_t capacity = kAtomBufferBytes;
+    lv2_atom_forge_set_buffer(&forge_, atom_buffers_[0].data(), kAtomBufferBytes);
+
+    LV2_Atom_Forge_Frame sequence;
+    lv2_atom_forge_sequence_head(&forge_, &sequence, 0);
+
+    if (has_transport_) write_transport();
 
     for (size_t i = 0; i < pending_midi_count_; ++i) {
       const MidiEvent& event = pending_midi_[i];
-      const size_t offset = sizeof(LV2_Atom) + sequence->atom.size;
-      const size_t needed = sizeof(LV2_Atom_Event) + lv2_atom_pad_size(event.size);
-      if (offset + needed > capacity) break;
-
-      auto* atom_event = reinterpret_cast<LV2_Atom_Event*>(base + offset);
-      atom_event->time.frames = event.frame;
-      atom_event->body.size = event.size;
-      atom_event->body.type = midi_event_urid_;
-      std::memcpy(atom_event + 1, event.data, event.size);
-
-      sequence->atom.size += static_cast<uint32_t>(needed);
+      lv2_atom_forge_frame_time(&forge_, event.frame);
+      lv2_atom_forge_atom(&forge_, event.size, midi_event_urid_);
+      lv2_atom_forge_write(&forge_, event.data, event.size);
     }
 
+    lv2_atom_forge_pop(&forge_, &sequence);
     pending_midi_count_ = 0;
+
+    if (std::getenv("NIRBIJA_DEBUG_TRANSPORT") != nullptr) {
+      const auto* written =
+          reinterpret_cast<const LV2_Atom_Sequence*>(atom_buffers_[0].data());
+      uint32_t events = 0;
+      LV2_ATOM_SEQUENCE_FOREACH(written, event) { (void)event; ++events; }
+      std::fprintf(stderr,
+                   "lv2 transport: seq type=%u size=%u events=%u speed=%.1f "
+                   "beats=%.3f\n",
+                   written->atom.type, written->atom.size, events,
+                   transport_.playing ? 1.0 : 0.0, transport_.beats);
+    }
+  }
+
+  // A time:Position object at the start of the block. Without it a sequencer
+  // has no clock and simply never advances.
+  void write_transport() {
+    const double beats_per_bar = static_cast<double>(transport_.numerator);
+    const double bars = beats_per_bar > 0.0 ? transport_.beats / beats_per_bar : 0.0;
+    const double bar = std::floor(bars);
+
+    LV2_Atom_Forge_Frame object;
+    lv2_atom_forge_frame_time(&forge_, 0);
+    lv2_atom_forge_object(&forge_, &object, 0, time_position_urid_);
+
+    lv2_atom_forge_key(&forge_, time_frame_urid_);
+    lv2_atom_forge_long(&forge_, static_cast<int64_t>(transport_.frame));
+    lv2_atom_forge_key(&forge_, time_speed_urid_);
+    lv2_atom_forge_float(&forge_, transport_.playing ? 1.0f : 0.0f);
+    lv2_atom_forge_key(&forge_, time_bar_urid_);
+    lv2_atom_forge_long(&forge_, static_cast<int64_t>(bar));
+    lv2_atom_forge_key(&forge_, time_bar_beat_urid_);
+    lv2_atom_forge_float(&forge_,
+                         static_cast<float>((bars - bar) * beats_per_bar));
+    lv2_atom_forge_key(&forge_, time_beats_per_bar_urid_);
+    lv2_atom_forge_float(&forge_, static_cast<float>(beats_per_bar));
+    lv2_atom_forge_key(&forge_, time_beat_unit_urid_);
+    lv2_atom_forge_int(&forge_, transport_.denominator);
+    lv2_atom_forge_key(&forge_, time_bpm_urid_);
+    lv2_atom_forge_float(&forge_, static_cast<float>(transport_.tempo_bpm));
+
+    lv2_atom_forge_pop(&forge_, &object);
   }
 
   // An atom input port must present a valid, empty sequence every block, or the
@@ -756,6 +827,18 @@ class Lv2Instance : public PluginInstance {
   LV2_URID sequence_urid_ = urids_.map_string(LV2_ATOM__Sequence);
   LV2_URID midi_event_urid_ = urids_.map_string(LV2_MIDI__MidiEvent);
   LV2_URID float_urid_ = urids_.map_string(LV2_ATOM__Float);
+  LV2_URID time_position_urid_ = urids_.map_string(LV2_TIME__Position);
+  LV2_URID time_frame_urid_ = urids_.map_string(LV2_TIME__frame);
+  LV2_URID time_speed_urid_ = urids_.map_string(LV2_TIME__speed);
+  LV2_URID time_bar_urid_ = urids_.map_string(LV2_TIME__bar);
+  LV2_URID time_bar_beat_urid_ = urids_.map_string(LV2_TIME__barBeat);
+  LV2_URID time_beats_per_bar_urid_ = urids_.map_string(LV2_TIME__beatsPerBar);
+  LV2_URID time_beat_unit_urid_ = urids_.map_string(LV2_TIME__beatUnit);
+  LV2_URID time_bpm_urid_ = urids_.map_string(LV2_TIME__beatsPerMinute);
+
+  LV2_Atom_Forge forge_{};
+  TransportInfo transport_;
+  bool has_transport_ = false;
 
   // Fixed so queueing never allocates on the audio thread. A block carrying
   // more than this is a chord nobody plays.

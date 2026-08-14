@@ -28,7 +28,8 @@ class ChannelStrip {
   // this block is handed to the inserts first, so a synth sitting in the chain
   // hears it in the same block.
   void process(float* const* buffers, uint32_t frames,
-               const MidiEvent* midi = nullptr, size_t midi_count = 0);
+               const MidiEvent* midi = nullptr, size_t midi_count = 0,
+               const TransportInfo* transport = nullptr);
 
   const std::string& name() const { return name_; }
   int channel_count() const { return channel_count_; }
@@ -85,6 +86,12 @@ class ChannelStrip {
   // Scratch pointers handed to plugins, sized in prepare() so process() never
   // allocates.
   std::vector<float*> plugin_io_;
+
+  // MIDI in flight down the insert chain: what came in from the channel port,
+  // plus whatever the inserts upstream produced. Fixed size so nothing
+  // allocates mid-block.
+  std::array<MidiEvent, 256> midi_chain_{};
+  size_t midi_chain_count_ = 0;
 };
 
 }  // namespace nirbija

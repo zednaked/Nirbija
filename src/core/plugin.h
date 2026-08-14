@@ -21,6 +21,25 @@ struct PluginDescriptor {
   bool has_midi_input = false;
 };
 
+// Where the song is and whether it is moving. Plugins that generate anything
+// rhythmic — sequencers, arpeggiators, tempo-synced delays — do nothing useful
+// without it.
+struct TransportInfo {
+  bool playing = false;
+  double tempo_bpm = 120.0;
+  int numerator = 4;
+  int denominator = 4;
+
+  // Song position, at the start of the block.
+  double beats = 0.0;    // in quarter notes
+  double seconds = 0.0;
+  uint64_t frame = 0;
+
+  // Set on the first block after a jump or a start, so a plugin knows to
+  // resynchronise rather than assume it can carry on counting.
+  bool changed = false;
+};
+
 // A short MIDI message on its way to a plugin. Three bytes covers everything
 // except SysEx, which no mixer strip needs to pass along.
 struct MidiEvent {
@@ -76,10 +95,24 @@ class PluginInstance {
   virtual void process(const float* const* inputs, float* const* outputs,
                        uint32_t frames) = 0;
 
+  // Realtime thread, called before process(). Plugins that ignore transport
+  // simply do not override it.
+  virtual void set_transport(const TransportInfo& transport) { (void)transport; }
+
   // Realtime thread, called before process(). The event is delivered on the
   // plugin's next process call, at the frame it carries. Plugins with no MIDI
   // input ignore it.
   virtual void queue_midi(const MidiEvent& event) { (void)event; }
+
+  // Realtime thread, called after process(). Collects MIDI the plugin produced
+  // during that block — a step sequencer or arpeggiator is a plugin whose whole
+  // output is MIDI, and it is worth nothing if the host never reads it.
+  // Returns how many events were written.
+  virtual size_t take_midi_output(MidiEvent* out, size_t capacity) {
+    (void)out;
+    (void)capacity;
+    return 0;
+  }
 
   virtual std::vector<ParameterInfo> parameters() const = 0;
   virtual double parameter_value(uint32_t id) const = 0;

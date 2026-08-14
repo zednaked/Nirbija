@@ -17,6 +17,8 @@ ApplicationWindow {
         peakRight: mixer.masterPeakRight
         status: mixer.status
         masterSink: mixer.masterSink
+        tempo: mixer.tempo
+        playing: mixer.playing
         onMasterOutputClicked: portPicker.openFor("sink", -1)
     }
 

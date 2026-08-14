@@ -25,6 +25,9 @@ class AudioGraph {
   // Realtime thread. Sums every audible strip into `master`, two pointers wide.
   void render(float* const* master, uint32_t frames);
 
+  // Realtime thread. Handed to every insert before it processes.
+  void set_transport(const TransportInfo& transport) { transport_ = transport; }
+
   // UI thread. The strip is fully built and prepared before it becomes visible
   // to the audio thread, so no half-initialised channel is ever rendered.
   // Returns the channel index, or kMaxChannels if the graph is full.
@@ -68,6 +71,7 @@ class AudioGraph {
   double sample_rate_ = 0.0;
   uint32_t max_block_frames_ = 0;
 
+  TransportInfo transport_;
   std::atomic<float> master_gain_{1.0f};
   std::atomic<float> master_peaks_[2]{{0.0f}, {0.0f}};
 

@@ -2,6 +2,7 @@
 
 #include <jack/jack.h>
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -21,6 +22,9 @@ struct EngineCommand {
     SetMute,
     SetSolo,
     SetMasterGain,
+    SetPlaying,
+    SetTempo,
+    Rewind,
   } kind = Kind::None;
   size_t channel = 0;
   float value = 0.0f;
@@ -68,6 +72,11 @@ class Engine {
   // opened is expected to already be audible.
   bool connect_master_to_default_output();
 
+  // --- transport ----------------------------------------------------------
+  // Read from the UI thread; the audio thread owns the writing.
+  bool playing() const { return playing_.load(std::memory_order_relaxed); }
+  double tempo() const { return tempo_.load(std::memory_order_relaxed); }
+
   // UI thread. Registers this channel's JACK input ports and adds the strip.
   // Returns the channel index, or kMaxChannels if the graph is full or the
   // ports could not be registered.
@@ -106,6 +115,12 @@ class Engine {
   uint32_t block_frames_ = 0;
 
   std::unique_ptr<AudioGraph> graph_;
+
+  std::atomic<bool> playing_{false};
+  std::atomic<double> tempo_{120.0};
+  // Song position in frames, advanced by the audio thread while playing.
+  uint64_t transport_frame_ = 0;
+  bool transport_changed_ = true;
   RtQueue<EngineCommand, 1024> commands_;
 };
 

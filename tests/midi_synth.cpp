@@ -2,6 +2,7 @@
 // audio comes out. This is the whole MIDI path end to end, minus JACK: strip →
 // insert → plugin event queue → plugin.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -60,6 +61,29 @@ struct Block {
   float* ptrs[2];
 };
 
+// Advances a rolling transport, the way the engine does per block. A sequencer
+// has no clock of its own and does nothing without one. The first blocks are
+// stopped on purpose: a sequencer starts on the transition into play, not on
+// finding the transport already moving, so a test that rolls from the first
+// block never sees it start.
+// Where the shared transport has got to. Reset before a chain that needs to
+// see the transport start.
+int block_index = 0;
+
+nirbija::TransportInfo transport_at(int block) {
+  constexpr int kStoppedBlocks = 2;
+
+  nirbija::TransportInfo transport;
+  transport.playing = block >= kStoppedBlocks;
+  transport.tempo_bpm = 120.0;
+  transport.frame =
+      static_cast<uint64_t>(std::max(0, block - kStoppedBlocks)) * kBlock;
+  transport.seconds = static_cast<double>(transport.frame) / kSampleRate;
+  transport.beats = transport.seconds * transport.tempo_bpm / 60.0;
+  transport.changed = block == kStoppedBlocks;
+  return transport;
+}
+
 // Runs `blocks` blocks of silence-in and reports the loudest one, so a synth
 // with a slow attack still registers.
 float loudest_over(nirbija::ChannelStrip& strip, int blocks) {
@@ -67,7 +91,8 @@ float loudest_over(nirbija::ChannelStrip& strip, int blocks) {
   float loudest = 0.0f;
   for (int i = 0; i < blocks; ++i) {
     block.clear();
-    strip.process(block.ptrs, kBlock);
+    const nirbija::TransportInfo transport = transport_at(block_index++);
+    strip.process(block.ptrs, kBlock, nullptr, 0, &transport);
     if (block.has_non_finite()) {
       fail("synth produced NaN or inf");
       return 0.0f;
@@ -132,6 +157,66 @@ int main(int argc, char* argv[]) {
   // not that it has already reached silence.
   const float tail = loudest_over(strip, 64);
   if (tail >= after) fail("note-off did not start a release");
+
+  // --- MIDI produced by one insert reaching the next -------------------------
+  // A step sequencer's whole output is MIDI. If the host does not read it and
+  // pass it down the chain, it plays into nothing.
+  {
+    std::unique_ptr<nirbija::PluginInstance> sequencer;
+    std::unique_ptr<nirbija::PluginInstance> voice;
+    for (auto& backend : nirbija::make_all_backends()) {
+      for (const auto& descriptor : backend->scan()) {
+        if (descriptor.name == "MIDI Step Sequencer8x8" && sequencer == nullptr)
+          sequencer = backend->instantiate(descriptor);
+        if (descriptor.name == wanted && voice == nullptr)
+          voice = backend->instantiate(descriptor);
+      }
+    }
+
+    if (sequencer == nullptr) {
+      std::printf("no step sequencer installed, skipping the chain check\n");
+    } else {
+      // A sequencer starts with an empty grid, so it would play nothing however
+      // right the chain is. Filling a few steps is what makes this a test of
+      // the host rather than of the plugin's defaults.
+      int filled = 0;
+      for (const auto& parameter : sequencer->parameters()) {
+        // Follow the host clock rather than free-running, which is the whole
+        // point of the transport being wired up.
+        if (parameter.name == "Sync") sequencer->set_parameter(parameter.id, 1.0);
+
+        if (parameter.name.rfind("Grid S:", 0) != 0) continue;
+        if (parameter.name.find("N: 1") == std::string::npos) continue;
+        sequencer->set_parameter(parameter.id, 100.0);
+        ++filled;
+      }
+      if (filled == 0) fail("found no grid steps to fill on the sequencer");
+
+      // Back to a stopped transport, so the chain sees play being pressed.
+      block_index = 0;
+
+      nirbija::ChannelStrip chain("chain", 2);
+      if (voice == nullptr) {
+        fail("could not make a second instance of the synth");
+        return 1;
+      }
+      if (!chain.add_insert(std::move(sequencer)))
+        fail("could not add the sequencer to the chain");
+      if (!chain.add_insert(std::move(voice)))
+        fail("could not add the synth below the sequencer");
+      chain.prepare(kSampleRate, kBlock);
+      std::printf("  chain has %zu inserts\n", chain.insert_count());
+
+      // The sequencer runs on its own clock, so this waits rather than sending
+      // anything: a couple of seconds covers a step at any sane tempo.
+      const float sound =
+          loudest_over(chain, static_cast<int>(kSampleRate * 2 / kBlock));
+      if (sound <= 1e-4f)
+        fail("the step sequencer never reached the synth below it");
+      else
+        std::printf("  sequencer drove the synth: peak %.6f\n", sound);
+    }
+  }
 
   if (failures > 0) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);

@@ -242,12 +242,14 @@ class ClapInstance : public PluginInstance {
     process.audio_inputs_count = desc_.audio_inputs > 0 ? 1 : 0;
     process.audio_outputs = desc_.audio_outputs > 0 ? &out_bus : nullptr;
     process.audio_outputs_count = desc_.audio_outputs > 0 ? 1 : 0;
+    process.transport = has_transport_ ? &transport_event_ : nullptr;
     process.in_events = &in_events_.list;
     process.out_events = &out_events_;
 
     in_events_.rebuild(pending_params_, pending_midi_);
     pending_params_.clear();
     pending_midi_.clear();
+    produced_midi_.clear();
 
     plugin_->process(plugin_, &process);
     steady_time_ += frames;
@@ -279,6 +281,44 @@ class ClapInstance : public PluginInstance {
     double value = 0.0;
     if (!params_->get_value(plugin_, id, &value)) return 0.0;
     return value;
+  }
+
+  size_t take_midi_output(MidiEvent* out, size_t capacity) override {
+    const size_t count = std::min(capacity, produced_midi_.size());
+    std::copy_n(produced_midi_.begin(), count, out);
+    produced_midi_.clear();
+    return count;
+  }
+
+  void set_transport(const TransportInfo& transport) override {
+    transport_event_ = {};
+    transport_event_.header.size = sizeof(transport_event_);
+    transport_event_.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+    transport_event_.header.type = CLAP_EVENT_TRANSPORT;
+
+    transport_event_.flags = CLAP_TRANSPORT_HAS_TEMPO |
+                             CLAP_TRANSPORT_HAS_BEATS_TIMELINE |
+                             CLAP_TRANSPORT_HAS_SECONDS_TIMELINE |
+                             CLAP_TRANSPORT_HAS_TIME_SIGNATURE;
+    if (transport.playing) transport_event_.flags |= CLAP_TRANSPORT_IS_PLAYING;
+
+    transport_event_.tempo = transport.tempo_bpm;
+    transport_event_.tsig_num = static_cast<uint16_t>(transport.numerator);
+    transport_event_.tsig_denom = static_cast<uint16_t>(transport.denominator);
+
+    // CLAP counts beats and seconds in fixed point, not doubles.
+    transport_event_.song_pos_beats =
+        static_cast<clap_beattime>(transport.beats * CLAP_BEATTIME_FACTOR);
+    transport_event_.song_pos_seconds =
+        static_cast<clap_sectime>(transport.seconds * CLAP_SECTIME_FACTOR);
+
+    const double bars = transport.numerator > 0
+                            ? transport.beats / transport.numerator
+                            : transport.beats;
+    transport_event_.bar_number = static_cast<int32_t>(bars);
+    transport_event_.bar_start = static_cast<clap_beattime>(
+        static_cast<int32_t>(bars) * transport.numerator * CLAP_BEATTIME_FACTOR);
+    has_transport_ = true;
   }
 
   void queue_midi(const MidiEvent& event) override {
@@ -449,9 +489,45 @@ class ClapInstance : public PluginInstance {
     std::vector<Event> events;
   };
 
-  // Plugins emit parameter gestures and latency changes here. Swallowed until
-  // the UI exists to receive them.
-  static bool out_event_push(const clap_output_events_t*, const clap_event_header_t*) {
+  // Plugins push their own events here during process: parameter gestures,
+  // latency changes, and MIDI from anything that generates notes. Only the MIDI
+  // is kept, since that is what the insert chain below can use.
+  static bool out_event_push(const clap_output_events_t* list,
+                             const clap_event_header_t* header) {
+    auto* self = static_cast<ClapInstance*>(list->ctx);
+    if (self == nullptr || header == nullptr) return true;
+    if (header->space_id != CLAP_CORE_EVENT_SPACE_ID) return true;
+    if (self->produced_midi_.size() >= kMaxBlockMidi) return true;
+
+    MidiEvent event;
+    event.frame = header->time;
+
+    switch (header->type) {
+      case CLAP_EVENT_MIDI: {
+        const auto* midi = reinterpret_cast<const clap_event_midi_t*>(header);
+        event.size = 3;
+        std::copy_n(midi->data, 3, event.data);
+        break;
+      }
+      // CLAP's own note events are the native way to say note on and off, and a
+      // plugin may use them instead of raw MIDI. They are turned into MIDI here
+      // so the rest of the host only ever deals with one representation.
+      case CLAP_EVENT_NOTE_ON:
+      case CLAP_EVENT_NOTE_OFF: {
+        const auto* note = reinterpret_cast<const clap_event_note_t*>(header);
+        if (note->key < 0) return true;
+        const uint8_t channel = note->channel < 0 ? 0 : static_cast<uint8_t>(note->channel);
+        event.size = 3;
+        event.data[0] = (header->type == CLAP_EVENT_NOTE_ON ? 0x90 : 0x80) | channel;
+        event.data[1] = static_cast<uint8_t>(note->key);
+        event.data[2] = static_cast<uint8_t>(note->velocity * 127.0);
+        break;
+      }
+      default:
+        return true;
+    }
+
+    self->produced_midi_.push_back(event);
     return true;
   }
 
@@ -608,8 +684,11 @@ class ClapInstance : public PluginInstance {
   static constexpr size_t kMaxBlockMidi = 64;
   std::vector<PendingParam> pending_params_;
   std::vector<MidiEvent> pending_midi_;
+  std::vector<MidiEvent> produced_midi_;
+  clap_event_transport_t transport_event_{};
+  bool has_transport_ = false;
   InEventList in_events_;
-  clap_output_events_t out_events_{nullptr, &ClapInstance::out_event_push};
+  clap_output_events_t out_events_{this, &ClapInstance::out_event_push};
 };
 
 void ClapGui::idle() { owner_->pump_main_thread(); }

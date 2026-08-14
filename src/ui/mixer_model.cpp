@@ -205,6 +205,35 @@ void MixerModel::setMasterGain(qreal gain) {
   markDirty();
 }
 
+void MixerModel::togglePlay() {
+  EngineCommand command;
+  command.kind = EngineCommand::Kind::SetPlaying;
+  command.value = engine_.playing() ? 0.0f : 1.0f;
+  engine_.post(command);
+
+  // The engine only applies this on its next block, so the property is read
+  // back a moment later rather than assumed.
+  QTimer::singleShot(50, this, [this] { emit transportChanged(); });
+}
+
+void MixerModel::rewind() {
+  EngineCommand command;
+  command.kind = EngineCommand::Kind::Rewind;
+  engine_.post(command);
+}
+
+void MixerModel::setTempo(qreal bpm) {
+  // Below 20 or above 300 is not a tempo anyone meant to set, and plugins
+  // divide by it.
+  const qreal clamped = qBound(20.0, bpm, 300.0);
+  EngineCommand command;
+  command.kind = EngineCommand::Kind::SetTempo;
+  command.value = static_cast<float>(clamped);
+  engine_.post(command);
+  QTimer::singleShot(50, this, [this] { emit transportChanged(); });
+  markDirty();
+}
+
 bool MixerModel::addInsert(int row, int pluginIndex) {
   if (row < 0 || row >= static_cast<int>(channels_.size())) return false;
   const PluginDescriptor* descriptor = plugins_->descriptor(pluginIndex);

@@ -34,17 +34,23 @@ void ChannelStrip::prepare(double sample_rate, uint32_t max_block_frames) {
 }
 
 void ChannelStrip::process(float* const* buffers, uint32_t frames,
-                           const MidiEvent* midi, size_t midi_count) {
-  // MIDI reaches the inserts even while the strip is muted: a synth that misses
-  // a note-off because someone hit mute would hang that note forever.
-  const size_t insert_count_now = insert_count_.load(std::memory_order_acquire);
-  for (size_t i = 0; i < insert_count_now && midi_count > 0; ++i) {
-    PluginInstance* insert = insert_slots_[i].load(std::memory_order_acquire);
-    if (insert == nullptr) continue;
-    for (size_t e = 0; e < midi_count; ++e) insert->queue_midi(midi[e]);
-  }
+                           const MidiEvent* midi, size_t midi_count,
+                           const TransportInfo* transport) {
+  // The block's MIDI starts as whatever came in on the channel port and grows
+  // as inserts produce their own.
+  midi_chain_count_ = std::min(midi_count, midi_chain_.size());
+  for (size_t i = 0; i < midi_chain_count_; ++i) midi_chain_[i] = midi[i];
 
   if (muted_.load(std::memory_order_relaxed)) {
+    // Muting silences the channel but must not silence its MIDI: a synth that
+    // missed a note-off because someone hit mute would hang that note forever.
+    const size_t count = insert_count_.load(std::memory_order_acquire);
+    for (size_t i = 0; i < count; ++i) {
+      PluginInstance* insert = insert_slots_[i].load(std::memory_order_acquire);
+      if (insert == nullptr) continue;
+      for (size_t e = 0; e < midi_chain_count_; ++e)
+        insert->queue_midi(midi_chain_[e]);
+    }
     for (int ch = 0; ch < channel_count_; ++ch)
       std::fill_n(buffers[ch], frames, 0.0f);
     return;
@@ -72,13 +78,28 @@ void ChannelStrip::process(float* const* buffers, uint32_t frames,
 
   // Inserts run after the fader, which is AUM's default and what the strip
   // layout shows: the slots sit below the fader, on the way to the output.
-  // TODO(phase-6): per-slot pre/post, toggled by long-pressing the slot.
+  // TODO: per-slot pre/post, toggled by long-pressing the slot.
   for (int ch = 0; ch < channel_count_; ++ch) plugin_io_[ch] = buffers[ch];
   const size_t insert_count = insert_count_.load(std::memory_order_acquire);
   for (size_t i = 0; i < insert_count; ++i) {
     PluginInstance* insert = insert_slots_[i].load(std::memory_order_acquire);
-    if (insert != nullptr)
-      insert->process(plugin_io_.data(), plugin_io_.data(), frames);
+    if (insert == nullptr) continue;
+
+    if (transport != nullptr) insert->set_transport(*transport);
+
+    // Everything the chain has produced so far reaches this insert, so a step
+    // sequencer sitting above a synth actually plays it.
+    for (size_t e = 0; e < midi_chain_count_; ++e)
+      insert->queue_midi(midi_chain_[e]);
+
+    insert->process(plugin_io_.data(), plugin_io_.data(), frames);
+
+    // Whatever it emitted joins the stream for the inserts below it.
+    if (midi_chain_count_ < midi_chain_.size()) {
+      midi_chain_count_ += insert->take_midi_output(
+          midi_chain_.data() + midi_chain_count_,
+          midi_chain_.size() - midi_chain_count_);
+    }
   }
 
   for (int ch = 0; ch < channel_count_; ++ch) {
