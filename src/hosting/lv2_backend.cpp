@@ -28,6 +28,7 @@
 #include <atomic>
 #include <semaphore>
 #include <string>
+#include <chrono>
 #include <thread>
 #include <vector>
 
@@ -519,6 +520,15 @@ class Lv2Instance : public PluginInstance {
                uint32_t frames) override {
     if (instance_ == nullptr) return;
 
+    // Restore in progress on the UI thread: the instance may be deactivated
+    // under us, so this block is silence and nothing else.
+    if (restoring_.load(std::memory_order_acquire)) {
+      for (int ch = 0; ch < strip_channels_; ++ch)
+        std::fill_n(outputs[ch], frames, 0.0f);
+      processed_generation_.fetch_add(1, std::memory_order_release);
+      return;
+    }
+
     // The strip is narrower than the plugin as often as not. Extra plugin inputs
     // get a copy of the last channel we have rather than silence, which is what
     // a mono source into a stereo effect should sound like.
@@ -600,8 +610,27 @@ class Lv2Instance : public PluginInstance {
         world_->world, world_->urids.map_feature(), text.c_str());
     if (state == nullptr) return false;
 
+    // A plugin that does not declare state:threadSafeRestore must not have its
+    // state restored while it runs — DrumGizmo quietly shelves the restored
+    // kit config in that case and never loads the kit. So the audio thread is
+    // parked first: a flag makes process() emit silence, two observed blocks
+    // prove it is out of lilv_instance_run, and only then is the instance
+    // deactivated, restored with the full feature set, and brought back.
+    restoring_.store(true, std::memory_order_release);
+    const uint64_t seen = processed_generation_.load(std::memory_order_acquire);
+    for (int spins = 0;
+         spins < 100 &&
+         processed_generation_.load(std::memory_order_acquire) < seen + 2;
+         ++spins) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+
+    lilv_instance_deactivate(instance_);
     lilv_state_restore(state, instance_, &Lv2Instance::set_port_value, this, 0,
-                       nullptr);
+                       features_.data());
+    lilv_instance_activate(instance_);
+
+    restoring_.store(false, std::memory_order_release);
     lilv_state_free(state);
     return true;
   }
@@ -955,6 +984,9 @@ class Lv2Instance : public PluginInstance {
   LV2_Atom_Forge forge_{};
   TransportInfo transport_;
   bool has_transport_ = false;
+
+  std::atomic<bool> restoring_{false};
+  std::atomic<uint64_t> processed_generation_{0};
 
   // Fixed so queueing never allocates on the audio thread. A block carrying
   // more than this is a chord nobody plays.
