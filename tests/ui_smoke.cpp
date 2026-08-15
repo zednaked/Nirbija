@@ -257,6 +257,37 @@ int main(int argc, char* argv[]) {
       fail("unlinking through the matrix did not disconnect");
   }
 
+  // --- MIDI learn -------------------------------------------------------------
+  {
+    mixer.learnGain(0);
+    if (!mixer.learning()) fail("arming learn did not enter learn mode");
+
+    // The first message binds and is consumed rather than acted on.
+    const qreal before = field(mixer, 0, nirbija::MixerModel::GainRole).toReal();
+    mixer.injectControl(21, 0, 100);
+    if (mixer.learning()) fail("the binding message did not close learn mode");
+    if (field(mixer, 0, nirbija::MixerModel::GainRole).toReal() != before)
+      fail("the binding message also moved the fader");
+
+    // From then on the control drives the fader through its curve.
+    mixer.injectControl(21, 0, 127);
+    const qreal top = field(mixer, 0, nirbija::MixerModel::GainRole).toReal();
+    mixer.injectControl(21, 0, 0);
+    const qreal bottom = field(mixer, 0, nirbija::MixerModel::GainRole).toReal();
+    if (top <= bottom || bottom != 0.0)
+      fail("the bound control does not sweep the fader");
+
+    // A different CC does nothing.
+    mixer.injectControl(22, 0, 127);
+    if (field(mixer, 0, nirbija::MixerModel::GainRole).toReal() != bottom)
+      fail("an unbound CC moved the fader");
+
+    mixer.clearMidiMaps(0);
+    mixer.injectControl(21, 0, 127);
+    if (field(mixer, 0, nirbija::MixerModel::GainRole).toReal() != bottom)
+      fail("clearing the maps did not unbind the control");
+  }
+
   if (failures > 0) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return 1;

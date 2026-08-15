@@ -102,6 +102,7 @@ Popup {
                     MouseArea {
                         id: dragArea
                         anchors.fill: parent
+                        acceptedButtons: Qt.LeftButton | Qt.RightButton
 
                         // Kept locally while dragging so the bar follows the
                         // finger without re-fetching the whole list.
@@ -116,7 +117,19 @@ Popup {
                                                      modelData.id, liveValue)
                         }
 
-                        onPressed: mouse => apply(mouse.x)
+                        onPressed: mouse => {
+                            // Right click binds a hardware control to this
+                            // parameter instead of moving it.
+                            if (mouse.button === Qt.RightButton) {
+                                mixer.learnInsertParam(root.targetRow,
+                                                       root.targetSlot,
+                                                       modelData.id,
+                                                       modelData.min,
+                                                       modelData.max)
+                                return
+                            }
+                            apply(mouse.x)
+                        }
                         onPositionChanged: mouse => {
                             if (pressed)
                                 apply(mouse.x)

@@ -81,6 +81,17 @@ class Engine {
   // opened is expected to already be audible.
   bool connect_master_to_default_output();
 
+  // --- control surface ------------------------------------------------------
+  // A dedicated MIDI port for controllers driving the mixer itself, separate
+  // from the channels' note inputs. The audio thread queues what arrives; the
+  // UI drains it on its poll and applies the mappings there, so a mapping can
+  // reach anything the UI can without the audio thread touching it.
+  size_t poll_control(MidiEvent* out, size_t capacity);
+
+  // Wires every MIDI source into the control port. Called when learning
+  // starts, so "move a knob" works without a routing step first.
+  void connect_all_midi_to_control();
+
   // --- recording ----------------------------------------------------------
   // Records every armed channel plus the master, one file each, into a new
   // folder under `directory`. Returns the folder, or an empty string if the
@@ -132,6 +143,8 @@ class Engine {
 
   jack_client_t* client_ = nullptr;
   jack_port_t* master_out_[2] = {nullptr, nullptr};
+  jack_port_t* control_in_ = nullptr;
+  RtQueue<MidiEvent, 256> control_events_;
   std::vector<ChannelPorts> channel_ports_;
 
   double sample_rate_ = 0.0;

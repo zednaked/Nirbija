@@ -713,8 +713,111 @@ QString MixerModel::insertFilePath(int row, int slot) const {
 
 void MixerModel::closeAllEditors() { editors_.clear(); }
 
+void MixerModel::learnGain(int row) {
+  pending_learn_ = {true, {.kind = MidiMapping::Kind::Gain, .row = row}};
+  engine_.connect_all_midi_to_control();
+  emit learnChanged();
+}
+
+void MixerModel::learnPan(int row) {
+  pending_learn_ = {true, {.kind = MidiMapping::Kind::Pan, .row = row}};
+  engine_.connect_all_midi_to_control();
+  emit learnChanged();
+}
+
+void MixerModel::learnMute(int row) {
+  pending_learn_ = {true, {.kind = MidiMapping::Kind::Mute, .row = row}};
+  engine_.connect_all_midi_to_control();
+  emit learnChanged();
+}
+
+void MixerModel::learnInsertParam(int row, int slot, int param, qreal min,
+                                  qreal max) {
+  pending_learn_ = {true,
+                    {.kind = MidiMapping::Kind::Param,
+                     .row = row,
+                     .slot = slot,
+                     .param = static_cast<uint32_t>(param),
+                     .min = min,
+                     .max = max}};
+  engine_.connect_all_midi_to_control();
+  emit learnChanged();
+}
+
+void MixerModel::cancelLearn() {
+  pending_learn_.armed = false;
+  emit learnChanged();
+}
+
+void MixerModel::clearMidiMaps(int row) {
+  std::erase_if(midi_maps_,
+                [row](const MidiMapping& map) { return map.row == row; });
+  markDirty();
+}
+
+void MixerModel::handleControl(int cc, int channel, int value) {
+  // Learning takes the message rather than acting on it, so arming a fader and
+  // sweeping the knob does not also drag whatever it was bound to before.
+  if (pending_learn_.armed) {
+    pending_learn_.target.cc = cc;
+    pending_learn_.target.midi_channel = channel;
+    // One binding per control per target: relearning replaces.
+    std::erase_if(midi_maps_, [this](const MidiMapping& map) {
+      return map.kind == pending_learn_.target.kind &&
+             map.row == pending_learn_.target.row &&
+             map.slot == pending_learn_.target.slot &&
+             map.param == pending_learn_.target.param;
+    });
+    midi_maps_.push_back(pending_learn_.target);
+    pending_learn_.armed = false;
+    emit learnChanged();
+    markDirty();
+    return;
+  }
+
+  const qreal normal = value / 127.0;
+  for (const MidiMapping& map : midi_maps_) {
+    if (map.cc != cc || map.midi_channel != channel) continue;
+    if (map.row < 0 || map.row >= static_cast<int>(channels_.size())) continue;
+
+    switch (map.kind) {
+      case MidiMapping::Kind::Gain:
+        // Through the fader curve, so the knob feels like the fader it drives.
+        setGain(map.row, faderToGain(normal));
+        break;
+      case MidiMapping::Kind::Pan:
+        setPan(map.row, normal * 2.0 - 1.0);
+        break;
+      case MidiMapping::Kind::Mute:
+        // Absolute, not a toggle: a pedal sending 127/0 means down/up, and a
+        // toggle would fall out of step with it.
+        if (channels_[map.row].muted != (value >= 64)) toggleMute(map.row);
+        break;
+      case MidiMapping::Kind::Param:
+        setInsertParameter(map.row, map.slot, static_cast<int>(map.param),
+                           map.min + (map.max - map.min) * normal);
+        break;
+    }
+  }
+}
+
+void MixerModel::injectControl(int cc, int channel, int value) {
+  handleControl(cc, channel, value);
+}
+
 void MixerModel::pollLevels() {
   if (!engine_.running()) return;
+
+  // Controller messages ride the same poll as the meters: 30 Hz is fine for a
+  // knob, and the audio thread stays out of the mapping table entirely.
+  MidiEvent control[64];
+  const size_t count = engine_.poll_control(control, 64);
+  for (size_t i = 0; i < count; ++i) {
+    const uint8_t status = control[i].data[0] & 0xf0;
+    if (status != 0xb0 || control[i].size < 3) continue;  // CCs only
+    handleControl(control[i].data[1], control[i].data[0] & 0x0f,
+                  control[i].data[2]);
+  }
 
   for (size_t row = 0; row < channels_.size(); ++row) {
     ChannelUi& channel = channels_[row];

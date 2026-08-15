@@ -146,8 +146,8 @@ Rectangle {
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.top: parent.top
         anchors.topMargin: 2
-        text: root.status
-        color: Skin.textDim
+        text: mixer.learning ? qsTr("MIDI learn: move a control…") : root.status
+        color: mixer.learning ? Skin.solo : Skin.textDim
         font.pixelSize: 9
     }
 

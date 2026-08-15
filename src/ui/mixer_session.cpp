@@ -156,6 +156,21 @@ void MixerModel::saveSession() const {
   root[QStringLiteral("version")] = kSessionVersion;
   root[QStringLiteral("tempo")] = engine_.tempo();
   root[QStringLiteral("metronome")] = engine_.metronome();
+
+  QJsonArray maps;
+  for (const MidiMapping& map : midi_maps_) {
+    QJsonObject saved;
+    saved[QStringLiteral("cc")] = map.cc;
+    saved[QStringLiteral("ch")] = map.midi_channel;
+    saved[QStringLiteral("kind")] = static_cast<int>(map.kind);
+    saved[QStringLiteral("row")] = map.row;
+    saved[QStringLiteral("slot")] = map.slot;
+    saved[QStringLiteral("param")] = static_cast<int>(map.param);
+    saved[QStringLiteral("min")] = map.min;
+    saved[QStringLiteral("max")] = map.max;
+    maps.append(saved);
+  }
+  root[QStringLiteral("midiMaps")] = maps;
   root[QStringLiteral("master")] = master;
   root[QStringLiteral("channels")] = channels;
 
@@ -278,6 +293,22 @@ void MixerModel::loadSession() {
   if (tempo > 0.0) setTempo(tempo);
   if (root[QStringLiteral("metronome")].toBool() != engine_.metronome())
     toggleMetronome();
+
+  midi_maps_.clear();
+  for (const QJsonValue& value : root[QStringLiteral("midiMaps")].toArray()) {
+    const QJsonObject saved = value.toObject();
+    MidiMapping map;
+    map.cc = saved[QStringLiteral("cc")].toInt(-1);
+    map.midi_channel = saved[QStringLiteral("ch")].toInt(-1);
+    map.kind = static_cast<MidiMapping::Kind>(saved[QStringLiteral("kind")].toInt(0));
+    map.row = saved[QStringLiteral("row")].toInt(-1);
+    map.slot = saved[QStringLiteral("slot")].toInt(-1);
+    map.param = static_cast<uint32_t>(saved[QStringLiteral("param")].toInt(0));
+    map.min = saved[QStringLiteral("min")].toDouble(0.0);
+    map.max = saved[QStringLiteral("max")].toDouble(1.0);
+    if (map.cc >= 0) midi_maps_.push_back(map);
+  }
+  if (!midi_maps_.empty()) engine_.connect_all_midi_to_control();
 
   const QJsonObject master = root[QStringLiteral("master")].toObject();
   setMasterGain(master[QStringLiteral("gain")].toDouble(1.0));

@@ -87,6 +87,9 @@ bool Engine::start(const std::string& client_name) {
     return false;
   }
 
+  control_in_ = jack_port_register(client_, "control_in", JACK_DEFAULT_MIDI_TYPE,
+                                   JackPortIsInput, 0);
+
   jack_set_process_callback(client_, jack_process_trampoline, this);
   jack_set_buffer_size_callback(client_, jack_buffer_size_trampoline, this);
   if (jack_activate(client_) != 0) {
@@ -417,8 +420,39 @@ void Engine::drain_commands() {
   }
 }
 
+size_t Engine::poll_control(MidiEvent* out, size_t capacity) {
+  size_t drained = 0;
+  MidiEvent event;
+  while (drained < capacity && control_events_.pop(event)) out[drained++] = event;
+  return drained;
+}
+
+void Engine::connect_all_midi_to_control() {
+  if (client_ == nullptr || control_in_ == nullptr) return;
+  for (const std::string& source : available_sources(true))
+    jack_connect(client_, source.c_str(), jack_port_name(control_in_));
+}
+
 int Engine::process(jack_nframes_t frames) {
   drain_commands();
+
+  // Controller traffic is handed to the UI thread whole; the mappings live
+  // there.
+  if (control_in_ != nullptr) {
+    void* buffer = jack_port_get_buffer(control_in_, frames);
+    const jack_nframes_t count =
+        buffer != nullptr ? jack_midi_get_event_count(buffer) : 0;
+    for (jack_nframes_t i = 0; i < count; ++i) {
+      jack_midi_event_t event;
+      if (jack_midi_event_get(&event, buffer, i) != 0) continue;
+      if (event.size == 0 || event.size > 3) continue;
+      MidiEvent forwarded;
+      forwarded.frame = event.time;
+      forwarded.size = static_cast<uint8_t>(event.size);
+      std::copy_n(event.buffer, event.size, forwarded.data);
+      control_events_.push(forwarded);
+    }
+  }
 
   const bool playing = playing_.load(std::memory_order_relaxed);
   const double tempo = tempo_.load(std::memory_order_relaxed);

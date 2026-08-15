@@ -34,6 +34,7 @@ class MixerModel : public QAbstractListModel {
   Q_PROPERTY(QString recordingLabel READ recordingLabel NOTIFY levelsChanged)
   Q_PROPERTY(qreal tempo READ tempo WRITE setTempo NOTIFY transportChanged)
   Q_PROPERTY(bool metronome READ metronome NOTIFY transportChanged)
+  Q_PROPERTY(bool learning READ learning NOTIFY learnChanged)
   Q_PROPERTY(nirbija::PluginListModel* plugins READ plugins CONSTANT)
 
  public:
@@ -135,6 +136,21 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE QString insertName(int row, int slot) const;
   Q_INVOKABLE void closeAllEditors();
 
+  // --- MIDI learn -----------------------------------------------------------
+  // Arms a target; the next controller message that arrives binds to it.
+  Q_INVOKABLE void learnGain(int row);
+  Q_INVOKABLE void learnPan(int row);
+  Q_INVOKABLE void learnMute(int row);
+  Q_INVOKABLE void learnInsertParam(int row, int slot, int param,
+                                    qreal min, qreal max);
+  Q_INVOKABLE void cancelLearn();
+  Q_INVOKABLE void clearMidiMaps(int row);
+  bool learning() const { return pending_learn_.armed; }
+
+  // Test hook: feeds one controller message through the same path a real one
+  // takes after the engine queue.
+  Q_INVOKABLE void injectControl(int cc, int channel, int value);
+
   // File player extras: only meaningful when the insert is one.
   Q_INVOKABLE bool insertIsFilePlayer(int row, int slot) const;
   Q_INVOKABLE bool setInsertFile(int row, int slot, const QUrl& file);
@@ -182,6 +198,7 @@ class MixerModel : public QAbstractListModel {
   void masterGainChanged();
   void routingChanged();
   void transportChanged();
+  void learnChanged();
   void recordingChanged();
 
  private:
@@ -215,6 +232,7 @@ class MixerModel : public QAbstractListModel {
   PluginInstance* insertFor(int row, int slot) const;
   int busCount() const;
   void pollLevels();
+  void handleControl(int cc, int channel, int value);
   void refreshRouting(int row);
 
   // Coalesces the writes: a fader drag would otherwise save on every frame.
@@ -228,6 +246,24 @@ class MixerModel : public QAbstractListModel {
   Engine engine_;
   std::vector<ChannelUi> channels_;
   QTimer level_timer_;
+
+  // What a controller message can drive. Bindings survive in the session.
+  struct MidiMapping {
+    int cc = -1;
+    int midi_channel = -1;
+    enum class Kind { Gain, Pan, Mute, Param } kind = Kind::Gain;
+    int row = -1;
+    int slot = -1;
+    uint32_t param = 0;
+    double min = 0.0;
+    double max = 1.0;
+  };
+  std::vector<MidiMapping> midi_maps_;
+
+  struct {
+    bool armed = false;
+    MidiMapping target;
+  } pending_learn_;
   QTimer autosave_timer_;
   // Restoring fires the same setters the UI does; without this every one of
   // them would queue another save of what was just loaded.

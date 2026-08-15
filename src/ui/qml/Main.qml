@@ -177,6 +177,14 @@ ApplicationWindow {
                     onTitleClicked: slotMenu.openAt(this, [
                         { label: qsTr("Rename…"),
                           action: () => renameDialog.openFor(index, model.name) },
+                        { label: qsTr("MIDI learn: fader"),
+                          action: () => mixer.learnGain(index) },
+                        { label: qsTr("MIDI learn: pan"),
+                          action: () => mixer.learnPan(index) },
+                        { label: qsTr("MIDI learn: mute"),
+                          action: () => mixer.learnMute(index) },
+                        { label: qsTr("Clear MIDI maps"),
+                          action: () => mixer.clearMidiMaps(index) },
                         { label: qsTr("Remove channel"), danger: true,
                           action: () => mixer.removeChannel(index) }
                     ], model.name)
