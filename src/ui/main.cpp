@@ -20,6 +20,12 @@ int main(int argc, char* argv[]) {
   nirbija::MixerModel mixer;
   nirbija::Skin skin;
 
+  // Temporary forensics: who ends the event loop, and when.
+  QObject::connect(&app, &QGuiApplication::lastWindowClosed,
+                   [] { qWarning("forense: lastWindowClosed"); });
+  QObject::connect(&app, &QCoreApplication::aboutToQuit,
+                   [] { qWarning("forense: aboutToQuit"); });
+
   QQmlApplicationEngine engine;
   engine.rootContext()->setContextProperty(QStringLiteral("mixer"), &mixer);
   engine.rootContext()->setContextProperty(QStringLiteral("Skin"), &skin);

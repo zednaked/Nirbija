@@ -238,6 +238,7 @@ void PluginWindow::reportChildren() const {
 void PluginWindow::pump() {
   if (display_ == nullptr) return;
   if (connection_lost_) {
+    qWarning("editor '%s': conexao X morreu (IO error)", qUtf8Printable(title_));
     // The display died under us; everything on it is gone already.
     timer_.stop();
     attached_ = false;
@@ -261,6 +262,8 @@ void PluginWindow::pump() {
     switch (event.type) {
       case ClientMessage:
         if (static_cast<Atom>(event.xclient.data.l[0]) == delete_atom_) {
+          qWarning("editor '%s': fechada pelo window manager (WM_DELETE)",
+                   qUtf8Printable(title_));
           close();
           emit closed();
           return;

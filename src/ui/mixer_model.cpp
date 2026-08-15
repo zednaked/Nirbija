@@ -562,6 +562,7 @@ bool MixerModel::openInsertEditor(int row, int slot) {
     // who double-clicks by habit.
     if (QDateTime::currentMSecsSinceEpoch() - existing->opened_ms < 600)
       return true;
+    qWarning("editor: fechada pelo toggle (segundo clique)");
     editors_.erase(existing);
     return true;
   }
