@@ -8,6 +8,7 @@
 #endif
 
 #include "core/file_player.h"
+#include "core/looper.h"
 
 namespace nirbija {
 namespace {
@@ -19,13 +20,14 @@ class InternalBackend : public PluginBackend {
   PluginFormat format() const override { return PluginFormat::Internal; }
 
   std::vector<PluginDescriptor> scan() override {
-    return {FilePlayerInstance::make_descriptor()};
+    return {FilePlayerInstance::make_descriptor(), LooperInstance::make_descriptor()};
   }
 
   std::unique_ptr<PluginInstance> instantiate(
       const PluginDescriptor& desc) override {
     if (desc.uid == "nirbija.fileplayer")
       return std::make_unique<FilePlayerInstance>();
+    if (desc.uid == "nirbija.looper") return std::make_unique<LooperInstance>();
     return nullptr;
   }
 };

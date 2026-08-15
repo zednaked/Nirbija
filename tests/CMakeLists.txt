@@ -59,3 +59,7 @@ add_test(NAME recorder_take COMMAND nirbija_recorder_take)
 add_executable(nirbija_file_player file_player_test.cpp)
 target_link_libraries(nirbija_file_player PRIVATE nirbija_core PkgConfig::SNDFILE)
 add_test(NAME file_player COMMAND nirbija_file_player)
+
+add_executable(nirbija_looper looper_test.cpp)
+target_link_libraries(nirbija_looper PRIVATE nirbija_core)
+add_test(NAME looper COMMAND nirbija_looper)

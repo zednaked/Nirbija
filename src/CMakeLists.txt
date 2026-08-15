@@ -5,6 +5,7 @@ add_library(nirbija_core
   core/plugin.cpp
   core/recorder.cpp
   core/file_player.cpp
+  core/looper.cpp
 )
 target_include_directories(nirbija_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(nirbija_core PUBLIC PkgConfig::JACK PRIVATE PkgConfig::SNDFILE)
