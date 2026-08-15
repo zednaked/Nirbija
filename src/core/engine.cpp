@@ -229,9 +229,23 @@ std::vector<std::string> Engine::ports_matching(unsigned long flags,
 
 std::vector<std::string> Engine::available_sources(bool midi,
                                                    bool physical_only) const {
-  return ports_matching(JackPortIsOutput,
-                        midi ? JACK_DEFAULT_MIDI_TYPE : JACK_DEFAULT_AUDIO_TYPE,
-                        physical_only);
+  std::vector<std::string> found =
+      ports_matching(JackPortIsOutput,
+                     midi ? JACK_DEFAULT_MIDI_TYPE : JACK_DEFAULT_AUDIO_TYPE,
+                     physical_only);
+
+  // Real inputs first, monitors last. A device's capture and its output's
+  // monitor carry the same friendly name, and picking the monitor by accident
+  // connects a guitar channel to silence.
+  if (!midi) {
+    std::stable_sort(found.begin(), found.end(),
+                     [](const std::string& a, const std::string& b) {
+                       const bool a_monitor = a.find(":monitor_") != std::string::npos;
+                       const bool b_monitor = b.find(":monitor_") != std::string::npos;
+                       return a_monitor < b_monitor;
+                     });
+  }
+  return found;
 }
 
 std::vector<std::string> Engine::available_sinks(bool physical_only) const {

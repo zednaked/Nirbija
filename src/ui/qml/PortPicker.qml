@@ -102,16 +102,33 @@ Popup {
                     id: hover
                 }
 
+                // A monitor is the echo of what is being played to a device,
+                // not an input; it shares the device's name, so it is tagged or
+                // a guitar ends up connected to silence.
+                readonly property bool isMonitor: modelData.indexOf(":monitor_") >= 0
+
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.left: parent.left
-                    anchors.right: parent.right
+                    anchors.right: monitorTag.left
                     anchors.leftMargin: 8
                     anchors.rightMargin: 8
                     text: modelData
-                    color: Skin.text
+                    color: isMonitor ? Skin.textDim : Skin.text
                     font.pixelSize: 12
                     elide: Text.ElideMiddle
+                }
+
+                Text {
+                    id: monitorTag
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.rightMargin: 8
+                    visible: isMonitor
+                    width: visible ? implicitWidth : 0
+                    text: qsTr("monitor")
+                    color: Skin.textDim
+                    font.pixelSize: 10
                 }
 
                 MouseArea {
