@@ -120,6 +120,10 @@ int main(int argc, char* argv[]) {
   // As a strip insert, which is how it is actually used.
   {
     auto insert = backend->instantiate(*chosen);
+    if (insert == nullptr) {
+      fail("second instantiate returned null");
+      return 1;
+    }
     nirbija::ChannelStrip strip("test", 2);
     strip.add_insert(std::move(insert));
     strip.prepare(kSampleRate, kBlock);

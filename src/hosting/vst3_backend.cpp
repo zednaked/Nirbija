@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <array>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -30,6 +31,7 @@
 #include "pluginterfaces/vst/ivstevents.h"
 #include "pluginterfaces/vst/ivsthostapplication.h"
 #include "pluginterfaces/vst/ivstmessage.h"
+#include "pluginterfaces/vst/ivstmidicontrollers.h"
 #include "pluginterfaces/vst/ivstparameterchanges.h"
 #include "pluginterfaces/vst/ivstprocesscontext.h"
 #include "pluginterfaces/vst/vstspeaker.h"
@@ -44,17 +46,31 @@ bool same_iid(const TUID a, const TUID b) { return std::memcmp(a, b, 16) == 0; }
 
 std::string utf16_to_utf8(const Vst::TChar* text) {
   std::string out;
-  for (int i = 0; text[i] != 0 && i < 128; ++i) {
-    const char16_t c = text[i];
-    if (c < 0x80) {
-      out.push_back(static_cast<char>(c));
-    } else if (c < 0x800) {
-      out.push_back(static_cast<char>(0xc0 | (c >> 6)));
-      out.push_back(static_cast<char>(0x80 | (c & 0x3f)));
+  // Bounds first: a title using all 128 units carries no terminator, and the
+  // old order dereferenced one element past the array before checking.
+  for (int i = 0; i < 128 && text[i] != 0; ++i) {
+    uint32_t code = static_cast<char16_t>(text[i]);
+    if (code >= 0xd800 && code <= 0xdbff && i + 1 < 128) {
+      const uint32_t low = static_cast<char16_t>(text[i + 1]);
+      if (low >= 0xdc00 && low <= 0xdfff) {
+        code = 0x10000 + ((code - 0xd800) << 10) + (low - 0xdc00);
+        ++i;
+      }
+    }
+    if (code < 0x80) {
+      out.push_back(static_cast<char>(code));
+    } else if (code < 0x800) {
+      out.push_back(static_cast<char>(0xc0 | (code >> 6)));
+      out.push_back(static_cast<char>(0x80 | (code & 0x3f)));
+    } else if (code < 0x10000) {
+      out.push_back(static_cast<char>(0xe0 | (code >> 12)));
+      out.push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3f)));
+      out.push_back(static_cast<char>(0x80 | (code & 0x3f)));
     } else {
-      out.push_back(static_cast<char>(0xe0 | (c >> 12)));
-      out.push_back(static_cast<char>(0x80 | ((c >> 6) & 0x3f)));
-      out.push_back(static_cast<char>(0x80 | (c & 0x3f)));
+      out.push_back(static_cast<char>(0xf0 | (code >> 18)));
+      out.push_back(static_cast<char>(0x80 | ((code >> 12) & 0x3f)));
+      out.push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3f)));
+      out.push_back(static_cast<char>(0x80 | (code & 0x3f)));
     }
   }
   return out;
@@ -206,6 +222,9 @@ struct HostAttributes : Vst::IAttributeList {
                                uint32 bytes) override {
     auto it = values.find(id);
     if (it == values.end()) return kResultFalse;
+    // A probing call with a tiny buffer must not underflow the bound into
+    // four billion.
+    if (bytes < sizeof(Vst::TChar)) return kResultFalse;
     const uint32 count = std::min<uint32>(bytes / sizeof(Vst::TChar) - 1,
                                           it->second.text.size());
     std::copy_n(it->second.text.data(), count, string);
@@ -267,19 +286,60 @@ tresult PLUGIN_API HostApplication::createInstance(TUID cid, TUID iid, void** ob
 // --- parameter changes -------------------------------------------------------
 
 // One block's worth of parameter edits, rebuilt before each process call from
-// what the UI queued. Everything is preallocated: the audio thread only fills.
-struct ParamChanges : Vst::IParameterChanges, Vst::IParamValueQueue {
+// what the UI queued. Every entry is its own queue object: a plugin may hold
+// several queue pointers at once, so a single view that switches identity under
+// them would report the wrong parameter.
+struct ParamChanges : Vst::IParameterChanges {
   static constexpr int32 kMaxParams = 64;
 
-  struct Entry {
+  struct Queue : Vst::IParamValueQueue {
     Vst::ParamID id = 0;
     Vst::ParamValue value = 0.0;
-  };
-  Entry entries[kMaxParams];
-  int32 count = 0;
-  int32 serving = 0;  // which entry the queue view is presenting
 
-  // Refcounts are moot: this lives inside the instance.
+    uint32 PLUGIN_API addRef() override { return 1; }
+    uint32 PLUGIN_API release() override { return 1; }
+    tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
+      if (same_iid(iid, FUnknown_iid) ||
+          same_iid(iid, Vst::IParamValueQueue_iid)) {
+        *obj = this;
+        return kResultOk;
+      }
+      *obj = nullptr;
+      return kNoInterface;
+    }
+
+    Vst::ParamID PLUGIN_API getParameterId() override { return id; }
+    int32 PLUGIN_API getPointCount() override { return 1; }
+    tresult PLUGIN_API getPoint(int32, int32& offset,
+                                Vst::ParamValue& out) override {
+      offset = 0;
+      out = value;
+      return kResultOk;
+    }
+    tresult PLUGIN_API addPoint(int32, Vst::ParamValue, int32&) override {
+      return kResultFalse;
+    }
+  };
+
+  Queue queues[kMaxParams];
+  int32 count = 0;
+
+  // Repeated edits to one parameter coalesce to the last value: the interface
+  // promises at most one queue per parameter.
+  bool add(Vst::ParamID id, Vst::ParamValue value) {
+    for (int32 i = 0; i < count; ++i) {
+      if (queues[i].id == id) {
+        queues[i].value = value;
+        return true;
+      }
+    }
+    if (count >= kMaxParams) return false;
+    queues[count].id = id;
+    queues[count].value = value;
+    ++count;
+    return true;
+  }
+
   uint32 PLUGIN_API addRef() override { return 1; }
   uint32 PLUGIN_API release() override { return 1; }
   tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
@@ -291,28 +351,46 @@ struct ParamChanges : Vst::IParameterChanges, Vst::IParamValueQueue {
     return kNoInterface;
   }
 
-  // IParameterChanges: one queue per changed parameter, each one point deep.
   int32 PLUGIN_API getParameterCount() override { return count; }
   Vst::IParamValueQueue* PLUGIN_API getParameterData(int32 index) override {
     if (index < 0 || index >= count) return nullptr;
-    serving = index;
-    return this;
+    return &queues[index];
   }
   Vst::IParamValueQueue* PLUGIN_API addParameterData(const Vst::ParamID&,
                                                      int32&) override {
-    return nullptr;  // the plugin's output side is not collected yet
+    return nullptr;  // input side only
+  }
+};
+
+// Collects the note events a plugin emits during process — a VST3 sequencer's
+// whole output arrives here, and dropping it would leave the instrument below
+// it silent.
+struct OutEventList : Vst::IEventList {
+  static constexpr int32 kMaxEvents = 64;
+  Vst::Event events[kMaxEvents];
+  int32 count = 0;
+
+  uint32 PLUGIN_API addRef() override { return 1; }
+  uint32 PLUGIN_API release() override { return 1; }
+  tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
+    if (same_iid(iid, FUnknown_iid) || same_iid(iid, Vst::IEventList_iid)) {
+      *obj = this;
+      return kResultOk;
+    }
+    *obj = nullptr;
+    return kNoInterface;
   }
 
-  // IParamValueQueue for the entry being served.
-  Vst::ParamID PLUGIN_API getParameterId() override { return entries[serving].id; }
-  int32 PLUGIN_API getPointCount() override { return 1; }
-  tresult PLUGIN_API getPoint(int32, int32& offset, Vst::ParamValue& value) override {
-    offset = 0;
-    value = entries[serving].value;
+  int32 PLUGIN_API getEventCount() override { return count; }
+  tresult PLUGIN_API getEvent(int32 index, Vst::Event& event) override {
+    if (index < 0 || index >= count) return kResultFalse;
+    event = events[index];
     return kResultOk;
   }
-  tresult PLUGIN_API addPoint(int32, Vst::ParamValue, int32&) override {
-    return kResultFalse;
+  tresult PLUGIN_API addEvent(Vst::Event& event) override {
+    if (count >= kMaxEvents) return kResultFalse;
+    events[count++] = event;
+    return kResultOk;
   }
 };
 
@@ -440,21 +518,41 @@ struct RunLoopFrame : IPlugFrame, Linux::IRunLoop {
     return kResultOk;
   }
 
+  // Handlers register and unregister from inside their own callbacks — a JUCE
+  // editor does it when opening a menu — so nothing here iterates a container a
+  // callback can mutate. Due handlers are snapshotted first, and each one is
+  // checked to still be registered before its call, since an earlier callback
+  // may have torn a later one down.
   void pump() {
     const auto now = std::chrono::steady_clock::now();
+
+    std::vector<Linux::ITimerHandler*> due;
     for (Timer& timer : timers) {
       if (now < timer.due) continue;
       timer.due = now + std::chrono::milliseconds(timer.interval_ms);
-      timer.handler->onTimer();
+      due.push_back(timer.handler);
+    }
+    for (Linux::ITimerHandler* handler : due) {
+      const bool alive = std::any_of(
+          timers.begin(), timers.end(),
+          [handler](const Timer& t) { return t.handler == handler; });
+      if (alive) handler->onTimer();
     }
 
     if (fds.empty()) return;
+    std::vector<std::pair<Linux::IEventHandler*, int>> watched = fds;
     std::vector<pollfd> set;
-    set.reserve(fds.size());
-    for (const auto& [handler, fd] : fds) set.push_back({fd, POLLIN, 0});
+    set.reserve(watched.size());
+    for (const auto& [handler, fd] : watched) set.push_back({fd, POLLIN, 0});
     if (poll(set.data(), set.size(), 0) <= 0) return;
-    for (size_t i = 0; i < set.size(); ++i)
-      if (set[i].revents & POLLIN) fds[i].first->onFDIsSet(set[i].fd);
+    for (size_t i = 0; i < set.size(); ++i) {
+      if (!(set[i].revents & POLLIN)) continue;
+      Linux::IEventHandler* handler = watched[i].first;
+      const bool alive = std::any_of(
+          fds.begin(), fds.end(),
+          [handler](const auto& entry) { return entry.first == handler; });
+      if (alive) handler->onFDIsSet(set[i].fd);
+    }
   }
 };
 
@@ -471,20 +569,32 @@ class Vst3Module {
     void* handle = dlopen(binary.c_str(), RTLD_LOCAL | RTLD_NOW);
     if (handle == nullptr) return nullptr;
 
+    bool entered = false;
     if (auto entry = reinterpret_cast<ModuleEntryProc>(dlsym(handle, "ModuleEntry"))) {
       if (!entry(handle)) {
         dlclose(handle);
         return nullptr;
       }
+      entered = true;
     }
+
+    // Unloading a module whose entry ran, without the matching exit, pulls the
+    // ground from under whatever state that entry set up.
+    auto bail = [handle, entered]() {
+      if (entered)
+        if (auto exit = reinterpret_cast<ModuleExitProc>(dlsym(handle, "ModuleExit")))
+          exit();
+      dlclose(handle);
+    };
+
     auto factory_proc = reinterpret_cast<FactoryProc>(dlsym(handle, "GetPluginFactory"));
     if (factory_proc == nullptr) {
-      dlclose(handle);
+      bail();
       return nullptr;
     }
     IPluginFactory* factory = factory_proc();
     if (factory == nullptr) {
-      dlclose(handle);
+      bail();
       return nullptr;
     }
     return std::shared_ptr<Vst3Module>(new Vst3Module(handle, factory));
@@ -519,9 +629,23 @@ class Vst3Instance : public PluginInstance {
 
   ~Vst3Instance() override {
     deactivate();
-    if (controller_ != nullptr && controller_distinct_) {
+
+    // The workflow demands disconnect before terminate; a controller sending a
+    // message during teardown must not hit a dangling peer.
+    if (component_cp_ != nullptr && controller_cp_ != nullptr) {
+      component_cp_->disconnect(controller_cp_);
+      controller_cp_->disconnect(component_cp_);
+    }
+    if (component_cp_ != nullptr) component_cp_->release();
+    if (controller_cp_ != nullptr) controller_cp_->release();
+    if (midi_mapping_ != nullptr) midi_mapping_->release();
+
+    if (controller_ != nullptr) {
       controller_->setComponentHandler(nullptr);
-      controller_->terminate();
+      // A combined component/controller is terminated once, through the
+      // component; its controller reference still came from queryInterface and
+      // still has to go back.
+      if (controller_distinct_) controller_->terminate();
       controller_->release();
     }
     if (processor_ != nullptr) processor_->release();
@@ -558,18 +682,14 @@ class Vst3Instance : public PluginInstance {
     // A split component and controller talk through connection points; the
     // host's job is only to introduce them.
     if (controller_distinct_) {
-      Vst::IConnectionPoint* a = nullptr;
-      Vst::IConnectionPoint* b = nullptr;
       component_->queryInterface(Vst::IConnectionPoint_iid,
-                                 reinterpret_cast<void**>(&a));
+                                 reinterpret_cast<void**>(&component_cp_));
       controller_->queryInterface(Vst::IConnectionPoint_iid,
-                                  reinterpret_cast<void**>(&b));
-      if (a != nullptr && b != nullptr) {
-        a->connect(b);
-        b->connect(a);
+                                  reinterpret_cast<void**>(&controller_cp_));
+      if (component_cp_ != nullptr && controller_cp_ != nullptr) {
+        component_cp_->connect(controller_cp_);
+        controller_cp_->connect(component_cp_);
       }
-      if (a != nullptr) a->release();
-      if (b != nullptr) b->release();
 
       // The controller starts from the component's state, or its editor shows
       // defaults over a plugin that is not at them.
@@ -585,6 +705,10 @@ class Vst3Instance : public PluginInstance {
                                    reinterpret_cast<void**>(&processor_)) != kResultOk ||
         processor_ == nullptr)
       return false;
+
+    if (controller_ != nullptr)
+      controller_->queryInterface(Vst::IMidiMapping_iid,
+                                  reinterpret_cast<void**>(&midi_mapping_));
 
     read_bus_layout();
     return true;
@@ -612,6 +736,8 @@ class Vst3Instance : public PluginInstance {
                                    outs.data(), static_cast<int32>(outs.size()));
     read_bus_layout();
 
+    sample_rate_hint_ = sample_rate;
+    build_midi_map_cache();
     allocate_buffers(max_block_frames);
 
     for (size_t i = 0; i < input_buses_.size(); ++i)
@@ -656,35 +782,53 @@ class Vst3Instance : public PluginInstance {
       }
     }
 
-    // Edits queued by the UI become this block's parameter changes.
+    // Edits queued by the UI become this block's parameter changes. Capacity
+    // is checked before the pop: popping first would consume an event only to
+    // throw it away, and a discarded note-off is a stuck note.
     param_changes_.count = 0;
     ParamEdit edit;
-    while (param_edits_.pop(edit) &&
-           param_changes_.count < ParamChanges::kMaxParams) {
-      param_changes_.entries[param_changes_.count++] = {edit.id, edit.value};
-    }
+    while (param_edits_.pop(edit)) param_changes_.add(edit.id, edit.value);
 
     events_.count = 0;
     MidiEvent midi;
-    while (pending_midi_.pop(midi) && events_.count < EventList::kMaxEvents) {
+    while (events_.count < EventList::kMaxEvents && pending_midi_.pop(midi)) {
       const uint8_t status = midi.data[0] & 0xf0;
+      const int32 channel = midi.data[0] & 0x0f;
       Vst::Event& event = events_.events[events_.count];
       std::memset(&event, 0, sizeof(event));
       event.sampleOffset = static_cast<int32>(midi.frame);
       if (status == 0x90 && midi.data[2] > 0) {
         event.type = Vst::Event::kNoteOnEvent;
-        event.noteOn.channel = midi.data[0] & 0x0f;
+        event.noteOn.channel = static_cast<int16>(channel);
         event.noteOn.pitch = midi.data[1];
         event.noteOn.velocity = midi.data[2] / 127.0f;
         event.noteOn.noteId = -1;
         ++events_.count;
       } else if (status == 0x80 || (status == 0x90 && midi.data[2] == 0)) {
         event.type = Vst::Event::kNoteOffEvent;
-        event.noteOff.channel = midi.data[0] & 0x0f;
+        event.noteOff.channel = static_cast<int16>(channel);
         event.noteOff.pitch = midi.data[1];
         event.noteOff.velocity = 0.0f;
         event.noteOff.noteId = -1;
         ++events_.count;
+      } else if (status == 0xb0 || status == 0xe0 || status == 0xd0) {
+        // VST3 takes no raw CC: expression arrives as parameter changes,
+        // through the plugin's own controller-to-parameter map cached at
+        // activate. Without this, sustain and pitch bend die at the door.
+        int16 controller = 0;
+        double normal = 0.0;
+        if (status == 0xb0) {
+          controller = midi.data[1];
+          normal = midi.data[2] / 127.0;
+        } else if (status == 0xe0) {
+          controller = Vst::kPitchBend;
+          normal = ((midi.data[2] << 7) | midi.data[1]) / 16383.0;
+        } else {
+          controller = Vst::kAfterTouch;
+          normal = midi.data[1] / 127.0;
+        }
+        const Vst::ParamID mapped = midi_map_cache_[channel][controller];
+        if (mapped != Vst::kNoParamId) param_changes_.add(mapped, normal);
       }
     }
 
@@ -711,6 +855,8 @@ class Vst3Instance : public PluginInstance {
     data.inputParameterChanges = &param_changes_;
     data.outputParameterChanges = &out_param_changes_;
     data.inputEvents = has_event_input_ ? &events_ : nullptr;
+    out_events_.count = 0;
+    data.outputEvents = &out_events_;
     data.processContext = &context;
 
     processor_->process(data);
@@ -722,6 +868,36 @@ class Vst3Instance : public PluginInstance {
         std::copy_n(main[source], frames, outputs[ch]);
       }
     }
+
+    // Whatever the plugin emitted becomes MIDI for the inserts below it.
+    produced_count_ = 0;
+    for (int32 i = 0; i < out_events_.count &&
+                      produced_count_ < static_cast<int>(kMaxProduced); ++i) {
+      const Vst::Event& event = out_events_.events[i];
+      MidiEvent& out = produced_[produced_count_];
+      out.frame = static_cast<uint32_t>(std::max<int32>(0, event.sampleOffset));
+      out.size = 3;
+      if (event.type == Vst::Event::kNoteOnEvent && event.noteOn.pitch >= 0) {
+        out.data[0] = static_cast<uint8_t>(0x90 | (event.noteOn.channel & 0x0f));
+        out.data[1] = static_cast<uint8_t>(event.noteOn.pitch);
+        out.data[2] = static_cast<uint8_t>(
+            std::clamp(event.noteOn.velocity, 0.0f, 1.0f) * 127.0f);
+        ++produced_count_;
+      } else if (event.type == Vst::Event::kNoteOffEvent &&
+                 event.noteOff.pitch >= 0) {
+        out.data[0] = static_cast<uint8_t>(0x80 | (event.noteOff.channel & 0x0f));
+        out.data[1] = static_cast<uint8_t>(event.noteOff.pitch);
+        out.data[2] = 0;
+        ++produced_count_;
+      }
+    }
+  }
+
+  size_t take_midi_output(MidiEvent* out, size_t capacity) override {
+    const size_t count = std::min(capacity, static_cast<size_t>(produced_count_));
+    std::copy_n(produced_, count, out);
+    produced_count_ = 0;
+    return count;
   }
 
   std::vector<ParameterInfo> parameters() const override {
@@ -808,6 +984,22 @@ class Vst3Instance : public PluginInstance {
     desc_.has_midi_input = has_event_input_;
   }
 
+  // The controller's CC-to-parameter map, asked once on the UI thread: the
+  // audio thread must not call into the controller per event.
+  void build_midi_map_cache() {
+    for (auto& channel : midi_map_cache_)
+      channel.fill(Vst::kNoParamId);
+    if (midi_mapping_ == nullptr) return;
+    for (int16 channel = 0; channel < 16; ++channel) {
+      for (int16 controller = 0; controller < Vst::kCountCtrlNumber; ++controller) {
+        Vst::ParamID id = Vst::kNoParamId;
+        if (midi_mapping_->getMidiControllerAssignment(0, channel, controller,
+                                                       id) == kResultOk)
+          midi_map_cache_[channel][controller] = id;
+      }
+    }
+  }
+
   // Every bus gets real buffers, sidechains included: a plugin handed a null
   // sidechain pointer is within its rights to crash.
   void allocate_buffers(uint32_t max_block_frames) {
@@ -877,6 +1069,16 @@ class Vst3Instance : public PluginInstance {
   ParamChanges param_changes_;
   OutParamChanges out_param_changes_;
   EventList events_;
+  OutEventList out_events_;
+
+  static constexpr size_t kMaxProduced = 64;
+  MidiEvent produced_[kMaxProduced];
+  int produced_count_ = 0;
+
+  Vst::IConnectionPoint* component_cp_ = nullptr;
+  Vst::IConnectionPoint* controller_cp_ = nullptr;
+  Vst::IMidiMapping* midi_mapping_ = nullptr;
+  std::array<std::array<Vst::ParamID, Vst::kCountCtrlNumber>, 16> midi_map_cache_{};
   RtQueue<ParamEdit, 256> param_edits_;
   RtQueue<MidiEvent, 64> pending_midi_;
   TransportInfo transport_;
@@ -912,6 +1114,10 @@ class Vst3Gui : public PluginGui {
       view_->setFrame(nullptr);
       view_->release();
       view_ = nullptr;
+      // The view may have registered plumbing before failing; a later attach
+      // must not pump handlers belonging to a view that no longer exists.
+      frame_.timers.clear();
+      frame_.fds.clear();
       return false;
     }
     return true;
@@ -975,9 +1181,14 @@ class Vst3Backend : public PluginBackend {
     for (const fs::path& dir : vst3_search_paths()) {
       std::error_code ec;
       if (!fs::is_directory(dir, ec)) continue;
-      for (const auto& entry : fs::directory_iterator(dir, ec)) {
-        if (entry.path().extension() != ".vst3") continue;
-        scan_bundle(entry.path(), found);
+      // Recursive: installers group bundles in vendor subfolders, which the
+      // spec allows. A found bundle is not descended into — its own tree is
+      // the plugin's business.
+      fs::recursive_directory_iterator it(dir, ec), end;
+      for (; !ec && it != end; it.increment(ec)) {
+        if (it->path().extension() != ".vst3") continue;
+        scan_bundle(it->path(), found);
+        it.disable_recursion_pending();
       }
     }
     return found;
@@ -989,11 +1200,24 @@ class Vst3Backend : public PluginBackend {
 
     // The uid stores the class id as hex, factory order being unstable across
     // rescans.
+    // Parsed by hand: a corrupted session must give a null plugin back, not an
+    // exception escaping into std::terminate.
     TUID cid = {};
     if (desc.uid.size() != 32) return nullptr;
-    for (int i = 0; i < 16; ++i)
-      cid[i] = static_cast<char>(
-          std::stoi(desc.uid.substr(i * 2, 2), nullptr, 16));
+    for (int i = 0; i < 32; ++i) {
+      const char c = desc.uid[i];
+      int nibble = 0;
+      if (c >= '0' && c <= '9') {
+        nibble = c - '0';
+      } else if (c >= 'a' && c <= 'f') {
+        nibble = c - 'a' + 10;
+      } else if (c >= 'A' && c <= 'F') {
+        nibble = c - 'A' + 10;
+      } else {
+        return nullptr;
+      }
+      cid[i / 2] = static_cast<char>((cid[i / 2] << 4) | nibble);
+    }
 
     auto instance = std::make_unique<Vst3Instance>(desc, std::move(module));
     if (!instance->create(cid)) return nullptr;
@@ -1019,6 +1243,9 @@ class Vst3Backend : public PluginBackend {
     if (module == nullptr) return;
 
     IPluginFactory* factory = module->factory();
+    PFactoryInfo factory_info{};
+    factory->getFactoryInfo(&factory_info);
+
     const int32 count = factory->countClasses();
     for (int32 i = 0; i < count; ++i) {
       PClassInfo info{};
@@ -1028,6 +1255,7 @@ class Vst3Backend : public PluginBackend {
       PluginDescriptor desc;
       desc.format = PluginFormat::Vst3;
       desc.name = info.name;
+      desc.vendor = factory_info.vendor;
       desc.path = bundle.string();
       char hex[33] = {};
       for (int b = 0; b < 16; ++b)

@@ -31,7 +31,8 @@ if(NIRBIJA_VST3)
   # #include "pluginterfaces/..." resolves naturally.
   FetchContent_Declare(vst3_pluginterfaces
     GIT_REPOSITORY https://github.com/steinbergmedia/vst3_pluginterfaces.git
-    GIT_TAG master
+    # Pinned to the commit this backend was written and tested against.
+    GIT_TAG 4f547e8e102b47de4a8b8aaf343c73b700786372
     GIT_SHALLOW TRUE
     SOURCE_DIR ${CMAKE_BINARY_DIR}/vst3/pluginterfaces)
   FetchContent_MakeAvailable(vst3_pluginterfaces)
