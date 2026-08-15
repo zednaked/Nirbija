@@ -6,6 +6,9 @@
 #if NIRBIJA_HAVE_CLAP
 #include "hosting/clap_backend.h"
 #endif
+#if NIRBIJA_HAVE_VST3
+#include "hosting/vst3_backend.h"
+#endif
 
 #include "core/file_player.h"
 #include "core/looper.h"
@@ -42,6 +45,9 @@ std::vector<std::unique_ptr<PluginBackend>> make_all_backends() {
 #endif
 #if NIRBIJA_HAVE_CLAP
   backends.push_back(make_clap_backend());
+#endif
+#if NIRBIJA_HAVE_VST3
+  backends.push_back(make_vst3_backend());
 #endif
   return backends;
 }

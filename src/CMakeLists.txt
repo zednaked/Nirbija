@@ -24,6 +24,7 @@ endif()
 
 if(NIRBIJA_VST3)
   target_sources(nirbija_core PRIVATE hosting/vst3_backend.cpp)
+  target_include_directories(nirbija_core PRIVATE ${CMAKE_BINARY_DIR}/vst3)
   target_compile_definitions(nirbija_core PUBLIC NIRBIJA_HAVE_VST3=1)
 endif()
 

@@ -57,7 +57,7 @@ da UI e entregue pronta por mensagem; o descarte volta pela fila de lixo.
 7. **Gravador + looper** — ring buffer realtime → thread de escrita, WAV/FLAC;
    loops com lançamento quantizado.
 8. **Sessão** — serialização do grafo + blobs opacos de estado dos plugins.
-9. **Host VST3** — adiado (ver abaixo).
+9. **Host VST3** — feito (15/08/2026), condição do adiamento cumprida.
 
 Ordem é dependência real, não preferência: 5 precisa de 4, 4 precisa de 2–3,
 todos precisam de 1.
@@ -108,25 +108,20 @@ nada.
   `BadWindow`. Escape: `NIRBIJA_ALLOW_WAYLAND=1`, perdendo as editoras.
 - `nirbija_gui_probe "<nome>"` abre a editora de um plugin isolada, para teste.
 
-## VST3 — adiado de propósito
+## VST3 — feito
 
-Decisão de 14/08/2026: fica para quando o resto estiver de pé. Motivos:
+Implementado em 15/08/2026 sobre as **pluginterfaces puras** (FetchContent de
+`vst3_pluginterfaces`), sem compilar nenhum fonte do SDK da Steinberg: o host
+implementa os contratos (IHostApplication, IComponentHandler, IBStream,
+IParameterChanges, IEventList, IPlugFrame + Linux::IRunLoop) por conta própria,
+usando as constantes TUID por arquivo em vez das FUID do SDK.
 
-- É o backend mais caro dos três (SDK vendorizado, API COM-like, arranjo de bus
-  a negociar) e o que menos ensina sobre a arquitetura do host — CLAP e LV2 já
-  provaram que a interface `PluginInstance` aguenta formatos diferentes.
-- Carimba **GPLv3** no projeto. Enquanto ele não entra, a licença fica em aberto.
-- Nada depende dele: a UI, o MIDI, o gravador e a sessão são todos indiferentes
-  ao formato do plugin.
+Coberto: scan de bundles, componente+controlador (juntos ou separados, com
+connection points e sincronização de estado), arranjo de bus estéreo com
+sidechains recebendo buffers reais, parâmetros normalizados, estado, MIDI de
+nota, transporte, e editora X11 via IRunLoop (timers + file descriptors
+bombeados pelo idle da janela). Verificado com Dragonfly Hall Reverb (DSP,
+cauda 0.104) e Stochas (editora JUCE desenhando).
 
-O que já está pronto para recebê-lo: a opção `NIRBIJA_VST3` no CMake (default
-`OFF`), o ramo em `make_all_backends()`, e `PluginFormat::Vst3` na interface.
-Falta o `src/hosting/vst3_backend.cpp` — `IComponent`/`IAudioProcessor`/
-`IEditController`, arranjo de bus, sincronismo de parâmetro.
-
-## Como validar cada fase
-
-Cada backend de plugin ganha um teste CLI que carrega um plugin instalado de
-verdade, processa um bloco de áudio e confere que a saída não é silêncio nem
-NaN. Nada de mock de plugin — o valor do host está justamente em aguentar
-plugin de terceiro mal comportado.
+**Licença**: mesmo sem compilar fontes do SDK, as pluginterfaces são
+GPLv3/proprietária dupla — o projeto assume **GPLv3**.

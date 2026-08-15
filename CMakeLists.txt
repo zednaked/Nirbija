@@ -8,7 +8,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(NIRBIJA_LV2 "Build the LV2 plugin backend" ON)
 option(NIRBIJA_CLAP "Build the CLAP plugin backend" ON)
-option(NIRBIJA_VST3 "Build the VST3 plugin backend" OFF)
+option(NIRBIJA_VST3 "Build the VST3 plugin backend" ON)
 option(NIRBIJA_UI "Build the Qt6 QML user interface" OFF)
 option(NIRBIJA_TESTS "Build the CLI test harnesses" ON)
 
@@ -23,8 +23,21 @@ if(NIRBIJA_LV2)
   pkg_check_modules(LILV REQUIRED IMPORTED_TARGET lilv-0)
 endif()
 
+include(FetchContent)
+
+if(NIRBIJA_VST3)
+  # Only the interface headers, not the whole SDK: a host built on the raw
+  # pluginterfaces needs no Steinberg sources compiled at all. Placed so that
+  # #include "pluginterfaces/..." resolves naturally.
+  FetchContent_Declare(vst3_pluginterfaces
+    GIT_REPOSITORY https://github.com/steinbergmedia/vst3_pluginterfaces.git
+    GIT_TAG master
+    GIT_SHALLOW TRUE
+    SOURCE_DIR ${CMAKE_BINARY_DIR}/vst3/pluginterfaces)
+  FetchContent_MakeAvailable(vst3_pluginterfaces)
+endif()
+
 if(NIRBIJA_CLAP)
-  include(FetchContent)
   FetchContent_Declare(clap
     GIT_REPOSITORY https://github.com/free-audio/clap.git
     GIT_TAG 1.2.6
