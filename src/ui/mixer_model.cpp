@@ -550,6 +550,16 @@ bool MixerModel::openInsertEditor(int row, int slot) {
   PluginInstance* insert = strip->insert_at(static_cast<size_t>(slot));
   if (insert == nullptr) return false;
 
+  // A second click on the same insert closes its window rather than opening a
+  // twin: open once, close once.
+  const auto existing = std::find_if(
+      editors_.begin(), editors_.end(),
+      [insert](const OpenEditor& editor) { return editor.insert == insert; });
+  if (existing != editors_.end()) {
+    editors_.erase(existing);
+    return true;
+  }
+
   std::unique_ptr<PluginGui> gui = insert->create_gui();
   if (gui == nullptr) return false;
 
@@ -557,7 +567,16 @@ bool MixerModel::openInsertEditor(int row, int slot) {
       std::move(gui), QString::fromStdString(insert->descriptor().name));
   if (!window->open()) return false;
 
-  editors_.push_back({channels_[row].slot, std::move(window)});
+  // Closing through the window manager has to leave the list too, or the next
+  // click would "close" a window that is already gone.
+  PluginWindow* raw = window.get();
+  connect(raw, &PluginWindow::closed, this, [this, raw] {
+    std::erase_if(editors_, [raw](const OpenEditor& editor) {
+      return editor.window.get() == raw;
+    });
+  });
+
+  editors_.push_back({channels_[row].slot, insert, std::move(window)});
   return true;
 }
 

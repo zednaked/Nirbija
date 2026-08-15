@@ -286,6 +286,9 @@ class MixerModel : public QAbstractListModel {
   // slot tags each one, so removing a channel closes only its own editors.
   struct OpenEditor {
     size_t slot;
+    // Which plugin this window edits, so a second click finds the first window
+    // instead of opening a twin.
+    PluginInstance* insert;
     std::unique_ptr<PluginWindow> window;
   };
   std::vector<OpenEditor> editors_;
