@@ -9,6 +9,7 @@
 #include <QStandardPaths>
 #include <QtMath>
 
+#include <algorithm>
 #include <cmath>
 
 namespace nirbija {
@@ -116,6 +117,7 @@ QHash<int, QByteArray> MixerModel::roleNames() const {
 }
 
 void MixerModel::addChannel(const QString& name, int channels) {
+  pushUndo();
   // Named after the graph slot rather than the row count. Slots are never
   // reused, so removing a channel and adding another cannot produce two
   // channels with the same name — and the name then matches the JACK ports.
@@ -143,6 +145,7 @@ void MixerModel::addChannel(const QString& name, int channels) {
 
 void MixerModel::removeChannel(int row) {
   if (row < 0 || row >= static_cast<int>(channels_.size())) return;
+  if (!restoring_) pushUndo();
 
   // Editors belonging to this channel go with it: one left open would be
   // editing a plugin that is no longer in the signal path.
@@ -949,6 +952,7 @@ void MixerModel::pollLevels() {
 
   master_peak_[0] = engine_.graph().read_master_peak(0);
   master_peak_[1] = engine_.graph().read_master_peak(1);
+  master_clip_ = engine_.graph().read_master_clip() > 0.0f;
   emit levelsChanged();
 
   engine_.graph().reclaim();
@@ -975,6 +979,243 @@ qreal MixerModel::gainToFader(qreal gain) {
   if (gain <= 0.0) return 0.0;
   const qreal db = 20.0 * std::log10(gain);
   return qBound(0.0, (db - kMinDb) / (kMaxDb - kMinDb), 1.0);
+}
+
+QString MixerModel::positionLabel() const {
+  if (engine_.sample_rate() <= 0.0) return QStringLiteral("1.1");
+  const double beats =
+      static_cast<double>(engine_.transport_frame()) / engine_.sample_rate() *
+      engine_.tempo() / 60.0;
+  const int num = std::max(1, engine_.time_numerator());
+  const int bar = static_cast<int>(beats / num) + 1;
+  const int beat = static_cast<int>(std::fmod(beats, num)) + 1;
+  return QStringLiteral("%1.%2").arg(bar).arg(beat);
+}
+
+void MixerModel::pushUndo() {
+  if (restoring_) return;
+  redo_stack_.clear();
+  undo_stack_.push_back(snapshot());
+  while (undo_stack_.size() > 16) undo_stack_.removeFirst();
+  emit dirtyChanged();
+}
+
+QByteArray MixerModel::snapshot() const {
+  const QString path = sessionPath() + QStringLiteral(".snap");
+  writeSession(path);
+  QFile file(path);
+  if (!file.open(QIODevice::ReadOnly)) return {};
+  return file.readAll();
+}
+
+void MixerModel::restoreSnapshot(const QByteArray& blob) {
+  if (blob.isEmpty()) return;
+  const QString path = sessionPath() + QStringLiteral(".snap");
+  QFile file(path);
+  if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
+  file.write(blob);
+  file.close();
+  closeAllEditors();
+  midi_maps_.clear();
+  restoring_ = true;
+  while (rowCount() > 0) removeChannel(0);
+  restoring_ = false;
+  readSession(path);
+}
+
+void MixerModel::undo() {
+  if (undo_stack_.isEmpty()) return;
+  redo_stack_.push_back(snapshot());
+  const QByteArray blob = undo_stack_.takeLast();
+  restoreSnapshot(blob);
+  emit dirtyChanged();
+}
+
+void MixerModel::redo() {
+  if (redo_stack_.isEmpty()) return;
+  undo_stack_.push_back(snapshot());
+  restoreSnapshot(redo_stack_.takeLast());
+  emit dirtyChanged();
+}
+
+void MixerModel::duplicateChannel(int row) {
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return;
+  pushUndo();
+  const ChannelUi src = channels_[row];
+  if (src.is_bus) {
+    addBus(src.name + QStringLiteral(" copy"));
+  } else {
+    addChannel(src.name + QStringLiteral(" copy"), src.width);
+  }
+  const int dest = rowCount() - 1;
+  setGain(dest, src.gain);
+  setPan(dest, src.pan);
+  if (src.muted) toggleMute(dest);
+  if (src.soloed) toggleSolo(dest);
+}
+
+void MixerModel::moveChannel(int row, int direction) {
+  const int target = row + direction;
+  if (row < 0 || target < 0 || row >= static_cast<int>(channels_.size()) ||
+      target >= static_cast<int>(channels_.size()))
+    return;
+  pushUndo();
+  beginMoveRows({}, row, row, {}, target > row ? target + 1 : target);
+  std::swap(channels_[row], channels_[target]);
+  endMoveRows();
+  markDirty();
+}
+
+void MixerModel::setInsertBypassed(int row, int slot, bool on) {
+  ChannelStrip* strip = stripFor(row);
+  if (strip == nullptr) return;
+  strip->set_insert_bypassed(static_cast<size_t>(slot), on);
+  markDirty();
+}
+
+bool MixerModel::insertBypassed(int row, int slot) const {
+  ChannelStrip* strip = stripFor(row);
+  return strip != nullptr && strip->insert_bypassed(static_cast<size_t>(slot));
+}
+
+void MixerModel::setInsertPostFader(int row, int slot, bool on) {
+  ChannelStrip* strip = stripFor(row);
+  if (strip == nullptr) return;
+  strip->set_insert_post_fader(static_cast<size_t>(slot), on);
+  markDirty();
+}
+
+bool MixerModel::insertPostFader(int row, int slot) const {
+  ChannelStrip* strip = stripFor(row);
+  return strip != nullptr && strip->insert_post_fader(static_cast<size_t>(slot));
+}
+
+int MixerModel::extraOutputPairs(int row, int slot) const {
+  PluginInstance* insert = insertFor(row, slot);
+  return insert != nullptr ? insert->extra_output_pairs() : 0;
+}
+
+void MixerModel::addTapChannels(int row, int slot) {
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return;
+  const int pairs = extraOutputPairs(row, slot);
+  if (pairs <= 0) return;
+  pushUndo();
+  const size_t source = channels_[row].slot;
+  for (int p = 0; p < pairs; ++p) {
+    const size_t index = engine_.add_tap_channel(source, p);
+    if (index == kMaxChannels) break;
+    beginInsertRows({}, rowCount(), rowCount());
+    ChannelUi tap;
+    tap.slot = index;
+    tap.name = channels_[row].name + QStringLiteral(" out %1").arg(p + 2);
+    tap.width = 2;
+    tap.input_label = tr("plugin tap");
+    tap.midi_label = tr("no MIDI");
+    tap.output_label = tr("Master");
+    tap.accent = channels_[row].accent;
+    channels_.push_back(std::move(tap));
+    endInsertRows();
+  }
+  markDirty();
+}
+
+void MixerModel::setMidiMask(int row, int mask) {
+  ChannelStrip* strip = stripFor(row);
+  if (strip == nullptr) return;
+  strip->set_midi_mask(static_cast<uint16_t>(mask));
+  markDirty();
+}
+
+int MixerModel::midiMask(int row) const {
+  ChannelStrip* strip = stripFor(row);
+  return strip != nullptr ? strip->midi_mask() : 0xFFFF;
+}
+
+void MixerModel::sendNote(int row, int note, int velocity) {
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return;
+  if (channels_[row].is_bus) return;
+  MidiEvent event;
+  event.size = 3;
+  event.data[0] = static_cast<uint8_t>(velocity > 0 ? 0x90 : 0x80);
+  event.data[1] = static_cast<uint8_t>(std::clamp(note, 0, 127));
+  event.data[2] = static_cast<uint8_t>(std::clamp(velocity, 0, 127));
+  engine_.inject_midi(channels_[row].slot, event);
+}
+
+void MixerModel::connectChannelSink(int row, const QString& port) {
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return;
+  engine_.connect_channel_sink(channels_[row].slot, port.toStdString());
+  markDirty();
+}
+
+QString MixerModel::channelSink(int row) const {
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return {};
+  return shortPortName(
+      QString::fromStdString(engine_.current_channel_sink(channels_[row].slot)));
+}
+
+void MixerModel::setSidechain(int row, int sourceRow) {
+  ChannelStrip* strip = stripFor(row);
+  if (strip == nullptr) return;
+  int slot = -1;
+  if (sourceRow >= 0 && sourceRow < static_cast<int>(channels_.size()))
+    slot = static_cast<int>(channels_[sourceRow].slot);
+  strip->set_sidechain_slot(slot);
+  markDirty();
+}
+
+int MixerModel::sidechainRow(int row) const {
+  ChannelStrip* strip = stripFor(row);
+  if (strip == nullptr) return -1;
+  const int slot = strip->sidechain_slot();
+  for (int i = 0; i < static_cast<int>(channels_.size()); ++i)
+    if (static_cast<int>(channels_[i].slot) == slot) return i;
+  return -1;
+}
+
+bool MixerModel::insertIsLooper(int row, int slot) const {
+  PluginInstance* insert = insertFor(row, slot);
+  return insert != nullptr && insert->descriptor().uid == "nirbija.looper";
+}
+
+void MixerModel::setLooperRecord(int row, int slot, bool on) {
+  PluginInstance* insert = insertFor(row, slot);
+  if (insert != nullptr) insert->set_parameter(0, on ? 1.0 : 0.0);
+}
+
+void MixerModel::setLooperPlay(int row, int slot, bool on) {
+  PluginInstance* insert = insertFor(row, slot);
+  if (insert != nullptr) insert->set_parameter(1, on ? 1.0 : 0.0);
+}
+
+void MixerModel::clearLooper(int row, int slot) {
+  PluginInstance* insert = insertFor(row, slot);
+  if (insert != nullptr) insert->set_parameter(2, 1.0);
+}
+
+void MixerModel::toggleMasterDim() {
+  engine_.graph().set_master_dim(!engine_.graph().master_dim());
+  emit masterGainChanged();
+}
+
+void MixerModel::toggleMasterMute() {
+  engine_.graph().set_master_mute(!engine_.graph().master_mute());
+  emit masterGainChanged();
+}
+
+void MixerModel::toggleMasterMono() {
+  engine_.graph().set_master_mono(!engine_.graph().master_mono());
+  emit masterGainChanged();
+}
+
+void MixerModel::toggleMidiClock() {
+  engine_.set_midi_clock(!engine_.midi_clock());
+  emit transportChanged();
+}
+
+void MixerModel::setTimeSignature(int num, int den) {
+  engine_.set_time_signature(num, den);
+  emit transportChanged();
 }
 
 QString MixerModel::gainLabel(qreal gain) {

@@ -96,8 +96,19 @@ class AudioGraph {
   void set_master_gain(float linear) {
     master_gain_.store(linear, std::memory_order_relaxed);
   }
-  // Peak since the last read, per master channel. Reading resets it.
+  void set_master_dim(bool on) { master_dim_.store(on, std::memory_order_relaxed); }
+  void set_master_mute(bool on) { master_mute_.store(on, std::memory_order_relaxed); }
+  void set_master_mono(bool on) { master_mono_.store(on, std::memory_order_relaxed); }
+  bool master_dim() const { return master_dim_.load(std::memory_order_relaxed); }
+  bool master_mute() const { return master_mute_.load(std::memory_order_relaxed); }
+  bool master_mono() const { return master_mono_.load(std::memory_order_relaxed); }
   float read_master_peak(int channel);
+  float read_master_clip() { return master_clip_.exchange(0.0f, std::memory_order_relaxed); }
+
+  // Extra stereo pairs published by the last multi-out insert on `source`.
+  void copy_tap(size_t source, int pair, float* left, float* right,
+                uint32_t frames) const;
+  void push_injected_midi(size_t channel, const MidiEvent& event);
 
  private:
   bool any_channel_soloed(size_t count) const;
@@ -166,11 +177,21 @@ class AudioGraph {
   std::atomic<bool> parked_{false};
   std::atomic<uint64_t> render_generation_{0};
   std::atomic<float> master_gain_{1.0f};
+  std::atomic<bool> master_dim_{false};
+  std::atomic<bool> master_mute_{false};
+  std::atomic<bool> master_mono_{false};
   std::atomic<float> master_peaks_[2]{{0.0f}, {0.0f}};
+  std::atomic<float> master_clip_{0.0f};
+
+  static constexpr int kMaxTapPairs = 8;
+  std::array<std::array<std::vector<float>, kMaxTapPairs>, kMaxChannels> tap_l_{};
+  std::array<std::array<std::vector<float>, kMaxTapPairs>, kMaxChannels> tap_r_{};
 
   // One block's worth of MIDI, reused per channel. Deep enough for anything a
   // sequencer sends in a single period.
   std::array<MidiEvent, 128> midi_scratch_{};
+  std::array<std::array<MidiEvent, 32>, kMaxChannels> injected_midi_{};
+  std::array<size_t, kMaxChannels> injected_midi_n_{};
 
   // Scratch reused every block, sized in prepare() so render() never allocates.
   std::vector<std::vector<float>> scratch_;

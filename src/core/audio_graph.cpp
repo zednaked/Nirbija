@@ -32,8 +32,15 @@ void AudioGraph::prepare(double sample_rate, uint32_t max_block_frames) {
 
   grow(scratch_, scratch_ptrs_);
   for (size_t i = 0; i < kMaxBuses; ++i) grow(bus_buffers_[i], bus_ptrs_[i]);
-  for (size_t i = 0; i < kMaxChannels; ++i)
+  for (size_t i = 0; i < kMaxChannels; ++i) {
     grow(channel_buffers_[i], channel_ptrs_[i]);
+    for (int p = 0; p < kMaxTapPairs; ++p) {
+      if (grew || tap_l_[i][p].size() < sized) {
+        tap_l_[i][p].assign(sized, 0.0f);
+        tap_r_[i][p].assign(sized, 0.0f);
+      }
+    }
+  }
 
   const size_t count = active_.load(std::memory_order_acquire);
   for (size_t i = 0; i < count; ++i)
@@ -275,6 +282,16 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
   const bool channel_solo = any_channel_soloed(count);
   const bool bus_solo = any_bus_soloed(buses);
 
+  uint32_t max_lat = 0;
+  for (size_t s = 0; s < count; ++s) {
+    ChannelStrip* other = live_[s].load(std::memory_order_acquire);
+    if (other != nullptr) max_lat = std::max(max_lat, other->latency_samples());
+  }
+  for (size_t b = 0; b < buses; ++b) {
+    ChannelStrip* other = live_buses_[b].load(std::memory_order_acquire);
+    if (other != nullptr) max_lat = std::max(max_lat, other->latency_samples());
+  }
+
   for (size_t i = 0; i < count; ++i) {
     ChannelStrip* live = live_[i].load(std::memory_order_acquire);
     if (live == nullptr) continue;  // removed channel
@@ -305,9 +322,33 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
       midi_count = midi_sources_[i]->read(midi_scratch_.data(),
                                           midi_scratch_.size(), frames);
     }
+    for (size_t e = 0; e < injected_midi_n_[i] && midi_count < midi_scratch_.size();
+         ++e)
+      midi_scratch_[midi_count++] = injected_midi_[i][e];
+    injected_midi_n_[i] = 0;
+
+    const int key = strip.sidechain_slot();
+    if (key >= 0 && static_cast<size_t>(key) < i) {
+      ChannelStrip* src = live_[static_cast<size_t>(key)].load(
+          std::memory_order_acquire);
+      if (src != nullptr) {
+        const float* sc[2] = {src->output_cache(0),
+                              src->output_cache(src->channel_count() > 1 ? 1 : 0)};
+        if (sc[0] != nullptr) strip.feed_sidechain(sc, 2, frames);
+      }
+    }
+
+    strip.set_pdc_delay(max_lat > strip.latency_samples()
+                            ? max_lat - strip.latency_samples()
+                            : 0);
 
     strip.process(scratch_ptrs_.data(), frames, midi_scratch_.data(), midi_count,
                   &transport_);
+
+    const int pairs = std::min(strip.extra_output_pairs(), kMaxTapPairs);
+    for (int p = 0; p < pairs; ++p)
+      strip.copy_extra_output(p, tap_l_[i][p].data(), tap_r_[i][p].data(),
+                              frames);
 
     const bool mix_channel =
         (!channel_solo && !bus_solo) ||
@@ -358,6 +399,9 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
     for (int ch = 0; ch < 2; ++ch)
       std::copy_n(bus_ptrs_[i][ch], frames, scratch_ptrs_[ch]);
 
+    live->set_pdc_delay(max_lat > live->latency_samples()
+                            ? max_lat - live->latency_samples()
+                            : 0);
     live->process(scratch_ptrs_.data(), frames, nullptr, 0, &transport_);
 
     const bool mix_bus = !bus_solo || live->soloed() || channel_solo;
@@ -377,15 +421,26 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
     }
   }
 
-  const float gain = master_gain_.load(std::memory_order_relaxed);
+  const float gain = master_gain_.load(std::memory_order_relaxed) *
+                     (master_dim_.load(std::memory_order_relaxed) ? 0.25f : 1.0f);
+  const bool mute = master_mute_.load(std::memory_order_relaxed);
+  const bool mono = master_mono_.load(std::memory_order_relaxed);
+  if (mono) {
+    for (uint32_t f = 0; f < frames; ++f) {
+      const float m = 0.5f * (master[0][f] + master[1][f]);
+      master[0][f] = master[1][f] = m;
+    }
+  }
   for (int ch = 0; ch < 2; ++ch) {
     float peak = 0.0f;
     for (uint32_t f = 0; f < frames; ++f) {
-      master[ch][f] *= gain;
+      if (mute) master[ch][f] = 0.0f;
+      else master[ch][f] *= gain;
       peak = std::max(peak, std::fabs(master[ch][f]));
     }
     if (peak > master_peaks_[ch].load(std::memory_order_relaxed))
       master_peaks_[ch].store(peak, std::memory_order_relaxed);
+    if (peak >= 1.0f) master_clip_.store(1.0f, std::memory_order_relaxed);
   }
 
   record_master(master, frames);
@@ -402,6 +457,29 @@ void AudioGraph::record_master(float* const* master, uint32_t frames) {
 
 float AudioGraph::read_master_peak(int channel) {
   return master_peaks_[channel].exchange(0.0f, std::memory_order_relaxed);
+}
+
+void AudioGraph::push_injected_midi(size_t channel, const MidiEvent& event) {
+  if (channel >= kMaxChannels) return;
+  size_t& n = injected_midi_n_[channel];
+  if (n >= injected_midi_[channel].size()) return;
+  injected_midi_[channel][n++] = event;
+}
+
+void AudioGraph::copy_tap(size_t source, int pair, float* left, float* right,
+                          uint32_t frames) const {
+  if (source >= kMaxChannels || pair < 0 || pair >= kMaxTapPairs) {
+    std::fill_n(left, frames, 0.0f);
+    std::fill_n(right, frames, 0.0f);
+    return;
+  }
+  const uint32_t n = std::min(frames, static_cast<uint32_t>(tap_l_[source][pair].size()));
+  std::copy_n(tap_l_[source][pair].data(), n, left);
+  std::copy_n(tap_r_[source][pair].data(), n, right);
+  if (n < frames) {
+    std::fill(left + n, left + frames, 0.0f);
+    std::fill(right + n, right + frames, 0.0f);
+  }
 }
 
 size_t AudioGraph::add_channel(std::string name, int channel_count,

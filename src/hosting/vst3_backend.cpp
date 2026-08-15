@@ -759,7 +759,7 @@ class Vst3Instance : public PluginInstance {
       component_->activateBus(Vst::kAudio, Vst::kOutput, static_cast<int32>(i), true);
     if (has_event_input_)
       component_->activateBus(Vst::kEvent, Vst::kInput, 0, true);
-      component_->activateBus(Vst::kEvent, Vst::kOutput, 0, true);
+    component_->activateBus(Vst::kEvent, Vst::kOutput, 0, true);
 
     if (component_->setActive(true) != kResultOk) return false;
     processor_->setProcessing(true);
@@ -965,6 +965,47 @@ class Vst3Instance : public PluginInstance {
   }
 
   const PluginDescriptor& descriptor() const override { return desc_; }
+
+  uint32_t latency_samples() const override {
+    return processor_ != nullptr
+               ? static_cast<uint32_t>(processor_->getLatencySamples())
+               : 0;
+  }
+
+  int extra_output_pairs() const override {
+    int channels = 0;
+    for (size_t i = 1; i < output_buses_.size(); ++i) channels += output_buses_[i];
+    return (channels + 1) / 2;
+  }
+
+  void copy_extra_output(int pair, float* left, float* right,
+                         uint32_t frames) override {
+    int remaining = pair * 2;
+    for (size_t bus = 1; bus < bus_channel_ptrs_out_.size(); ++bus) {
+      auto& chans = bus_channel_ptrs_out_[bus];
+      for (size_t c = 0; c < chans.size(); ++c) {
+        if (remaining-- > 0) continue;
+        std::copy_n(chans[c], frames, left);
+        if (c + 1 < chans.size())
+          std::copy_n(chans[c + 1], frames, right);
+        else
+          std::copy_n(left, frames, right);
+        return;
+      }
+    }
+    std::fill_n(left, frames, 0.0f);
+    std::fill_n(right, frames, 0.0f);
+  }
+
+  void set_sidechain(const float* const* buffers, int channels,
+                     uint32_t frames) override {
+    if (bus_channel_ptrs_in_.size() < 2) return;
+    auto& sc = bus_channel_ptrs_in_[1];
+    for (size_t c = 0; c < sc.size(); ++c) {
+      const int src = std::min(static_cast<int>(c), std::max(0, channels - 1));
+      if (buffers[src] != nullptr) std::copy_n(buffers[src], frames, sc[c]);
+    }
+  }
 
   std::unique_ptr<PluginGui> create_gui() override;
 

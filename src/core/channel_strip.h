@@ -100,7 +100,37 @@ class ChannelStrip {
   size_t insert_count() const { return insert_count_.load(std::memory_order_acquire); }
   PluginInstance* insert_at(size_t index) const;
 
+  void set_insert_bypassed(size_t index, bool on);
+  bool insert_bypassed(size_t index) const;
+  void set_insert_post_fader(size_t index, bool on);
+  bool insert_post_fader(size_t index) const;
+
+  // Bit N set = MIDI channel N (0-15) is allowed. 0xFFFF is all.
+  void set_midi_mask(uint16_t mask) { midi_mask_.store(mask, std::memory_order_relaxed); }
+  uint16_t midi_mask() const { return midi_mask_.load(std::memory_order_relaxed); }
+
+  void set_sidechain_slot(int slot) {
+    sidechain_slot_.store(slot, std::memory_order_relaxed);
+  }
+  int sidechain_slot() const { return sidechain_slot_.load(std::memory_order_relaxed); }
+
+  uint32_t latency_samples() const;
+  int extra_output_pairs() const;
+  void copy_extra_output(int pair, float* left, float* right, uint32_t frames) const;
+
+  // Last processed audio, after fader and mute, for hardware outs / sidechain.
+  const float* output_cache(int channel) const;
+
+  void set_pdc_delay(uint32_t samples) {
+    pdc_delay_.store(samples, std::memory_order_relaxed);
+  }
+  void apply_pdc(float* const* buffers, uint32_t frames);
+  void feed_sidechain(const float* const* buffers, int channels, uint32_t frames);
+
  private:
+  void run_insert(PluginInstance* insert, float* const* buffers, uint32_t frames,
+                  const TransportInfo* transport, bool filter_midi);
+  static bool midi_allowed(const MidiEvent& event, uint16_t mask);
   std::string name_;
   int channel_count_;
   double sample_rate_ = 0.0;
@@ -119,6 +149,11 @@ class ChannelStrip {
   };
   std::array<Send, kMaxSends> sends_;
   std::atomic<int> record_track_{-1};
+  std::atomic<uint16_t> midi_mask_{0xFFFFu};
+  std::atomic<int> sidechain_slot_{-1};
+  std::array<std::atomic<uint8_t>, kMaxInserts> insert_flags_{};
+  static constexpr uint8_t kBypass = 1;
+  static constexpr uint8_t kPostFader = 2;
 
   // One smoothed value per parameter so a fader move does not click.
   float smoothed_gain_ = 1.0f;
@@ -152,6 +187,11 @@ class ChannelStrip {
   // allocates mid-block.
   std::array<MidiEvent, 256> midi_chain_{};
   size_t midi_chain_count_ = 0;
+
+  std::vector<std::vector<float>> output_cache_;
+  std::vector<std::vector<float>> delay_line_;
+  std::vector<size_t> delay_write_;
+  std::atomic<uint32_t> pdc_delay_{0};
 };
 
 }  // namespace nirbija

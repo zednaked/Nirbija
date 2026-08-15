@@ -571,6 +571,35 @@ class Lv2Instance : public PluginInstance {
 
   void set_channel_layout(int channels) override { strip_channels_ = channels; }
 
+  uint32_t latency_samples() const override {
+    for (size_t i = 0; i < control_out_.size() && i < control_outputs_scratch_.size();
+         ++i) {
+      if (control_out_[i].symbol == "latency")
+        return static_cast<uint32_t>(
+            std::max(0.0f, control_outputs_scratch_[i]));
+    }
+    return 0;
+  }
+
+  int extra_output_pairs() const override {
+    const int extra = static_cast<int>(audio_out_.size()) - strip_channels_;
+    return extra > 0 ? (extra + 1) / 2 : 0;
+  }
+
+  void copy_extra_output(int pair, float* left, float* right,
+                         uint32_t frames) override {
+    const size_t base = audio_in_.size() + static_cast<size_t>(strip_channels_) +
+                        static_cast<size_t>(pair) * 2;
+    if (base < audio_buffers_.size())
+      std::copy_n(audio_buffers_[base].data(), frames, left);
+    else
+      std::fill_n(left, frames, 0.0f);
+    if (base + 1 < audio_buffers_.size())
+      std::copy_n(audio_buffers_[base + 1].data(), frames, right);
+    else
+      std::copy_n(left, frames, right);
+  }
+
   std::vector<ParameterInfo> parameters() const override {
     std::vector<ParameterInfo> out;
     out.reserve(control_in_.size());
@@ -604,7 +633,7 @@ class Lv2Instance : public PluginInstance {
         plugin_, instance_, world_->urids.map_feature(),
         nullptr, nullptr, nullptr, nullptr,
         &Lv2Instance::get_port_value, const_cast<Lv2Instance*>(this),
-        LV2_STATE_IS_POD | LV2_STATE_IS_PORTABLE, nullptr);
+        LV2_STATE_IS_POD | LV2_STATE_IS_PORTABLE, map_path_features());
     if (state == nullptr) return {};
 
     char* text = lilv_state_to_string(world_->world, world_->urids.map_feature(),
@@ -643,7 +672,7 @@ class Lv2Instance : public PluginInstance {
 
     lilv_instance_deactivate(instance_);
     lilv_state_restore(state, instance_, &Lv2Instance::set_port_value, this, 0,
-                       features_.data());
+                       map_path_features());
     lilv_instance_activate(instance_);
 
     restoring_.store(false, std::memory_order_release);
@@ -821,9 +850,24 @@ class Lv2Instance : public PluginInstance {
     schedule_ = {this, &Lv2Instance::schedule_work};
     worker_feature_ = {LV2_WORKER__schedule, &schedule_};
 
+    map_path_.handle = this;
+    map_path_.abstract_path = &Lv2Instance::abstract_path;
+    map_path_.absolute_path = &Lv2Instance::absolute_path;
+    map_path_feature_ = {LV2_STATE__mapPath, &map_path_};
+
     features_ = {&map_feature_,  &unmap_feature_,  &options_feature_,
-                 &bounded_feature_, &worker_feature_, nullptr};
+                 &bounded_feature_, &worker_feature_, &map_path_feature_,
+                 nullptr};
   }
+
+  static char* abstract_path(LV2_State_Map_Path_Handle, const char* path) {
+    return path != nullptr ? strdup(path) : nullptr;
+  }
+  static char* absolute_path(LV2_State_Map_Path_Handle, const char* path) {
+    return path != nullptr ? strdup(path) : nullptr;
+  }
+
+  const LV2_Feature* const* map_path_features() const { return features_.data(); }
 
   void connect_all() {
     for (size_t i = 0; i < audio_in_.size(); ++i)
@@ -1010,7 +1054,8 @@ class Lv2Instance : public PluginInstance {
   size_t pending_midi_count_ = 0;
   int32_t block_length_ = 0;
   LV2_Feature map_feature_{}, unmap_feature_{}, options_feature_{}, bounded_feature_{};
-  LV2_Feature worker_feature_{};
+  LV2_Feature worker_feature_{}, map_path_feature_{};
+  LV2_State_Map_Path map_path_{};
   LV2_Worker_Schedule schedule_{};
   std::vector<LV2_Options_Option> options_;
   std::vector<const LV2_Feature*> features_;

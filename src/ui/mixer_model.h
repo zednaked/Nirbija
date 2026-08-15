@@ -2,9 +2,11 @@
 
 #include <QAbstractListModel>
 #include <QStringList>
+#include <QByteArray>
 #include <QUrl>
 #include <QVariantList>
 #include <QTimer>
+#include <QVector>
 
 #include <memory>
 #include <vector>
@@ -36,6 +38,15 @@ class MixerModel : public QAbstractListModel {
   Q_PROPERTY(bool metronome READ metronome NOTIFY transportChanged)
   Q_PROPERTY(bool learning READ learning NOTIFY learnChanged)
   Q_PROPERTY(nirbija::PluginListModel* plugins READ plugins CONSTANT)
+  Q_PROPERTY(QString positionLabel READ positionLabel NOTIFY levelsChanged)
+  Q_PROPERTY(bool dirty READ dirty NOTIFY dirtyChanged)
+  Q_PROPERTY(bool canUndo READ canUndo NOTIFY dirtyChanged)
+  Q_PROPERTY(bool canRedo READ canRedo NOTIFY dirtyChanged)
+  Q_PROPERTY(bool masterDim READ masterDim NOTIFY masterGainChanged)
+  Q_PROPERTY(bool masterMute READ masterMute NOTIFY masterGainChanged)
+  Q_PROPERTY(bool masterMono READ masterMono NOTIFY masterGainChanged)
+  Q_PROPERTY(bool midiClock READ midiClock NOTIFY transportChanged)
+  Q_PROPERTY(bool masterClip READ masterClip NOTIFY levelsChanged)
 
  public:
   enum Roles {
@@ -142,6 +153,46 @@ class MixerModel : public QAbstractListModel {
 
   Q_INVOKABLE bool addInsertAt(int row, int pluginIndex, int targetSlot);
 
+  Q_INVOKABLE void undo();
+  Q_INVOKABLE void redo();
+  bool canUndo() const { return !undo_stack_.isEmpty(); }
+  bool canRedo() const { return !redo_stack_.isEmpty(); }
+  bool dirty() const { return dirty_flag_; }
+  QString positionLabel() const;
+
+  Q_INVOKABLE void duplicateChannel(int row);
+  Q_INVOKABLE void moveChannel(int row, int direction);
+
+  Q_INVOKABLE void setInsertBypassed(int row, int slot, bool on);
+  Q_INVOKABLE bool insertBypassed(int row, int slot) const;
+  Q_INVOKABLE void setInsertPostFader(int row, int slot, bool on);
+  Q_INVOKABLE bool insertPostFader(int row, int slot) const;
+  Q_INVOKABLE int extraOutputPairs(int row, int slot) const;
+  Q_INVOKABLE void addTapChannels(int row, int slot);
+  Q_INVOKABLE void setMidiMask(int row, int mask);
+  Q_INVOKABLE int midiMask(int row) const;
+  Q_INVOKABLE void sendNote(int row, int note, int velocity);
+  Q_INVOKABLE void connectChannelSink(int row, const QString& port);
+  Q_INVOKABLE QString channelSink(int row) const;
+  Q_INVOKABLE void setSidechain(int row, int sourceRow);
+  Q_INVOKABLE int sidechainRow(int row) const;
+
+  Q_INVOKABLE bool insertIsLooper(int row, int slot) const;
+  Q_INVOKABLE void setLooperRecord(int row, int slot, bool on);
+  Q_INVOKABLE void setLooperPlay(int row, int slot, bool on);
+  Q_INVOKABLE void clearLooper(int row, int slot);
+
+  Q_INVOKABLE void toggleMasterDim();
+  Q_INVOKABLE void toggleMasterMute();
+  Q_INVOKABLE void toggleMasterMono();
+  Q_INVOKABLE void toggleMidiClock();
+  bool masterDim() const { return engine_.graph().master_dim(); }
+  bool masterMute() const { return engine_.graph().master_mute(); }
+  bool masterMono() const { return engine_.graph().master_mono(); }
+  bool midiClock() const { return engine_.midi_clock(); }
+  bool masterClip() const { return master_clip_; }
+  Q_INVOKABLE void setTimeSignature(int num, int den);
+
   // Named sessions, apart from the automatic one: save a copy anywhere, or
   // replace the current mixer with a file's contents. Loading also becomes the
   // autosaved state, so a restart comes back to what was loaded.
@@ -216,6 +267,7 @@ class MixerModel : public QAbstractListModel {
   void learnChanged();
   void recordingChanged();
   void errorOccurred(const QString& message);
+  void dirtyChanged();
 
  private:
   struct ChannelUi {
@@ -307,6 +359,13 @@ class MixerModel : public QAbstractListModel {
   bool playing_ui_ = false;
   bool metronome_ui_ = false;
   bool seed_empty_session_ = true;
+  bool dirty_flag_ = false;
+  bool master_clip_ = false;
+  QVector<QByteArray> undo_stack_;
+  QVector<QByteArray> redo_stack_;
+  void pushUndo();
+  QByteArray snapshot() const;
+  void restoreSnapshot(const QByteArray& blob);
 };
 
 }  // namespace nirbija

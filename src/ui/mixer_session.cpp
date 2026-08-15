@@ -85,6 +85,8 @@ void MixerModel::saveSession() const {
   self->engine_.park_graph();
   writeSession(sessionPath());
   self->engine_.unpark_graph();
+  self->dirty_flag_ = false;
+  emit self->dirtyChanged();
 }
 
 void MixerModel::writeSession(const QString& target) const {
@@ -437,6 +439,10 @@ bool MixerModel::readSession(const QString& target) {
 
 void MixerModel::markDirty() {
   if (restoring_) return;
+  if (!dirty_flag_) {
+    dirty_flag_ = true;
+    emit dirtyChanged();
+  }
   autosave_timer_.start();
 }
 

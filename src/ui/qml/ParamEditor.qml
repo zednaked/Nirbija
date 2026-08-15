@@ -45,6 +45,29 @@ Popup {
             elide: Text.ElideRight
         }
 
+        Row {
+            visible: mixer.insertIsLooper(root.targetRow, root.targetSlot)
+            spacing: 6
+            StripButton {
+                width: 70
+                height: 26
+                label: qsTr("Rec")
+                onClicked: mixer.setLooperRecord(root.targetRow, root.targetSlot, true)
+            }
+            StripButton {
+                width: 70
+                height: 26
+                label: qsTr("Play")
+                onClicked: mixer.setLooperPlay(root.targetRow, root.targetSlot, true)
+            }
+            StripButton {
+                width: 70
+                height: 26
+                label: qsTr("Clear")
+                onClicked: mixer.clearLooper(root.targetRow, root.targetSlot)
+            }
+        }
+
         ListView {
             id: list
             width: parent.width

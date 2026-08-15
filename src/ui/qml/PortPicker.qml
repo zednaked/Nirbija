@@ -32,7 +32,8 @@ Popup {
     function openFor(kind, row, item) {
         root.kind = kind
         root.targetRow = row
-        root.ports = kind === "sink" ? mixer.sinks() : mixer.sources(kind === "midi")
+        root.ports = (kind === "sink" || kind === "channelSink")
+                     ? mixer.sinks() : mixer.sources(kind === "midi")
 
         if (item !== undefined && item !== null) {
             const point = item.mapToItem(Overlay.overlay, 0, item.height)
@@ -52,8 +53,9 @@ Popup {
 
         Text {
             text: root.kind === "midi" ? qsTr("MIDI source")
-                                       : root.kind === "sink" ? qsTr("Master output")
-                                                              : qsTr("Audio input")
+                 : root.kind === "sink" ? qsTr("Master output")
+                 : root.kind === "channelSink" ? qsTr("Direct output")
+                                               : qsTr("Audio input")
             color: Skin.text
             font.pixelSize: 13
         }

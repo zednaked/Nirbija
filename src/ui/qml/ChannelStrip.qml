@@ -81,6 +81,13 @@ Rectangle {
             onMenuRequested: root.midiMenuRequested(this)
         }
 
+        MidiKeyboard {
+            visible: !root.isBus
+            width: parent.width
+            height: visible ? 56 : 0
+            targetRow: root.row
+        }
+
         // --- fader, mute and solo -------------------------------------------
         Item {
             width: parent.width

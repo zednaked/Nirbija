@@ -199,6 +199,8 @@ class ClapInstance : public PluginInstance {
     output_ptrs_.clear();
     for (auto& channel : input_channels_) input_ptrs_.push_back(channel.data());
     for (auto& channel : output_channels_) output_ptrs_.push_back(channel.data());
+    plugin_latency_ = static_cast<const clap_plugin_latency_t*>(
+        plugin_->get_extension(plugin_, CLAP_EXT_LATENCY));
 
     if (!plugin_->start_processing(plugin_)) {
       plugin_->deactivate(plugin_);
@@ -357,6 +359,30 @@ class ClapInstance : public PluginInstance {
   }
 
   const PluginDescriptor& descriptor() const override { return desc_; }
+
+  uint32_t latency_samples() const override {
+    if (plugin_latency_ == nullptr || plugin_ == nullptr) return 0;
+    return plugin_latency_->get(plugin_);
+  }
+
+  int extra_output_pairs() const override {
+    const int extra = static_cast<int>(output_ptrs_.size()) - strip_channels_;
+    return extra > 0 ? (extra + 1) / 2 : 0;
+  }
+
+  void copy_extra_output(int pair, float* left, float* right,
+                         uint32_t frames) override {
+    const size_t base = static_cast<size_t>(strip_channels_) +
+                        static_cast<size_t>(pair) * 2;
+    if (base < output_ptrs_.size())
+      std::copy_n(output_ptrs_[base], frames, left);
+    else
+      std::fill_n(left, frames, 0.0f);
+    if (base + 1 < output_ptrs_.size())
+      std::copy_n(output_ptrs_[base + 1], frames, right);
+    else
+      std::copy_n(left, frames, right);
+  }
 
   std::unique_ptr<PluginGui> create_gui() override {
     if (gui_ == nullptr) return nullptr;
@@ -682,6 +708,7 @@ class ClapInstance : public PluginInstance {
   const clap_plugin_state_t* state_ = nullptr;
   const clap_plugin_audio_ports_t* audio_ports_ = nullptr;
   const clap_plugin_gui_t* gui_ = nullptr;
+  const clap_plugin_latency_t* plugin_latency_ = nullptr;
   const clap_plugin_timer_support_t* plugin_timers_ = nullptr;
   const clap_plugin_posix_fd_support_t* plugin_fds_ = nullptr;
 

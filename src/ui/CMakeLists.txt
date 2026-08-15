@@ -28,6 +28,7 @@ qt_add_qml_module(nirbija
     qml/ChannelStrip.qml
     qml/MasterStrip.qml
     qml/MidiMatrix.qml
+    qml/MidiKeyboard.qml
     qml/Navigator.qml
     qml/NodeSlot.qml
     qml/InsertSlot.qml

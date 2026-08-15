@@ -32,6 +32,11 @@ void ChannelStrip::prepare(double sample_rate, uint32_t max_block_frames,
   }
 
   plugin_io_.assign(static_cast<size_t>(channel_count_), nullptr);
+  output_cache_.assign(static_cast<size_t>(channel_count_),
+                       std::vector<float>(max_block_frames_, 0.0f));
+  delay_line_.assign(static_cast<size_t>(channel_count_),
+                     std::vector<float>(max_block_frames_ + 192000, 0.0f));
+  delay_write_.assign(static_cast<size_t>(channel_count_), 0);
   if (first || rate_changed || force_reactivate) {
     for (auto& insert : owned_inserts_) {
       insert->set_channel_layout(channel_count_);
@@ -40,69 +45,100 @@ void ChannelStrip::prepare(double sample_rate, uint32_t max_block_frames,
   }
 }
 
+bool ChannelStrip::midi_allowed(const MidiEvent& event, uint16_t mask) {
+  if (event.size == 0) return false;
+  const uint8_t status = event.data[0];
+  if (status < 0x80 || status >= 0xf0) return true;  // clock etc. always pass
+  const int channel = status & 0x0f;
+  return (mask & (1u << channel)) != 0;
+}
+
+void ChannelStrip::run_insert(PluginInstance* insert, float* const* buffers,
+                              uint32_t frames, const TransportInfo* transport,
+                              bool filter_midi) {
+  if (transport != nullptr) insert->set_transport(*transport);
+  const uint16_t mask = midi_mask_.load(std::memory_order_relaxed);
+  for (size_t e = 0; e < midi_chain_count_; ++e) {
+    if (filter_midi && !midi_allowed(midi_chain_[e], mask)) continue;
+    insert->queue_midi(midi_chain_[e]);
+  }
+  insert->process(buffers, buffers, frames);
+  if (midi_chain_count_ < midi_chain_.size()) {
+    midi_chain_count_ += insert->take_midi_output(
+        midi_chain_.data() + midi_chain_count_,
+        midi_chain_.size() - midi_chain_count_);
+  }
+}
+
 void ChannelStrip::process(float* const* buffers, uint32_t frames,
                            const MidiEvent* midi, size_t midi_count,
                            const TransportInfo* transport) {
-  // The block's MIDI starts as whatever came in on the channel port and grows
-  // as inserts produce their own.
-  midi_chain_count_ = std::min(midi_count, midi_chain_.size());
-  for (size_t i = 0; i < midi_chain_count_; ++i) midi_chain_[i] = midi[i];
+  const uint16_t mask = midi_mask_.load(std::memory_order_relaxed);
+  midi_chain_count_ = 0;
+  for (size_t i = 0; i < midi_count && midi_chain_count_ < midi_chain_.size();
+       ++i) {
+    if (!midi_allowed(midi[i], mask)) continue;
+    midi_chain_[midi_chain_count_++] = midi[i];
+  }
 
-  // Inserts always run, even while muted: a synth that missed a note-off
-  // because someone hit mute would hang that note forever, and a reverb
-  // would lose its tail. Mute is applied to the audio after the chain.
-  // TODO: per-slot pre/post, so an effect can be placed after the fader.
   for (int ch = 0; ch < channel_count_; ++ch) plugin_io_[ch] = buffers[ch];
   const size_t insert_count = insert_count_.load(std::memory_order_acquire);
+
+  auto flags_of = [this](size_t i) {
+    return insert_flags_[i].load(std::memory_order_acquire);
+  };
+
+  // Pre-fader inserts first, then the fader, then post-fader. Bypass still
+  // delivers MIDI so a muted-style hang cannot happen on a bypassed synth.
   for (size_t i = 0; i < insert_count; ++i) {
     PluginInstance* insert = insert_slots_[i].load(std::memory_order_acquire);
     if (insert == nullptr) continue;
-
-    if (transport != nullptr) insert->set_transport(*transport);
-
-    // Everything the chain has produced so far reaches this insert, so a step
-    // sequencer sitting above a synth actually plays it.
-    for (size_t e = 0; e < midi_chain_count_; ++e)
-      insert->queue_midi(midi_chain_[e]);
-
-    insert->process(plugin_io_.data(), plugin_io_.data(), frames);
-
-    // Whatever it emitted joins the stream for the inserts below it.
-    if (midi_chain_count_ < midi_chain_.size()) {
-      midi_chain_count_ += insert->take_midi_output(
-          midi_chain_.data() + midi_chain_count_,
-          midi_chain_.size() - midi_chain_count_);
+    if (flags_of(i) & kPostFader) continue;
+    if (flags_of(i) & kBypass) {
+      for (size_t e = 0; e < midi_chain_count_; ++e)
+        insert->queue_midi(midi_chain_[e]);
+      continue;
     }
+    run_insert(insert, plugin_io_.data(), frames, transport, false);
   }
 
-  if (muted_.load(std::memory_order_relaxed)) {
+  if (!muted_.load(std::memory_order_relaxed)) {
+    const float target_gain = gain_.load(std::memory_order_relaxed);
+    const float target_pan = pan_.load(std::memory_order_relaxed);
+    const bool stereo = channel_count_ == 2;
+    for (uint32_t i = 0; i < frames; ++i) {
+      smoothed_gain_ += (1.0f - smoothing_coeff_) * (target_gain - smoothed_gain_);
+      smoothed_pan_ += (1.0f - smoothing_coeff_) * (target_pan - smoothed_pan_);
+      const float left = stereo ? std::min(1.0f, 1.0f - smoothed_pan_) : 1.0f;
+      const float right = stereo ? std::min(1.0f, 1.0f + smoothed_pan_) : 1.0f;
+      for (int ch = 0; ch < channel_count_; ++ch) {
+        const float pan_gain = (ch == 0) ? left : right;
+        buffers[ch][i] *= smoothed_gain_ * pan_gain;
+      }
+    }
+  } else {
     for (int ch = 0; ch < channel_count_; ++ch)
       std::fill_n(buffers[ch], frames, 0.0f);
-    process_generation_.fetch_add(1, std::memory_order_release);
-    return;
   }
 
-  const float target_gain = gain_.load(std::memory_order_relaxed);
-  const float target_pan = pan_.load(std::memory_order_relaxed);
-  const bool stereo = channel_count_ == 2;
-
-  for (uint32_t i = 0; i < frames; ++i) {
-    smoothed_gain_ += (1.0f - smoothing_coeff_) * (target_gain - smoothed_gain_);
-    smoothed_pan_ += (1.0f - smoothing_coeff_) * (target_pan - smoothed_pan_);
-
-    // On a stereo strip pan is a balance: unity at centre, attenuating the side
-    // you turn away from. A mono strip is panned by the graph as it widens,
-    // where constant-power is the right law.
-    const float left = stereo ? std::min(1.0f, 1.0f - smoothed_pan_) : 1.0f;
-    const float right = stereo ? std::min(1.0f, 1.0f + smoothed_pan_) : 1.0f;
-
-    for (int ch = 0; ch < channel_count_; ++ch) {
-      const float pan_gain = (ch == 0) ? left : right;
-      buffers[ch][i] *= smoothed_gain_ * pan_gain;
+  for (size_t i = 0; i < insert_count; ++i) {
+    PluginInstance* insert = insert_slots_[i].load(std::memory_order_acquire);
+    if (insert == nullptr) continue;
+    if ((flags_of(i) & kPostFader) == 0) continue;
+    if (flags_of(i) & kBypass) {
+      for (size_t e = 0; e < midi_chain_count_; ++e)
+        insert->queue_midi(midi_chain_[e]);
+      continue;
     }
+    run_insert(insert, plugin_io_.data(), frames, transport, false);
   }
+
+  apply_pdc(buffers, frames);
 
   for (int ch = 0; ch < channel_count_; ++ch) {
+    if (ch < static_cast<int>(output_cache_.size()) &&
+        frames <= output_cache_[ch].size())
+      std::copy_n(buffers[ch], frames, output_cache_[ch].data());
     float peak = 0.0f;
     for (uint32_t i = 0; i < frames; ++i)
       peak = std::max(peak, std::fabs(buffers[ch][i]));
@@ -184,6 +220,102 @@ void ChannelStrip::swap_inserts(size_t a, size_t b) {
 PluginInstance* ChannelStrip::insert_at(size_t index) const {
   if (index >= insert_count_.load(std::memory_order_acquire)) return nullptr;
   return insert_slots_[index].load(std::memory_order_acquire);
+}
+
+void ChannelStrip::set_insert_bypassed(size_t index, bool on) {
+  if (index >= kMaxInserts) return;
+  uint8_t flags = insert_flags_[index].load(std::memory_order_relaxed);
+  if (on) flags |= kBypass;
+  else flags = static_cast<uint8_t>(flags & ~kBypass);
+  insert_flags_[index].store(flags, std::memory_order_release);
+}
+
+bool ChannelStrip::insert_bypassed(size_t index) const {
+  if (index >= kMaxInserts) return false;
+  return (insert_flags_[index].load(std::memory_order_acquire) & kBypass) != 0;
+}
+
+void ChannelStrip::set_insert_post_fader(size_t index, bool on) {
+  if (index >= kMaxInserts) return;
+  uint8_t flags = insert_flags_[index].load(std::memory_order_relaxed);
+  if (on) flags |= kPostFader;
+  else flags = static_cast<uint8_t>(flags & ~kPostFader);
+  insert_flags_[index].store(flags, std::memory_order_release);
+}
+
+bool ChannelStrip::insert_post_fader(size_t index) const {
+  if (index >= kMaxInserts) return false;
+  return (insert_flags_[index].load(std::memory_order_acquire) & kPostFader) != 0;
+}
+
+uint32_t ChannelStrip::latency_samples() const {
+  uint32_t total = 0;
+  const size_t count = insert_count_.load(std::memory_order_acquire);
+  for (size_t i = 0; i < count; ++i) {
+    if (insert_bypassed(i)) continue;
+    PluginInstance* insert = insert_slots_[i].load(std::memory_order_acquire);
+    if (insert != nullptr) total += insert->latency_samples();
+  }
+  return total;
+}
+
+int ChannelStrip::extra_output_pairs() const {
+  const size_t count = insert_count_.load(std::memory_order_acquire);
+  for (size_t i = 0; i < count; ++i) {
+    PluginInstance* insert = insert_slots_[i].load(std::memory_order_acquire);
+    if (insert == nullptr || insert_bypassed(i)) continue;
+    const int pairs = insert->extra_output_pairs();
+    if (pairs > 0) return pairs;
+  }
+  return 0;
+}
+
+void ChannelStrip::copy_extra_output(int pair, float* left, float* right,
+                                     uint32_t frames) const {
+  const size_t count = insert_count_.load(std::memory_order_acquire);
+  for (size_t i = 0; i < count; ++i) {
+    PluginInstance* insert = insert_slots_[i].load(std::memory_order_acquire);
+    if (insert == nullptr || insert_bypassed(i)) continue;
+    if (insert->extra_output_pairs() <= 0) continue;
+    insert->copy_extra_output(pair, left, right, frames);
+    return;
+  }
+  std::fill_n(left, frames, 0.0f);
+  std::fill_n(right, frames, 0.0f);
+}
+
+const float* ChannelStrip::output_cache(int channel) const {
+  if (channel < 0 || channel >= static_cast<int>(output_cache_.size()))
+    return nullptr;
+  return output_cache_[channel].data();
+}
+
+void ChannelStrip::feed_sidechain(const float* const* buffers, int channels,
+                                  uint32_t frames) {
+  const size_t count = insert_count_.load(std::memory_order_acquire);
+  for (size_t i = 0; i < count; ++i) {
+    PluginInstance* insert = insert_slots_[i].load(std::memory_order_acquire);
+    if (insert != nullptr) insert->set_sidechain(buffers, channels, frames);
+  }
+}
+
+void ChannelStrip::apply_pdc(float* const* buffers, uint32_t frames) {
+  const uint32_t delay = pdc_delay_.load(std::memory_order_relaxed);
+  if (delay == 0 || delay_line_.empty()) return;
+  for (int ch = 0; ch < channel_count_ && ch < static_cast<int>(delay_line_.size());
+       ++ch) {
+    auto& line = delay_line_[ch];
+    if (line.size() <= delay) continue;
+    size_t write = delay_write_[ch];
+    for (uint32_t i = 0; i < frames; ++i) {
+      const size_t read = (write + line.size() - delay) % line.size();
+      const float incoming = buffers[ch][i];
+      buffers[ch][i] = line[read];
+      line[write] = incoming;
+      write = (write + 1) % line.size();
+    }
+    delay_write_[ch] = write;
+  }
 }
 
 }  // namespace nirbija

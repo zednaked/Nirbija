@@ -49,6 +49,21 @@ Rectangle {
         StripButton {
             width: 30
             height: 28
+            label: "⏮"
+            onClicked: mixer.rewind()
+        }
+
+        Text {
+            anchors.verticalCenter: parent.verticalCenter
+            text: mixer.positionLabel
+            color: mixer.masterClip ? Skin.arm : Skin.textDim
+            font.pixelSize: 12
+            font.bold: mixer.masterClip
+        }
+
+        StripButton {
+            width: 30
+            height: 28
             label: "●"
             active: root.recording
             activeColor: Skin.arm
@@ -70,6 +85,37 @@ Rectangle {
             active: root.metronome
             activeColor: Skin.solo
             onClicked: mixer.toggleMetronome()
+        }
+
+        StripButton {
+            width: 30
+            height: 28
+            label: "clk"
+            active: mixer.midiClock
+            onClicked: mixer.toggleMidiClock()
+        }
+
+        StripButton {
+            width: 28
+            height: 28
+            label: "D"
+            active: mixer.masterDim
+            onClicked: mixer.toggleMasterDim()
+        }
+        StripButton {
+            width: 28
+            height: 28
+            label: "M"
+            active: mixer.masterMute
+            activeColor: Skin.mute
+            onClicked: mixer.toggleMasterMute()
+        }
+        StripButton {
+            width: 28
+            height: 28
+            label: "Ø"
+            active: mixer.masterMono
+            onClicked: mixer.toggleMasterMono()
         }
 
         // Tempo is dragged rather than typed: it is a value you nudge while

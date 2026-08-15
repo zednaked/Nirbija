@@ -10,7 +10,7 @@ ApplicationWindow {
     minimumWidth: 640
     minimumHeight: 420
     visible: true
-    title: qsTr("Nirbija")
+    title: mixer.dirty ? qsTr("Nirbija •") : qsTr("Nirbija")
     color: Skin.background
 
     Shortcut {
@@ -20,6 +20,14 @@ ApplicationWindow {
     Shortcut {
         sequence: "Space"
         onActivated: mixer.togglePlay()
+    }
+    Shortcut {
+        sequence: StandardKey.Undo
+        onActivated: mixer.undo()
+    }
+    Shortcut {
+        sequence: StandardKey.Redo
+        onActivated: mixer.redo()
     }
 
     TopBar {
@@ -38,6 +46,12 @@ ApplicationWindow {
         onNavigatorClicked: navigator.open()
         onMatrixClicked: midiMatrix.open()
         onMenuRequested: item => slotMenu.openAt(item, [
+            { label: qsTr("Undo"),
+              enabled: mixer.canUndo,
+              action: () => mixer.undo() },
+            { label: qsTr("Redo"),
+              enabled: mixer.canRedo,
+              action: () => mixer.redo() },
             { label: qsTr("Rescan plugins"),
               action: () => mixer.plugins.rescan() },
             { label: qsTr("Recordings folder"),
@@ -135,6 +149,17 @@ ApplicationWindow {
                               if (!mixer.openInsertEditor(index, slot))
                                   paramEditor.openFor(index, slot)
                           } },
+                        { label: mixer.insertBypassed(index, slot)
+                              ? qsTr("Enable") : qsTr("Bypass"),
+                          action: () => mixer.setInsertBypassed(
+                              index, slot, !mixer.insertBypassed(index, slot)) },
+                        { label: mixer.insertPostFader(index, slot)
+                              ? qsTr("Pre-fader") : qsTr("Post-fader"),
+                          action: () => mixer.setInsertPostFader(
+                              index, slot, !mixer.insertPostFader(index, slot)) },
+                        { label: qsTr("Create extra outputs"),
+                          enabled: mixer.extraOutputPairs(index, slot) > 0,
+                          action: () => mixer.addTapChannels(index, slot) },
                         { label: qsTr("Move up"),
                           enabled: slot > 0,
                           action: () => mixer.moveInsert(index, slot, -1) },
@@ -214,6 +239,16 @@ ApplicationWindow {
                           action: () => mixer.learnMute(index) },
                         { label: qsTr("Clear MIDI maps"),
                           action: () => mixer.clearMidiMaps(index) },
+                        { label: qsTr("Duplicate"),
+                          action: () => mixer.duplicateChannel(index) },
+                        { label: qsTr("Move left"),
+                          enabled: index > 0,
+                          action: () => mixer.moveChannel(index, -1) },
+                        { label: qsTr("Move right"),
+                          enabled: index < mixer.rowCount() - 1,
+                          action: () => mixer.moveChannel(index, 1) },
+                        { label: qsTr("Direct output…"),
+                          action: () => portPicker.openFor("channelSink", index, item) },
                         { label: qsTr("Remove channel"), danger: true,
                           action: () => mixer.removeChannel(index) }
                     ], model.name)
@@ -350,6 +385,8 @@ ApplicationWindow {
         onPicked: port => {
             if (kind === "sink")
                 mixer.connectMaster(port)
+            else if (kind === "channelSink")
+                mixer.connectChannelSink(targetRow, port)
             else
                 mixer.connectSource(targetRow, port, kind === "midi")
         }

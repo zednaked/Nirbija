@@ -38,6 +38,32 @@ class JackInputSource : public AudioSource {
 
 // Reads a channel's MIDI straight out of its JACK port. Like the audio source,
 // it only runs inside the process callback.
+class TapSource : public AudioSource {
+ public:
+  TapSource(AudioGraph* graph, size_t source, int pair)
+      : graph_(graph), source_(source), pair_(pair) {}
+
+  void read(float* const* dest, int channels, uint32_t frames) override {
+    float left[8192];
+    float right[8192];
+    const uint32_t n = std::min(frames, 8192u);
+    graph_->copy_tap(source_, pair_, left, right, n);
+    for (uint32_t i = 0; i < n; ++i) {
+      dest[0][i] = left[i];
+      if (channels > 1) dest[1][i] = right[i];
+    }
+    if (n < frames) {
+      std::fill_n(dest[0] + n, frames - n, 0.0f);
+      if (channels > 1) std::fill_n(dest[1] + n, frames - n, 0.0f);
+    }
+  }
+
+ private:
+  AudioGraph* graph_;
+  size_t source_;
+  int pair_;
+};
+
 class JackMidiSource : public MidiSource {
  public:
   explicit JackMidiSource(jack_port_t* port) : port_(port) {}
@@ -93,6 +119,8 @@ bool Engine::start(const std::string& client_name) {
 
   control_in_ = jack_port_register(client_, "control_in", JACK_DEFAULT_MIDI_TYPE,
                                    JackPortIsInput, 0);
+  clock_out_ = jack_port_register(client_, "clock_out", JACK_DEFAULT_MIDI_TYPE,
+                                  JackPortIsOutput, 0);
 
   jack_set_process_callback(client_, jack_process_trampoline, this);
   jack_set_buffer_size_callback(client_, jack_buffer_size_trampoline, this);
@@ -111,6 +139,7 @@ void Engine::stop() {
   client_ = nullptr;
   master_out_[0] = master_out_[1] = nullptr;
   control_in_ = nullptr;
+  clock_out_ = nullptr;
 }
 
 size_t Engine::add_channel(const std::string& name, int channel_count) {
@@ -161,6 +190,13 @@ size_t Engine::add_channel(const std::string& name, int channel_count) {
   record.audio[0] = ports[0];
   record.audio[1] = ports[1];
   record.midi = midi_port;
+  for (int ch = 0; ch < channel_count; ++ch) {
+    const std::string out_name =
+        std::to_string(index + 1) +
+        (channel_count == 1 ? "_out" : (ch == 0 ? "_out_l" : "_out_r"));
+    record.audio_out[ch] = jack_port_register(
+        client_, out_name.c_str(), JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
+  }
   channel_ports_.push_back(record);
 
   return graph_->add_channel(name, channel_count,
@@ -369,6 +405,60 @@ std::string Engine::current_master_sink() const {
   return found;
 }
 
+bool Engine::connect_channel_sink(size_t channel, const std::string& port) {
+  if (client_ == nullptr || channel >= channel_ports_.size()) return false;
+  for (jack_port_t* out : channel_ports_[channel].audio_out)
+    if (out != nullptr) jack_port_disconnect(client_, out);
+  if (port.empty() || channel_ports_[channel].audio_out[0] == nullptr)
+    return true;
+  bool ok = jack_connect(client_, jack_port_name(channel_ports_[channel].audio_out[0]),
+                         port.c_str()) == 0;
+  const std::vector<std::string> all = available_sinks(false);
+  const auto it = std::find(all.begin(), all.end(), port);
+  if (channel_ports_[channel].audio_out[1] != nullptr && it != all.end() &&
+      std::next(it) != all.end()) {
+    const std::string& next = *std::next(it);
+    if (next.rfind(port.substr(0, port.find(':')), 0) == 0)
+      ok = jack_connect(client_,
+                        jack_port_name(channel_ports_[channel].audio_out[1]),
+                        next.c_str()) == 0 &&
+           ok;
+  }
+  return ok;
+}
+
+std::string Engine::current_channel_sink(size_t channel) const {
+  if (client_ == nullptr || channel >= channel_ports_.size()) return {};
+  jack_port_t* port = channel_ports_[channel].audio_out[0];
+  if (port == nullptr) return {};
+  const char** connections = jack_port_get_all_connections(client_, port);
+  std::string found;
+  if (connections != nullptr && connections[0] != nullptr) found = connections[0];
+  if (connections != nullptr) jack_free(connections);
+  return found;
+}
+
+size_t Engine::add_tap_channel(size_t source, int pair) {
+  if (client_ == nullptr) return kMaxChannels;
+  const size_t index = graph_->next_channel_slot();
+  if (index >= kMaxChannels) return kMaxChannels;
+  while (channel_ports_.size() <= index) channel_ports_.push_back({});
+  return graph_->add_channel(
+      "tap", 2, std::make_unique<TapSource>(graph_.get(), source, pair), nullptr);
+}
+
+void Engine::inject_midi(size_t channel, const MidiEvent& event) {
+  injected_midi_.push({channel, event});
+}
+
+void Engine::set_time_signature(int num, int den) {
+  EngineCommand command;
+  command.kind = EngineCommand::Kind::SetTimeSig;
+  command.channel = static_cast<size_t>(std::max(1, num));
+  command.value = static_cast<float>(std::max(1, den));
+  post(command);
+}
+
 bool Engine::connect_master_to_default_output() {
   // Physical playback ports come back in the server's own order, so the first
   // pair is the default output.
@@ -421,8 +511,16 @@ void Engine::drain_commands() {
       continue;
     }
     if (command.kind == EngineCommand::Kind::Rewind) {
-      transport_frame_ = 0;
+      transport_frame_.store(0, std::memory_order_relaxed);
+      clock_phase_ = 0.0;
       transport_changed_ = true;
+      continue;
+    }
+    if (command.kind == EngineCommand::Kind::SetTimeSig) {
+      const int num = static_cast<int>(command.channel);
+      const int den = static_cast<int>(command.value);
+      if (num > 0) time_num_.store(num, std::memory_order_relaxed);
+      if (den > 0) time_den_.store(den, std::memory_order_relaxed);
       continue;
     }
     if (command.kind == EngineCommand::Kind::SetMetronome) {
@@ -448,6 +546,8 @@ void Engine::drain_commands() {
       case EngineCommand::Kind::SetTempo:
       case EngineCommand::Kind::Rewind:
       case EngineCommand::Kind::SetMetronome:
+      case EngineCommand::Kind::SetTimeSig:
+      case EngineCommand::Kind::InjectMidi:
       case EngineCommand::Kind::None:
         break;
     }
@@ -488,15 +588,22 @@ int Engine::process(jack_nframes_t frames) {
     }
   }
 
+  InjectedMidi injected;
+  while (injected_midi_.pop(injected))
+    graph_->push_injected_midi(injected.channel, injected.event);
+
   const bool playing = playing_.load(std::memory_order_relaxed);
   const double tempo = tempo_.load(std::memory_order_relaxed);
+  const uint64_t frame = transport_frame_.load(std::memory_order_relaxed);
 
   TransportInfo transport;
   transport.playing = playing;
   transport.tempo_bpm = tempo;
-  transport.frame = transport_frame_;
+  transport.numerator = time_num_.load(std::memory_order_relaxed);
+  transport.denominator = time_den_.load(std::memory_order_relaxed);
+  transport.frame = frame;
   transport.seconds = sample_rate_ > 0.0
-                          ? static_cast<double>(transport_frame_) / sample_rate_
+                          ? static_cast<double>(frame) / sample_rate_
                           : 0.0;
   transport.beats = transport.seconds * tempo / 60.0;
   transport.changed = transport_changed_;
@@ -511,9 +618,43 @@ int Engine::process(jack_nframes_t frames) {
   graph_->render(master, frames);
   render_metronome(master, frames, playing, tempo, transport.beats);
 
-  // The clock only moves while playing; stopped means parked, not paused
-  // somewhere the plugins cannot see.
-  if (playing) transport_frame_ += frames;
+  for (size_t i = 0; i < channel_ports_.size(); ++i) {
+    if (!graph_->channel_alive(i)) continue;
+    ChannelStrip& strip = graph_->channel(i);
+    for (int ch = 0; ch < 2; ++ch) {
+      jack_port_t* port = channel_ports_[i].audio_out[ch];
+      if (port == nullptr) continue;
+      auto* dest = static_cast<float*>(jack_port_get_buffer(port, frames));
+      const float* src = strip.output_cache(std::min(ch, strip.channel_count() - 1));
+      if (dest == nullptr) continue;
+      if (src != nullptr) std::copy_n(src, frames, dest);
+      else std::fill_n(dest, frames, 0.0f);
+    }
+  }
+
+  if (clock_out_ != nullptr) {
+    void* buffer = jack_port_get_buffer(clock_out_, frames);
+    if (buffer != nullptr) {
+      jack_midi_clear_buffer(buffer);
+      if (clock_enabled_.load(std::memory_order_relaxed) && playing &&
+          sample_rate_ > 0.0 && tempo > 0.0) {
+        const double frames_per_clock =
+            sample_rate_ / (tempo / 60.0 * 24.0);
+        for (uint32_t i = 0; i < frames; ++i) {
+          clock_phase_ += 1.0;
+          if (clock_phase_ >= frames_per_clock) {
+            clock_phase_ -= frames_per_clock;
+            uint8_t msg = 0xf8;
+            jack_midi_event_write(buffer, i, &msg, 1);
+          }
+        }
+      } else if (!playing) {
+        clock_phase_ = 0.0;
+      }
+    }
+  }
+
+  if (playing) transport_frame_.store(frame + frames, std::memory_order_relaxed);
   return 0;
 }
 
@@ -534,7 +675,8 @@ void Engine::render_metronome(float* const* master, uint32_t frames, bool playin
       if (std::floor(beat_now) != std::floor(beat_next) || beat_now == 0.0) {
         const long long beat = static_cast<long long>(
             beat_now == 0.0 ? 0 : std::floor(beat_next));
-        const bool downbeat = beat % 4 == 0;
+        const int bar = std::max(1, time_num_.load(std::memory_order_relaxed));
+        const bool downbeat = beat % bar == 0;
         click_length_ = static_cast<uint32_t>(sample_rate_ * 0.03);
         click_remaining_ = click_length_;
         click_phase_ = 0.0;

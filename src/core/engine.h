@@ -27,6 +27,8 @@ struct EngineCommand {
     SetTempo,
     Rewind,
     SetMetronome,
+    SetTimeSig,
+    InjectMidi,
   } kind = Kind::None;
   size_t channel = 0;
   // Buses live in their own list in the graph, so the index alone is ambiguous.
@@ -48,6 +50,7 @@ class Engine {
   uint32_t block_frames() const { return block_frames_; }
 
   AudioGraph& graph() { return *graph_; }
+  const AudioGraph& graph() const { return *graph_; }
 
   // For wiring ports from outside, which is how a session restores its
   // connections and how the tests plug a sender in.
@@ -76,6 +79,19 @@ class Engine {
 
   bool connect_master(const std::string& left, const std::string& right);
   std::string current_master_sink() const;
+
+  // Direct hardware out for a channel, independent of its mix destination.
+  bool connect_channel_sink(size_t channel, const std::string& port);
+  std::string current_channel_sink(size_t channel) const;
+
+  // A later strip that reads extra stereo pair `pair` of the plugin on
+  // `source` (0 = first pair beyond the source strip's own width).
+  size_t add_tap_channel(size_t source, int pair);
+
+  void inject_midi(size_t channel, const MidiEvent& event);
+  void set_midi_clock(bool on) { clock_enabled_.store(on, std::memory_order_relaxed); }
+  bool midi_clock() const { return clock_enabled_.load(std::memory_order_relaxed); }
+  void set_time_signature(int num, int den);
 
   // Wires the master to the system's default output, the way a mixer that just
   // opened is expected to already be audible.
@@ -107,6 +123,9 @@ class Engine {
   bool playing() const { return playing_.load(std::memory_order_relaxed); }
   double tempo() const { return tempo_.load(std::memory_order_relaxed); }
   bool metronome() const { return metronome_.load(std::memory_order_relaxed); }
+  uint64_t transport_frame() const { return transport_frame_.load(std::memory_order_relaxed); }
+  int time_numerator() const { return time_num_.load(std::memory_order_relaxed); }
+  int time_denominator() const { return time_den_.load(std::memory_order_relaxed); }
 
   // UI thread. Registers this channel's JACK input ports and adds the strip.
   // Returns the channel index, or kMaxChannels if the graph is full or the
@@ -142,7 +161,13 @@ class Engine {
   // inside the graph only ever read from them.
   struct ChannelPorts {
     jack_port_t* audio[2] = {nullptr, nullptr};
+    jack_port_t* audio_out[2] = {nullptr, nullptr};
     jack_port_t* midi = nullptr;
+  };
+
+  struct InjectedMidi {
+    size_t channel = 0;
+    MidiEvent event;
   };
 
   std::vector<std::string> ports_matching(unsigned long flags, const char* type,
@@ -151,7 +176,9 @@ class Engine {
   jack_client_t* client_ = nullptr;
   jack_port_t* master_out_[2] = {nullptr, nullptr};
   jack_port_t* control_in_ = nullptr;
+  jack_port_t* clock_out_ = nullptr;
   RtQueue<MidiEvent, 256> control_events_;
+  RtQueue<InjectedMidi, 256> injected_midi_;
   std::vector<ChannelPorts> channel_ports_;
 
   double sample_rate_ = 0.0;
@@ -163,6 +190,10 @@ class Engine {
   std::atomic<bool> playing_{false};
   std::atomic<double> tempo_{120.0};
   std::atomic<bool> metronome_{false};
+  std::atomic<bool> clock_enabled_{false};
+  std::atomic<int> time_num_{4};
+  std::atomic<int> time_den_{4};
+  std::atomic<uint64_t> transport_frame_{0};
 
   // Click synthesis state, audio thread only.
   uint32_t click_remaining_ = 0;
@@ -172,8 +203,7 @@ class Engine {
 
   void render_metronome(float* const* master, uint32_t frames, bool playing,
                         double tempo, double start_beats);
-  // Song position in frames, advanced by the audio thread while playing.
-  uint64_t transport_frame_ = 0;
+  double clock_phase_ = 0.0;
   bool transport_changed_ = true;
   RtQueue<EngineCommand, 1024> commands_;
 };

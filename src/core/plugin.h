@@ -124,6 +124,29 @@ class PluginInstance {
 
   virtual const PluginDescriptor& descriptor() const = 0;
 
+  // Reported latency in samples, for host delay compensation. Zero if none.
+  virtual uint32_t latency_samples() const { return 0; }
+
+  // Stereo pairs beyond the strip's own width. A 16-out drum sampler on a
+  // stereo strip reports 7: the first pair stays on this strip, the rest
+  // can be tapped onto later channels.
+  virtual int extra_output_pairs() const { return 0; }
+  virtual void copy_extra_output(int pair, float* left, float* right,
+                                 uint32_t frames) {
+    (void)pair;
+    (void)left;
+    (void)right;
+    (void)frames;
+  }
+
+  // Sidechain / key input, one block, already mixed to `channels` wide.
+  virtual void set_sidechain(const float* const* buffers, int channels,
+                             uint32_t frames) {
+    (void)buffers;
+    (void)channels;
+    (void)frames;
+  }
+
   // Null when the plugin ships no editor this host can embed. Backends that
   // have not implemented editors yet inherit this.
   virtual std::unique_ptr<PluginGui> create_gui() { return nullptr; }
