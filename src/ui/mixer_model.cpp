@@ -689,6 +689,8 @@ QString MixerModel::insertFilePath(int row, int slot) const {
   return QString::fromStdString(player->path());
 }
 
+void MixerModel::closeAllEditors() { editors_.clear(); }
+
 void MixerModel::pollLevels() {
   if (!engine_.running()) return;
 

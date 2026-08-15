@@ -24,6 +24,7 @@ ApplicationWindow {
         metronome: mixer.metronome
         recordingLabel: mixer.recordingLabel
         onMasterOutputClicked: portPicker.openFor("sink", -1, topBar)
+        onNavigatorClicked: navigator.open()
     }
 
     // Strips scroll horizontally as a session grows, which is the one direction
@@ -270,6 +271,19 @@ ApplicationWindow {
     RenameDialog {
         id: renameDialog
         onAccepted: name => mixer.renameChannel(targetRow, name)
+    }
+
+    Navigator {
+        id: navigator
+        x: parent.width - width - 8
+        y: topBar.height + 8
+        onJumpTo: row => mixerArea.contentX =
+                      Math.max(0, Math.min(row * (Skin.stripWidth + Skin.gap),
+                                           mixerArea.contentWidth - mixerArea.width))
+        onOpenInsert: (row, slot) => {
+            if (!mixer.openInsertEditor(row, slot))
+                paramEditor.openFor(row, slot)
+        }
     }
 
     PortPicker {

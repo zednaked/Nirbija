@@ -133,6 +133,7 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE QVariantList insertParameters(int row, int slot) const;
   Q_INVOKABLE void setInsertParameter(int row, int slot, int id, qreal value);
   Q_INVOKABLE QString insertName(int row, int slot) const;
+  Q_INVOKABLE void closeAllEditors();
 
   // File player extras: only meaningful when the insert is one.
   Q_INVOKABLE bool insertIsFilePlayer(int row, int slot) const;
