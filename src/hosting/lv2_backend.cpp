@@ -167,13 +167,15 @@ class Lv2Gui : public PluginGui {
  public:
   Lv2Gui(std::shared_ptr<Lv2World> world, const LilvPlugin* plugin,
          LilvInstance* instance, std::vector<float>* control_values,
-         std::vector<PortInfo> control_ports, AtomBridge* bridge)
+         std::vector<PortInfo> control_ports, AtomBridge* bridge,
+         std::atomic<bool>* state_dirty)
       : world_(std::move(world)),
         plugin_(plugin),
         instance_(instance),
         control_values_(control_values),
         control_ports_(std::move(control_ports)),
         bridge_(bridge),
+        state_dirty_(state_dirty),
         event_transfer_urid_(world_->urids.map_string(LV2_ATOM__eventTransfer)) {}
 
   ~Lv2Gui() override { detach(); }
@@ -393,6 +395,13 @@ class Lv2Gui : public PluginGui {
                          uint32_t buffer_size, uint32_t format, const void* buffer) {
     auto* self = static_cast<Lv2Gui*>(controller);
 
+    // The editor speaking to its DSP is the only thing LV2 lets the host see.
+    // It covers a knob turned in the plugin's window; it does not cover a
+    // sampler told to load a kit, which the UI and the DSP arrange between
+    // themselves through instance-access. Closing the editor stands in there.
+    if (self->state_dirty_ != nullptr)
+      self->state_dirty_->store(true, std::memory_order_release);
+
     if (format == self->event_transfer_urid_) {
       if (self->bridge_ == nullptr) return;
       AtomBridge::Message message;
@@ -428,6 +437,7 @@ class Lv2Gui : public PluginGui {
   // What the editor has already been told, so idle only sends what moved.
   std::vector<float> last_sent_;
   AtomBridge* bridge_;
+  std::atomic<bool>* state_dirty_;
   LV2_URID event_transfer_urid_;
   LV2_Feature parent_feature_{}, instance_feature_{}, idle_feature_{};
   LV2_Feature resize_feature_{}, map_feature_{}, unmap_feature_{};
@@ -571,14 +581,12 @@ class Lv2Instance : public PluginInstance {
 
   void set_channel_layout(int channels) override { strip_channels_ = channels; }
 
+  // The port is found once in scan_ports, not by comparing strings on the
+  // audio thread: this runs twice per strip per block.
   uint32_t latency_samples() const override {
-    for (size_t i = 0; i < control_out_.size() && i < control_outputs_scratch_.size();
-         ++i) {
-      if (control_out_[i].symbol == "latency")
-        return static_cast<uint32_t>(
-            std::max(0.0f, control_outputs_scratch_[i]));
-    }
-    return 0;
+    if (latency_port_ < 0) return 0;
+    return static_cast<uint32_t>(
+        std::max(0.0f, control_outputs_scratch_[latency_port_]));
   }
 
   int extra_output_pairs() const override {
@@ -662,13 +670,7 @@ class Lv2Instance : public PluginInstance {
     // prove it is out of lilv_instance_run, and only then is the instance
     // deactivated, restored with the full feature set, and brought back.
     restoring_.store(true, std::memory_order_release);
-    const uint64_t seen = processed_generation_.load(std::memory_order_acquire);
-    for (int spins = 0;
-         spins < 100 &&
-         processed_generation_.load(std::memory_order_acquire) < seen + 2;
-         ++spins) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    }
+    wait_until_parked();
 
     lilv_instance_deactivate(instance_);
     lilv_state_restore(state, instance_, &Lv2Instance::set_port_value, this, 0,
@@ -693,10 +695,39 @@ class Lv2Instance : public PluginInstance {
       bridge_live_.store(bridge_.get(), std::memory_order_release);
     }
     return std::make_unique<Lv2Gui>(world_, plugin_, instance_, &control_values_,
-                                    control_in_, bridge_.get());
+                                    control_in_, bridge_.get(), &state_dirty_);
+  }
+
+  bool take_state_dirty() override {
+    return state_dirty_.exchange(false, std::memory_order_acq_rel);
   }
 
  private:
+  // Waits for two blocks that observed the restoring_ flag, which is what
+  // proves the audio thread is out of lilv_instance_run.
+  //
+  // The counter only moves inside that branch, so no movement at all means
+  // process() is not being called — the host graph is already parked, or there
+  // is no audio thread. That is the common case on session load, and the old
+  // unconditional 100 x 2 ms spin charged it 200 ms for every plugin.
+  void wait_until_parked() {
+    const uint64_t seen = processed_generation_.load(std::memory_order_acquire);
+
+    bool moving = false;
+    for (int spins = 0; spins < 5 && !moving; ++spins) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      moving = processed_generation_.load(std::memory_order_acquire) > seen;
+    }
+    if (!moving) return;  // nothing is calling process(); nothing to wait for
+
+    for (int spins = 0;
+         spins < 100 &&
+         processed_generation_.load(std::memory_order_acquire) < seen + 2;
+         ++spins) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+  }
+
   static constexpr size_t kAtomBufferBytes = 4096;
 
   // State is kept in memory rather than in a bundle on disk, so the subject URI
@@ -769,6 +800,13 @@ class Lv2Instance : public PluginInstance {
       }
     }
     control_outputs_scratch_.assign(control_out_.size(), 0.0f);
+
+    for (size_t i = 0; i < control_out_.size(); ++i) {
+      if (control_out_[i].symbol == "latency") {
+        latency_port_ = static_cast<int>(i);
+        break;
+      }
+    }
   }
 
   // --- worker -------------------------------------------------------------
@@ -911,10 +949,15 @@ class Lv2Instance : public PluginInstance {
       AtomBridge::Message message;
       while (bridge->to_plugin.pop(message)) {
         if (message.port != atom_in_[0].index) continue;
+        if (message.size < sizeof(LV2_Atom)) continue;
         const auto* atom = reinterpret_cast<const LV2_Atom*>(message.data.data());
+        // The header's own length field is the editor's word, not ours: an
+        // atom claiming more than arrived would read off the end of the ring.
+        const size_t total = sizeof(LV2_Atom) + atom->size;
+        if (total > message.size) continue;
         lv2_atom_forge_frame_time(&forge_, 0);
-        lv2_atom_forge_raw(&forge_, atom, sizeof(LV2_Atom) + atom->size);
-        lv2_atom_forge_pad(&forge_, sizeof(LV2_Atom) + atom->size);
+        lv2_atom_forge_raw(&forge_, atom, total);
+        lv2_atom_forge_pad(&forge_, total);
       }
     }
 
@@ -928,7 +971,7 @@ class Lv2Instance : public PluginInstance {
     lv2_atom_forge_pop(&forge_, &sequence);
     pending_midi_count_ = 0;
 
-    if (std::getenv("NIRBIJA_DEBUG_TRANSPORT") != nullptr) {
+    if (debug_transport_) {
       const auto* written =
           reinterpret_cast<const LV2_Atom_Sequence*>(atom_buffers_[0].data());
       uint32_t events = 0;
@@ -1021,6 +1064,10 @@ class Lv2Instance : public PluginInstance {
 
   int strip_channels_ = 2;
   uint32_t max_block_frames_ = 0;
+  // Index into control_out_ of the port named "latency", or -1 for none.
+  int latency_port_ = -1;
+  // Read once at construction, not per block: getenv walks the environment.
+  const bool debug_transport_ = std::getenv("NIRBIJA_DEBUG_TRANSPORT") != nullptr;
 
   std::vector<PortInfo> audio_in_, audio_out_, control_in_, control_out_;
   std::vector<PortInfo> atom_in_, atom_out_;
@@ -1046,6 +1093,7 @@ class Lv2Instance : public PluginInstance {
   bool has_transport_ = false;
 
   std::atomic<bool> restoring_{false};
+  std::atomic<bool> state_dirty_{false};
   std::atomic<uint64_t> processed_generation_{0};
 
   // Fixed so queueing never allocates on the audio thread. A block carrying

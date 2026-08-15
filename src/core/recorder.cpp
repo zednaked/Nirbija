@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <thread>
 
 namespace nirbija {
 namespace {
@@ -103,6 +104,13 @@ void Recorder::stop() {
 
   // The audio thread stops first, then the writer drains what is left.
   recording_.store(false, std::memory_order_release);
+
+  // Any write() already past its check still holds a Track. Freeing them now
+  // would pull the ring out from under it, so wait for the last one out. This
+  // is the UI thread; a block is the longest it can possibly take.
+  while (writers_in_flight_.load(std::memory_order_acquire) != 0)
+    std::this_thread::yield();
+
   writer_running_.store(false, std::memory_order_release);
   if (writer_.joinable()) writer_.join();
 
@@ -116,22 +124,31 @@ void Recorder::stop() {
 
 void Recorder::write(size_t track_index, const float* const* channels,
                      int channel_count, uint32_t frames) {
-  if (!recording() || track_index >= tracks_.size()) return;
+  // Announce first, check second. The other order leaves a window where stop()
+  // sees no writers, frees the tracks, and this call then walks into them.
+  writers_in_flight_.fetch_add(1, std::memory_order_acq_rel);
+  if (recording() && track_index < tracks_.size()) {
+    Track& track = *tracks_[track_index];
+    const size_t capacity = track.ring_frames();
+    const size_t write_frame = track.write_frame.load(std::memory_order_relaxed);
+    size_t slot = (write_frame % capacity) * static_cast<size_t>(track.channels);
+    const size_t wrap = track.ring.size();
 
-  Track& track = *tracks_[track_index];
-  const size_t capacity = track.ring_frames();
-  const size_t write_frame = track.write_frame.load(std::memory_order_relaxed);
-
-  for (uint32_t f = 0; f < frames; ++f) {
-    const size_t slot = ((write_frame + f) % capacity) * track.channels;
-    for (int ch = 0; ch < track.channels; ++ch) {
-      // A mono channel is written to both sides rather than to half a file.
-      const int source = std::min(ch, channel_count - 1);
-      track.ring[slot + ch] = channels[source][f];
+    for (uint32_t f = 0; f < frames; ++f) {
+      for (int ch = 0; ch < track.channels; ++ch) {
+        // A mono channel is written to both sides rather than to half a file.
+        const int source = std::min(ch, channel_count - 1);
+        track.ring[slot + ch] = channels[source][f];
+      }
+      // Walked rather than recomputed: the modulo per sample per channel was
+      // a division in the innermost loop of the audio thread.
+      slot += static_cast<size_t>(track.channels);
+      if (slot >= wrap) slot = 0;
     }
-  }
 
-  track.write_frame.store(write_frame + frames, std::memory_order_release);
+    track.write_frame.store(write_frame + frames, std::memory_order_release);
+  }
+  writers_in_flight_.fetch_sub(1, std::memory_order_release);
 }
 
 void Recorder::advance(uint32_t frames) {

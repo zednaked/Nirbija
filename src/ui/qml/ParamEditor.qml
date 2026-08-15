@@ -1,8 +1,13 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls.Basic
+import QtQuick.Layouts
+import Nirbija
 
 // The editor a plugin gets when it ships none of its own: every parameter as a
-// horizontal slider. Plain, but it makes UI-less plugins fully usable.
+// horizontal track. Plain, but it makes UI-less plugins fully usable — and with
+// the wheel and the arrow keys on each row, usable precisely.
 Popup {
     id: root
 
@@ -11,166 +16,166 @@ Popup {
     property string pluginName: ""
     property var parameters: []
 
-    width: 420
-    height: Math.min(560, 64 + parameters.length * 34)
+    width: Skin.px(460)
+    height: Math.min(Skin.px(600), Skin.px(80) + parameters.length * Skin.px(34))
     modal: true
     anchors.centerIn: Overlay.overlay
-    padding: 10
+    padding: Skin.spacingL
+    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
     background: Rectangle {
-        color: Skin.strip
+        color: Skin.popup
         border.width: 1
-        border.color: Skin.line
-        radius: Skin.radius
+        border.color: Skin.border
+        radius: Skin.radiusL
+    }
+
+    enter: Transition {
+        NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Skin.fast }
     }
 
     function openFor(row, slot) {
-        targetRow = row
-        targetSlot = slot
-        pluginName = mixer.insertName(row, slot)
-        parameters = mixer.insertParameters(row, slot)
-        open()
+        root.targetRow = row
+        root.targetSlot = slot
+        root.pluginName = Mixer.insertName(row, slot)
+        root.parameters = Mixer.insertParameters(row, slot)
+        root.open()
     }
 
-    Column {
-        anchors.fill: parent
-        spacing: 6
+    contentItem: ColumnLayout {
+        spacing: Skin.spacingS
 
         Text {
-            width: parent.width
+            Layout.fillWidth: true
             text: root.pluginName
             color: Skin.text
-            font.pixelSize: 13
+            font.pixelSize: Skin.fontL
             font.bold: true
             elide: Text.ElideRight
         }
 
-        Row {
-            visible: mixer.insertIsLooper(root.targetRow, root.targetSlot)
-            spacing: 6
+        Text {
+            Layout.fillWidth: true
+            visible: root.parameters.length > 0
+            text: qsTr("Drag or scroll a row; Shift for fine. Right-click a row to bind it to a controller.")
+            color: Skin.textDim
+            font.pixelSize: Skin.fontS
+            wrapMode: Text.WordWrap
+        }
+
+        Text {
+            Layout.fillWidth: true
+            visible: root.parameters.length === 0
+            text: qsTr("This plugin exposes no parameters to the host.")
+            color: Skin.textDim
+            font.pixelSize: Skin.font
+            wrapMode: Text.WordWrap
+        }
+
+        RowLayout {
+            visible: Mixer.insertIsLooper(root.targetRow, root.targetSlot)
+            spacing: Skin.spacingS
+
             StripButton {
-                width: 70
-                height: 26
+                Layout.preferredWidth: Skin.px(76)
                 label: qsTr("Rec")
-                onClicked: mixer.setLooperRecord(root.targetRow, root.targetSlot, true)
+                activeColor: Skin.arm
+                tip: qsTr("Arm the loop for recording; it starts at the next cycle.")
+                onClicked: Mixer.setLooperRecord(root.targetRow, root.targetSlot, true)
             }
             StripButton {
-                width: 70
-                height: 26
+                Layout.preferredWidth: Skin.px(76)
                 label: qsTr("Play")
-                onClicked: mixer.setLooperPlay(root.targetRow, root.targetSlot, true)
+                activeColor: Skin.meterLow
+                tip: qsTr("Play the recorded loop.")
+                onClicked: Mixer.setLooperPlay(root.targetRow, root.targetSlot, true)
             }
             StripButton {
-                width: 70
-                height: 26
+                Layout.preferredWidth: Skin.px(76)
                 label: qsTr("Clear")
-                onClicked: mixer.clearLooper(root.targetRow, root.targetSlot)
+                danger: true
+                tip: qsTr("Throw the loop away.")
+                onClicked: Mixer.clearLooper(root.targetRow, root.targetSlot)
+            }
+
+            Item {
+                Layout.fillWidth: true
             }
         }
 
         ListView {
             id: list
-            width: parent.width
-            height: parent.height - 30
+            Layout.fillWidth: true
+            Layout.fillHeight: true
             clip: true
-            spacing: 4
+            spacing: Skin.spacingS
             model: root.parameters
             boundsBehavior: Flickable.StopAtBounds
+            reuseItems: true
+
+            ScrollBar.vertical: ScrollBar {
+                policy: list.contentHeight > list.height ? ScrollBar.AsNeeded
+                                                         : ScrollBar.AlwaysOff
+            }
 
             delegate: Item {
+                id: parameter
+                required property var modelData
+
                 width: list.width
-                height: 30
+                height: Skin.px(26)
+
+                readonly property real span: modelData.max - modelData.min
+                // Kept locally while dragging so the bar follows the finger
+                // without re-fetching the whole list.
+                property real liveValue: modelData.value
 
                 Text {
                     id: label
-                    width: 150
+                    width: Skin.px(150)
                     anchors.verticalCenter: parent.verticalCenter
-                    text: modelData.name
+                    text: parameter.modelData.name
                     color: Skin.textDim
-                    font.pixelSize: 11
+                    font.pixelSize: Skin.font
                     elide: Text.ElideRight
                 }
 
-                Rectangle {
-                    id: track
+                ValueTrack {
                     anchors.left: label.right
-                    anchors.right: readout.left
-                    anchors.leftMargin: 8
-                    anchors.rightMargin: 8
-                    anchors.verticalCenter: parent.verticalCenter
-                    height: 16
-                    radius: Skin.radius
-                    color: Skin.slotEmpty
-                    border.width: 1
-                    border.color: Skin.line
-
-                    // The filled part is the value; the whole track is a drag
-                    // surface, so there is no tiny handle to hunt for.
-                    Rectangle {
-                        readonly property real span: modelData.max - modelData.min
-                        anchors.left: parent.left
-                        anchors.top: parent.top
-                        anchors.bottom: parent.bottom
-                        anchors.margins: 1
-                        radius: Skin.radius
-                        color: Skin.accent
-                        opacity: 0.55
-                        width: span > 0
-                               ? Math.max(0, Math.min(1,
-                                     (dragArea.liveValue - modelData.min) / span))
-                                 * (parent.width - 2)
-                               : 0
-                    }
-
-                    MouseArea {
-                        id: dragArea
-                        anchors.fill: parent
-                        acceptedButtons: Qt.LeftButton | Qt.RightButton
-
-                        // Kept locally while dragging so the bar follows the
-                        // finger without re-fetching the whole list.
-                        property real liveValue: modelData.value
-
-                        function apply(x) {
-                            const span = modelData.max - modelData.min
-                            const position = Math.max(0, Math.min(1, x / width))
-                            liveValue = modelData.min + position * span
-                            mixer.setInsertParameter(root.targetRow,
-                                                     root.targetSlot,
-                                                     modelData.id, liveValue)
-                        }
-
-                        onPressed: mouse => {
-                            // Right click binds a hardware control to this
-                            // parameter instead of moving it.
-                            if (mouse.button === Qt.RightButton) {
-                                mixer.learnInsertParam(root.targetRow,
-                                                       root.targetSlot,
-                                                       modelData.id,
-                                                       modelData.min,
-                                                       modelData.max)
-                                return
-                            }
-                            apply(mouse.x)
-                        }
-                        onPositionChanged: mouse => {
-                            if (pressed)
-                                apply(mouse.x)
-                        }
-                    }
-                }
-
-                Text {
-                    id: readout
-                    width: 52
                     anchors.right: parent.right
+                    anchors.leftMargin: Skin.spacing
+                    anchors.rightMargin: Skin.spacingL
                     anchors.verticalCenter: parent.verticalCenter
-                    text: Math.abs(dragArea.liveValue) >= 100
-                          ? dragArea.liveValue.toFixed(0)
-                          : dragArea.liveValue.toFixed(2)
-                    color: Skin.text
-                    font.pixelSize: 10
-                    horizontalAlignment: Text.AlignRight
+                    height: Skin.px(18)
+
+                    // The rows scroll, so a drag has to prove itself before it
+                    // wins the gesture from the list.
+                    pressThreshold: -1
+                    value: parameter.span > 0
+                           ? (parameter.liveValue - parameter.modelData.min)
+                             / parameter.span
+                           : 0
+                    valueText: Math.abs(parameter.liveValue) >= 100
+                               ? parameter.liveValue.toFixed(0)
+                               : parameter.liveValue.toFixed(2)
+                    tip: qsTr("%1, from %2 to %3.")
+                             .arg(parameter.modelData.name)
+                             .arg(parameter.modelData.min)
+                             .arg(parameter.modelData.max)
+
+                    onMoved: value => {
+                        parameter.liveValue = parameter.modelData.min
+                                              + value * parameter.span
+                        Mixer.setInsertParameter(root.targetRow, root.targetSlot,
+                                                 parameter.modelData.id,
+                                                 parameter.liveValue)
+                    }
+
+                    // Right-click binds a hardware control to this parameter
+                    // instead of moving it.
+                    onMenuRequested: Mixer.learnInsertParam(
+                        root.targetRow, root.targetSlot, parameter.modelData.id,
+                        parameter.modelData.min, parameter.modelData.max)
                 }
             }
         }

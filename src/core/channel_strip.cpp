@@ -12,7 +12,9 @@ constexpr double kSmoothingSeconds = 0.015;
 }  // namespace
 
 ChannelStrip::ChannelStrip(std::string name, int channel_count)
-    : name_(std::move(name)), channel_count_(channel_count), peaks_(channel_count) {
+    : name_(std::move(name)),
+      channel_count_(std::clamp(channel_count, 1, kMaxStripChannels)),
+      peaks_(static_cast<size_t>(std::clamp(channel_count, 1, kMaxStripChannels))) {
   for (auto& peak : peaks_) peak.store(0.0f, std::memory_order_relaxed);
 }
 
@@ -70,6 +72,26 @@ void ChannelStrip::run_insert(PluginInstance* insert, float* const* buffers,
   }
 }
 
+bool ChannelStrip::snapshot_chain(ChainSnapshot* out) const {
+  // Four attempts is generous: the writer's window is a handful of stores, and
+  // failing every time means the UI thread was descheduled inside one of them.
+  for (int attempt = 0; attempt < 4; ++attempt) {
+    const uint32_t before = chain_seq_.load(std::memory_order_acquire);
+    if ((before & 1u) != 0) continue;  // an edit is in progress
+
+    out->count = insert_count_.load(std::memory_order_acquire);
+    if (out->count > kMaxInserts) out->count = kMaxInserts;
+    for (size_t i = 0; i < out->count; ++i) {
+      out->inserts[i] = insert_slots_[i].load(std::memory_order_acquire);
+      out->flags[i] = insert_flags_[i].load(std::memory_order_acquire);
+    }
+
+    if (chain_seq_.load(std::memory_order_acquire) == before) return true;
+  }
+  out->count = 0;
+  return false;
+}
+
 void ChannelStrip::process(float* const* buffers, uint32_t frames,
                            const MidiEvent* midi, size_t midi_count,
                            const TransportInfo* transport) {
@@ -82,16 +104,18 @@ void ChannelStrip::process(float* const* buffers, uint32_t frames,
   }
 
   for (int ch = 0; ch < channel_count_; ++ch) plugin_io_[ch] = buffers[ch];
-  const size_t insert_count = insert_count_.load(std::memory_order_acquire);
 
-  auto flags_of = [this](size_t i) {
-    return insert_flags_[i].load(std::memory_order_acquire);
-  };
+  // The whole chain, taken at one instant. Reading each slot as the walk
+  // reaches it let a reorder land halfway through and run one plugin twice.
+  ChainSnapshot chain;
+  snapshot_chain(&chain);
+  const size_t insert_count = chain.count;
+  auto flags_of = [&chain](size_t i) { return chain.flags[i]; };
 
   // Pre-fader inserts first, then the fader, then post-fader. Bypass still
   // delivers MIDI so a muted-style hang cannot happen on a bypassed synth.
   for (size_t i = 0; i < insert_count; ++i) {
-    PluginInstance* insert = insert_slots_[i].load(std::memory_order_acquire);
+    PluginInstance* insert = chain.inserts[i];
     if (insert == nullptr) continue;
     if (flags_of(i) & kPostFader) continue;
     if (flags_of(i) & kBypass) {
@@ -122,7 +146,7 @@ void ChannelStrip::process(float* const* buffers, uint32_t frames,
   }
 
   for (size_t i = 0; i < insert_count; ++i) {
-    PluginInstance* insert = insert_slots_[i].load(std::memory_order_acquire);
+    PluginInstance* insert = chain.inserts[i];
     if (insert == nullptr) continue;
     if ((flags_of(i) & kPostFader) == 0) continue;
     if (flags_of(i) & kBypass) {
@@ -149,6 +173,7 @@ void ChannelStrip::process(float* const* buffers, uint32_t frames,
 }
 
 float ChannelStrip::read_peak(int channel) {
+  if (channel < 0 || channel >= static_cast<int>(peaks_.size())) return 0.0f;
   return peaks_[channel].exchange(0.0f, std::memory_order_relaxed);
 }
 
@@ -178,15 +203,19 @@ bool ChannelStrip::add_insert(std::unique_ptr<PluginInstance> plugin,
 
   // Publish the slot before the count, so the audio thread can never see a
   // count that reaches a slot it cannot read yet.
+  begin_chain_edit();
   insert_slots_[index].store(raw, std::memory_order_release);
   if (index == count) insert_count_.store(count + 1, std::memory_order_release);
+  end_chain_edit();
   if (placed_at != nullptr) *placed_at = index;
   return true;
 }
 
 void ChannelStrip::remove_insert(size_t index) {
   if (index >= insert_count_.load(std::memory_order_relaxed)) return;
+  begin_chain_edit();
   PluginInstance* raw = insert_slots_[index].exchange(nullptr, std::memory_order_release);
+  end_chain_edit();
   if (raw == nullptr) return;
 
   // The audio thread may be inside this plugin right now, so it is retired
@@ -213,8 +242,19 @@ void ChannelStrip::swap_inserts(size_t a, size_t b) {
 
   PluginInstance* first = insert_slots_[a].load(std::memory_order_relaxed);
   PluginInstance* second = insert_slots_[b].load(std::memory_order_relaxed);
+
+  // The pair of stores is not atomic on its own; the sequence counter is what
+  // makes the audio thread take both or neither. The flags travel with the
+  // plugin, or a reordered insert would keep the neighbour's bypass.
+  const uint8_t first_flags = insert_flags_[a].load(std::memory_order_relaxed);
+  const uint8_t second_flags = insert_flags_[b].load(std::memory_order_relaxed);
+
+  begin_chain_edit();
   insert_slots_[a].store(second, std::memory_order_release);
   insert_slots_[b].store(first, std::memory_order_release);
+  insert_flags_[a].store(second_flags, std::memory_order_release);
+  insert_flags_[b].store(first_flags, std::memory_order_release);
+  end_chain_edit();
 }
 
 PluginInstance* ChannelStrip::insert_at(size_t index) const {

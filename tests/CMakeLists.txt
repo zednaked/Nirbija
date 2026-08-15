@@ -27,6 +27,10 @@ if(NIRBIJA_UI)
   add_executable(nirbija_ui_smoke ui_smoke.cpp)
   target_link_libraries(nirbija_ui_smoke PRIVATE nirbija_ui)
   add_test(NAME ui_smoke COMMAND nirbija_ui_smoke)
+
+  add_executable(nirbija_session_dirty session_dirty.cpp)
+  target_link_libraries(nirbija_session_dirty PRIVATE nirbija_ui)
+  add_test(NAME session_dirty COMMAND nirbija_session_dirty)
 endif()
 
 if(NIRBIJA_UI)

@@ -763,6 +763,7 @@ class Vst3Instance : public PluginInstance {
 
     if (component_->setActive(true) != kResultOk) return false;
     processor_->setProcessing(true);
+    refresh_latency();
     active_ = true;
     return true;
   }
@@ -966,10 +967,22 @@ class Vst3Instance : public PluginInstance {
 
   const PluginDescriptor& descriptor() const override { return desc_; }
 
+  // Cached: IAudioProcessor::getLatencySamples is a UI-thread call, and this
+  // one is made from the audio thread twice per strip per block.
   uint32_t latency_samples() const override {
-    return processor_ != nullptr
-               ? static_cast<uint32_t>(processor_->getLatencySamples())
-               : 0;
+    return latency_.load(std::memory_order_relaxed);
+  }
+
+  void refresh_latency() {
+    if (processor_ == nullptr) return;
+    latency_.store(static_cast<uint32_t>(processor_->getLatencySamples()),
+                   std::memory_order_relaxed);
+  }
+
+  void host_idle() override { refresh_latency(); }
+
+  bool take_state_dirty() override {
+    return state_dirty_.exchange(false, std::memory_order_acq_rel);
   }
 
   int extra_output_pairs() const override {
@@ -1098,13 +1111,23 @@ class Vst3Instance : public PluginInstance {
     }
     tresult PLUGIN_API beginEdit(Vst::ParamID) override { return kResultOk; }
     // The editor's own knob moves arrive here and go to the DSP the same way
-    // the generic editor's do.
+    // the generic editor's do. They are also the only sign the host gets that
+    // the plugin is worth asking for its state again.
     tresult PLUGIN_API performEdit(Vst::ParamID id, Vst::ParamValue value) override {
       owner->param_edits_.push({id, value});
+      owner->state_dirty_.store(true, std::memory_order_release);
       return kResultOk;
     }
     tresult PLUGIN_API endEdit(Vst::ParamID) override { return kResultOk; }
-    tresult PLUGIN_API restartComponent(int32) override { return kResultOk; }
+    // VST3 has no "my state changed" callback; a restart request is the
+    // nearest thing a plugin sends after loading a preset of its own.
+    tresult PLUGIN_API restartComponent(int32 flags) override {
+      if (flags & (Vst::kParamValuesChanged | Vst::kParamTitlesChanged |
+                   Vst::kReloadComponent))
+        owner->state_dirty_.store(true, std::memory_order_release);
+      owner->refresh_latency();
+      return kResultOk;
+    }
   } handler_;
 
   Vst::IComponent* component_ = nullptr;
@@ -1117,6 +1140,8 @@ class Vst3Instance : public PluginInstance {
   bool has_event_input_ = false;
   int strip_channels_ = 2;
   double sample_rate_hint_ = 48000.0;
+  std::atomic<uint32_t> latency_{0};
+  std::atomic<bool> state_dirty_{false};
 
   std::vector<int32> input_buses_, output_buses_;
   std::vector<std::vector<std::vector<float>>> bus_store_in_, bus_store_out_;

@@ -1,33 +1,39 @@
-import QtQuick
+pragma ComponentBehavior: Bound
 
-// The three-dot peak indicator AUM puts on every node slot: a compact level
-// readout that fits inside a row of text.
+import QtQuick
+import Nirbija
+
+// The three-dot peak indicator on every node slot: a compact level readout that
+// fits inside a row of text. Fed the position on the fader's travel, already
+// computed by the model, rather than an amplitude it would have to convert on
+// every frame.
 Row {
     id: root
 
-    property real level: 0
+    property real position: 0
     property int dots: 3
 
-    spacing: 2
+    spacing: Skin.spacingXS
 
     Repeater {
         model: root.dots
 
         Rectangle {
-            width: 4
-            height: 4
-            radius: 2
+            id: dot
+            required property int index
 
-            // Each dot covers a third of the range, so the last one only lights
+            // Each dot covers a third of the travel, so the last one only lights
             // when the signal is genuinely close to clipping.
-            readonly property real fader: mixer.gainToFader(root.level)
             readonly property real threshold: (index + 1) / root.dots
             readonly property bool lit: index === 0
-                ? root.level > 0.001
-                : fader >= threshold - (1 / root.dots)
+                ? root.position > 0.02
+                : root.position >= threshold - (1 / root.dots)
 
-            color: lit ? Skin.meterColor(threshold) : Skin.line
-            opacity: lit ? 1.0 : 0.6
+            width: Skin.px(4)
+            height: width
+            radius: width / 2
+            color: lit ? Skin.meterColor(threshold) : Skin.meterTrack
+            opacity: lit ? 1.0 : 0.7
         }
     }
 }

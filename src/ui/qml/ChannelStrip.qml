@@ -1,8 +1,18 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
+import QtQuick.Layouts
+import Nirbija
 
 // One channel, in AUM's order from top to bottom: input node, fader with mute
 // and solo beside it, record-arm, the scrollable insert chain, the output node,
 // and the channel title at the foot.
+//
+// Laid out by ColumnLayout rather than by arithmetic. The insert list used to
+// take its height from a subtraction over five siblings — the title, the output
+// slot, the number of sends — recomputed by hand in a binding, which meant
+// every new row in the strip was a change to that sum as well. Here it simply
+// takes what is left.
 Rectangle {
     id: root
 
@@ -13,11 +23,14 @@ Rectangle {
     property bool muted: false
     property bool soloed: false
     property bool armed: false
-    property real peakLeft: 0
-    property real peakRight: 0
+    property real positionLeft: 0
+    property real positionRight: 0
+    property real holdLeft: 0
+    property real holdRight: 0
     property string inputLabel: ""
     property string midiLabel: ""
     property string outputLabel: ""
+    // [{name, bypassed, postFader}]
     property var inserts: []
     property bool isBus: false
     property var sends: []
@@ -35,8 +48,16 @@ Rectangle {
     signal sendMenuRequested(int slot, var item)
 
     width: Skin.stripWidth
-    color: Skin.strip
+    color: stripHover.hovered ? Skin.stripAlt : Skin.strip
     radius: Skin.radius
+
+    Behavior on color {
+        ColorAnimation { duration: Skin.medium }
+    }
+
+    HoverHandler {
+        id: stripHover
+    }
 
     // The accent is a stripe rather than a fill, so a dozen strips side by side
     // stay readable.
@@ -44,26 +65,27 @@ Rectangle {
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
-        height: 3
-        radius: Skin.radius
+        height: Skin.px(3)
+        radius: Skin.radiusS
         color: root.accent
     }
 
-    Column {
+    ColumnLayout {
         anchors.fill: parent
         anchors.margins: Skin.gap
-        anchors.topMargin: Skin.gap + 3
+        anchors.topMargin: Skin.gap + Skin.px(3)
         spacing: Skin.gap
 
         // A bus is fed by the strips pointed at it, so it has nothing to pick
         // an input from.
         NodeSlot {
             visible: !root.isBus
-            height: visible ? Skin.slotHeight : 0
-            width: parent.width
+            Layout.fillWidth: true
+            Layout.preferredHeight: visible ? Skin.slotHeight : 0
             label: root.inputLabel
+            tip: qsTr("Audio input for this channel. Click to pick a source; right-click for the full list.")
             filled: root.inputLabel !== qsTr("no input")
-            level: Math.max(root.peakLeft, root.peakRight)
+            position: Math.max(root.positionLeft, root.positionRight)
             onClicked: root.inputSlotClicked(this)
             onMenuRequested: root.inputMenuRequested(this)
         }
@@ -72,192 +94,173 @@ Rectangle {
         // mixer any channel can host a synth, so any channel can want MIDI.
         NodeSlot {
             visible: !root.isBus
-            height: visible ? Skin.slotHeight : 0
-            width: parent.width
+            Layout.fillWidth: true
+            Layout.preferredHeight: visible ? Skin.slotHeight : 0
             label: root.midiLabel
+            tip: qsTr("MIDI input. Click to pick a source; right-click to filter which MIDI channels get through.")
             filled: root.midiLabel !== qsTr("no MIDI")
-            level: 0
+            position: 0
             onClicked: root.midiSlotClicked(this)
             onMenuRequested: root.midiMenuRequested(this)
         }
 
         MidiKeyboard {
             visible: !root.isBus
-            width: parent.width
-            height: visible ? 56 : 0
+            Layout.fillWidth: true
+            Layout.preferredHeight: visible ? Skin.px(56) : 0
             targetRow: root.row
         }
 
         // --- fader, mute and solo -------------------------------------------
-        Item {
-            width: parent.width
-            height: 168
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            Layout.minimumHeight: Skin.px(150)
+            Layout.preferredHeight: Skin.px(190)
+            spacing: Skin.gap
 
             Fader {
-                id: fader
-                anchors.left: parent.left
-                anchors.top: parent.top
-                anchors.bottom: parent.bottom
-                width: 62
+                Layout.fillHeight: true
+                Layout.preferredWidth: Skin.px(58)
                 gain: root.gain
-                peakLeft: root.peakLeft
-                peakRight: root.peakRight
+                positionLeft: root.positionLeft
+                positionRight: root.positionRight
+                holdLeft: root.holdLeft
+                holdRight: root.holdRight
                 accent: root.accent
-                onGainRequested: value => mixer.setGain(root.row, value)
+                onGainRequested: value => Mixer.setGain(root.row, value)
             }
 
-            Column {
-                anchors.right: parent.right
-                anchors.top: parent.top
-                width: parent.width - fader.width - Skin.gap
+            ColumnLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                Layout.alignment: Qt.AlignTop
                 spacing: Skin.gap
 
                 StripButton {
-                    width: parent.width
-                    height: 26
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: Skin.px(26)
                     label: "M"
+                    tip: qsTr("Mute this channel.")
                     active: root.muted
                     activeColor: Skin.mute
-                    onClicked: mixer.toggleMute(root.row)
+                    onClicked: Mixer.toggleMute(root.row)
                 }
 
                 StripButton {
-                    width: parent.width
-                    height: 26
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: Skin.px(26)
                     label: "S"
+                    tip: qsTr("Solo. While anything is soloed, only soloed strips reach the master.")
                     active: root.soloed
                     activeColor: Skin.solo
-                    onClicked: mixer.toggleSolo(root.row)
+                    onClicked: Mixer.toggleSolo(root.row)
                 }
 
                 StripButton {
-                    width: parent.width
-                    height: 26
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: Skin.px(26)
                     label: "R"
+                    tip: qsTr("Arm for recording. Which tracks get recorded is decided when recording starts, so arming mid-take does nothing until the next one.")
                     active: root.armed
                     activeColor: Skin.arm
-                    onClicked: mixer.toggleArm(root.row)
+                    onClicked: Mixer.toggleArm(root.row)
                 }
 
                 Text {
-                    width: parent.width
+                    Layout.fillWidth: true
                     horizontalAlignment: Text.AlignHCenter
-                    text: mixer.gainLabel(root.gain)
+                    text: Mixer.gainLabel(root.gain)
                     color: Skin.textDim
-                    font.pixelSize: 10
+                    font.pixelSize: Skin.fontS
+                    font.family: Skin.monoFamily
                 }
 
-                // Balance: centre is rest. Double-click recentres.
-                Rectangle {
-                    width: parent.width
-                    height: 18
-                    radius: 2
-                    color: Skin.slotEmpty
-                    border.width: 1
-                    border.color: Skin.line
+                PanControl {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: Skin.px(18)
+                    pan: root.pan
+                    onPanRequested: value => Mixer.setPan(root.row, value)
+                }
 
-                    Rectangle {
-                        width: 4
-                        height: parent.height - 4
-                        radius: 1
-                        color: Skin.accent
-                        anchors.verticalCenter: parent.verticalCenter
-                        x: (parent.width - width) * (root.pan + 1) * 0.5
-                    }
-
-                    MouseArea {
-                        anchors.fill: parent
-                        preventStealing: true
-                        onPressed: mouse => mixer.setPan(root.row, mouse.x / width * 2 - 1)
-                        onPositionChanged: mouse => {
-                            if (pressed)
-                                mixer.setPan(root.row, Math.max(-1, Math.min(1, mouse.x / width * 2 - 1)))
-                        }
-                        onDoubleClicked: mixer.setPan(root.row, 0)
-                    }
+                Item {
+                    Layout.fillHeight: true
                 }
             }
         }
 
         // --- insert chain ----------------------------------------------------
-        // Scrollable, with one empty slot always waiting at the bottom, which is
-        // how AUM lets a chain grow without a separate "add" step.
+        // Scrollable, with a few empty slots always waiting at the bottom,
+        // which is how AUM lets a chain grow without a separate "add" step.
         ListView {
             id: insertList
-            width: parent.width
-            height: Math.max(40, root.height - y - outputSlot.height - title.height
-                    - root.sends.length * (20 + Skin.gap) - Skin.gap * 3)
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            Layout.minimumHeight: Skin.slotHeight + Skin.gap
+            Layout.preferredHeight: (root.inserts.length + 1)
+                                    * (Skin.slotHeight + Skin.gap)
             clip: true
             spacing: Skin.gap
-            // AUM keeps a few empty slots visible below the chain rather than a
-            // single "add" affordance, so the next insert is always one tap away.
             model: root.inserts.length + 3
             boundsBehavior: Flickable.StopAtBounds
+            reuseItems: true
 
             delegate: InsertSlot {
+                id: slot
+                required property int index
+
                 width: insertList.width
-                pluginName: index < root.inserts.length ? root.inserts[index] : ""
-                onClicked: root.insertSlotClicked(index, this)
+                pluginName: index < root.inserts.length
+                            ? root.inserts[index].name : ""
+                bypassed: index < root.inserts.length
+                          && root.inserts[index].bypassed === true
+                postFader: index < root.inserts.length
+                           && root.inserts[index].postFader === true
+                onClicked: root.insertSlotClicked(slot.index, slot)
                 onMenuRequested: {
-                    if (index < root.inserts.length
-                            && root.inserts[index].length > 0)
-                        root.insertMenuRequested(index, this)
+                    if (slot.index < root.inserts.length)
+                        root.insertMenuRequested(slot.index, slot)
                 }
             }
         }
 
         // Sends sit just above the output, which is where they leave from.
-        Column {
-            width: parent.width
-            spacing: Skin.gap
+        Repeater {
+            model: root.sends
 
-            Repeater {
-                model: root.sends
+            SendRow {
+                id: send
+                required property int index
+                required property var modelData
 
-                SendRow {
-                    width: parent.width
-                    busName: modelData.name
-                    level: modelData.level
-                    onLevelRequested: value => root.sendLevelRequested(index, value)
-                    onMenuRequested: root.sendMenuRequested(index, this)
-                }
+                Layout.fillWidth: true
+                Layout.preferredHeight: Skin.px(20)
+                busName: modelData.name
+                level: modelData.level
+                onLevelRequested: value => root.sendLevelRequested(send.index, value)
+                onMenuRequested: root.sendMenuRequested(send.index, send)
             }
         }
 
         NodeSlot {
-            id: outputSlot
-            width: parent.width
+            Layout.fillWidth: true
+            Layout.preferredHeight: Skin.slotHeight
             label: root.outputLabel
-            level: Math.max(root.peakLeft, root.peakRight)
+            tip: qsTr("Where this strip sends its output: the master, a bus, or a later channel.")
+            position: Math.max(root.positionLeft, root.positionRight)
             onClicked: root.outputSlotClicked(this)
             onMenuRequested: root.outputSlotClicked(this)
         }
 
         // The channel title is where AUM keeps renaming and removal, so it is
         // a button rather than a label.
-        Item {
+        StripButton {
             id: title
-            width: parent.width
-            height: 18
-
-            Text {
-                anchors.fill: parent
-                text: root.channelName
-                color: titleHover.hovered ? Skin.text : Skin.textDim
-                font.pixelSize: 11
-                horizontalAlignment: Text.AlignHCenter
-                verticalAlignment: Text.AlignVCenter
-                elide: Text.ElideRight
-            }
-
-            HoverHandler {
-                id: titleHover
-            }
-
-            MouseArea {
-                anchors.fill: parent
-                onClicked: root.titleClicked(title)
-            }
+            Layout.fillWidth: true
+            Layout.preferredHeight: Skin.px(20)
+            label: root.channelName
+            tip: qsTr("%1 — click to rename this strip, duplicate it, or remove it.").arg(root.channelName)
+            onClicked: root.titleClicked(title)
         }
     }
 }

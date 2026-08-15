@@ -44,6 +44,11 @@ class FilePlayerInstance : public PluginInstance {
   static PluginDescriptor make_descriptor();
 
  private:
+  // The playback itself. Split out so process() can count every call on its
+  // way out, early returns included.
+  void render(const float* const* inputs, float* const* outputs,
+              uint32_t frames);
+
   // Interleaved stereo, resampled to nothing: the ratio is applied on the way
   // out, so the buffer holds the file exactly as decoded.
   struct Buffer {
@@ -58,8 +63,15 @@ class FilePlayerInstance : public PluginInstance {
   std::shared_ptr<Buffer> owned_;
   std::atomic<Buffer*> live_{nullptr};
   // Replaced buffers wait here: the audio thread may still be reading one the
-  // moment it is swapped out.
-  std::vector<std::shared_ptr<Buffer>> retired_;
+  // moment it is swapped out. Tagged with the process generation at retire so
+  // the next load can drop the ones the audio thread has since left — without
+  // that they accumulated, a whole decoded file each.
+  struct RetiredBuffer {
+    std::shared_ptr<Buffer> buffer;
+    uint64_t generation = 0;
+  };
+  std::vector<RetiredBuffer> retired_;
+  std::atomic<uint64_t> process_generation_{0};
 
   double engine_rate_ = 48000.0;
   int channels_ = 2;

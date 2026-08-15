@@ -1,0 +1,107 @@
+{
+    "version": 1,
+    "tempo": 84,
+    "metronome": false,
+    "midiMaps": [],
+    "master": {
+        "gain": 0.83,
+        "sink": ""
+    },
+    "channels": [
+        {
+            "name": "Kick",
+            "isBus": false,
+            "width": 2,
+            "gain": 0.8,
+            "pan": 0,
+            "muted": false,
+            "soloed": false,
+            "armed": false,
+            "destination": -1,
+            "destinationKind": "master",
+            "audioSource": "",
+            "midiSources": [],
+            "inserts": [
+                { "format": "LV2", "uid": "http://github.com/Chowdhury-DSP/ChowKick" }
+            ],
+            "sends": [
+                { "bus": -1, "busName": "Hall", "level": 0.12 }
+            ]
+        },
+        {
+            "name": "Cloud",
+            "isBus": false,
+            "width": 2,
+            "gain": 0.6,
+            "pan": 0,
+            "muted": false,
+            "soloed": false,
+            "armed": false,
+            "destination": -1,
+            "destinationKind": "master",
+            "audioSource": "",
+            "midiSources": [],
+            "inserts": [
+                { "format": "LV2", "uid": "http://padthv1.sourceforge.net/lv2" },
+                { "format": "LV2", "uid": "https://github.com/jatinchowdhury18/AnalogTapeModel" }
+            ],
+            "sends": [
+                { "bus": -1, "busName": "Hall", "level": 0.45 }
+            ]
+        },
+        {
+            "name": "Seq",
+            "isBus": false,
+            "width": 2,
+            "gain": 0.55,
+            "pan": -0.1,
+            "muted": false,
+            "soloed": false,
+            "armed": false,
+            "destination": -1,
+            "destinationKind": "master",
+            "audioSource": "",
+            "midiSources": [],
+            "inserts": [
+                { "format": "LV2", "uid": "http://gareus.org/oss/lv2/stepseq#s8n8" },
+                { "format": "LV2", "uid": "https://thewavewarden.com/odin2" }
+            ],
+            "sends": [
+                { "bus": -1, "busName": "Hall", "level": 0.28 },
+                { "bus": -1, "busName": "Air", "level": 0.2 }
+            ]
+        },
+        {
+            "name": "Hall",
+            "isBus": true,
+            "width": 2,
+            "gain": 0.9,
+            "pan": 0,
+            "muted": false,
+            "soloed": false,
+            "armed": false,
+            "destination": -1,
+            "destinationKind": "master",
+            "inserts": [
+                { "format": "LV2", "uid": "https://github.com/michaelwillis/dragonfly-reverb" }
+            ],
+            "sends": []
+        },
+        {
+            "name": "Air",
+            "isBus": true,
+            "width": 2,
+            "gain": 0.75,
+            "pan": 0,
+            "muted": false,
+            "soloed": false,
+            "armed": false,
+            "destination": -1,
+            "destinationKind": "master",
+            "inserts": [
+                { "format": "LV2", "uid": "https://airwindows.com//plugins/Airwindows_Consolidated" }
+            ],
+            "sends": []
+        }
+    ]
+}

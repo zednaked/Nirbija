@@ -2,6 +2,8 @@
 
 #include "core/file_player.h"
 
+#include <unistd.h>
+
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -70,6 +72,15 @@ MixerModel::~MixerModel() {
   // The debounced save may still be pending, and closing the window is exactly
   // when the session matters most.
   saveSession();
+
+  // Released explicitly rather than left to process exit. flock is held by the
+  // open file description, so a second model built in the same process — a
+  // test, or a reopened window — could not take a lock this one had let go of
+  // in every sense but the descriptor, and would run read-only forever.
+  if (session_fd_ >= 0) {
+    ::close(session_fd_);
+    session_fd_ = -1;
+  }
 }
 
 int MixerModel::rowCount(const QModelIndex& parent) const {
@@ -89,10 +100,28 @@ QVariant MixerModel::data(const QModelIndex& index, int role) const {
     case ArmedRole: return channel.armed;
     case PeakLeftRole: return channel.peak[0];
     case PeakRightRole: return channel.peak[1];
+    case PositionLeftRole: return channel.position[0];
+    case PositionRightRole: return channel.position[1];
+    case HoldLeftRole: return channel.hold[0];
+    case HoldRightRole: return channel.hold[1];
     case InputLabelRole: return channel.input_label;
     case OutputLabelRole: return channel.output_label;
     case MidiLabelRole: return channel.midi_label;
     case InsertsRole: return channel.inserts;
+    case InsertDetailsRole: {
+      QVariantList details;
+      details.reserve(channel.inserts.size());
+      for (int slot = 0; slot < channel.inserts.size(); ++slot) {
+        QVariantMap entry;
+        entry.insert(QStringLiteral("name"), channel.inserts.at(slot));
+        entry.insert(QStringLiteral("bypassed"),
+                     insertBypassed(index.row(), slot));
+        entry.insert(QStringLiteral("postFader"),
+                     insertPostFader(index.row(), slot));
+        details.append(entry);
+      }
+      return details;
+    }
     case WidthRole: return channel.width;
     case AccentRole: return channel.accent;
     case IsBusRole: return channel.is_bus;
@@ -108,15 +137,22 @@ QHash<int, QByteArray> MixerModel::roleNames() const {
       {PanRole, "pan"},             {MutedRole, "muted"},
       {SoloedRole, "soloed"},       {ArmedRole, "armed"},
       {PeakLeftRole, "peakLeft"},   {PeakRightRole, "peakRight"},
+      {PositionLeftRole, "positionLeft"},
+      {PositionRightRole, "positionRight"},
+      {HoldLeftRole, "holdLeft"},   {HoldRightRole, "holdRight"},
       {InputLabelRole, "inputLabel"}, {OutputLabelRole, "outputLabel"},
       {MidiLabelRole, "midiLabel"},
-      {InsertsRole, "inserts"},     {WidthRole, "channelWidth"},
+      {InsertsRole, "inserts"},
+      {InsertDetailsRole, "insertDetails"},
+      {WidthRole, "channelWidth"},
       {AccentRole, "accent"},   {IsBusRole, "isBus"},
       {DestinationRole, "destination"}, {SendsRole, "sends"},
   };
 }
 
 void MixerModel::addChannel(const QString& name, int channels) {
+  // Mono or stereo, whatever the caller or the session file said.
+  channels = std::clamp(channels, 1, kMaxStripChannels);
   pushUndo();
   // Named after the graph slot rather than the row count. Slots are never
   // reused, so removing a channel and adding another cannot produce two
@@ -151,9 +187,8 @@ void MixerModel::removeChannel(int row) {
   // editing a plugin that is no longer in the signal path.
   const size_t slot = channels_[row].slot;
   const bool bus = channels_[row].is_bus;
-  std::erase_if(editors_, [slot, bus, this](const OpenEditor& editor) {
-    if (bus) return false;
-    return editor.slot == slot;
+  std::erase_if(editors_, [slot, bus](const OpenEditor& editor) {
+    return editor.slot == slot && editor.is_bus == bus;
   });
 
   std::erase_if(midi_maps_, [slot, bus](const MidiMapping& map) {
@@ -364,6 +399,7 @@ void MixerModel::setDestination(int row, int destination) {
 }
 
 void MixerModel::post(EngineCommand::Kind kind, int row, float value) {
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return;
   EngineCommand command;
   command.kind = kind;
   command.channel = channels_[row].slot;
@@ -507,13 +543,20 @@ void MixerModel::setTempo(qreal bpm) {
 }
 
 bool MixerModel::addInsert(int row, int pluginIndex) {
-  return addInsertAt(row, pluginIndex, -1);
+  return placeInsert(row, pluginIndex, -1) >= 0;
 }
 
 bool MixerModel::addInsertAt(int row, int pluginIndex, int targetSlot) {
-  if (row < 0 || row >= static_cast<int>(channels_.size())) return false;
+  return placeInsert(row, pluginIndex, targetSlot) >= 0;
+}
+
+// The slot the plugin actually landed in, or -1. The engine fills the first
+// hole rather than appending, so "the last insert" is not a safe way for a
+// caller to find what it just added.
+int MixerModel::placeInsert(int row, int pluginIndex, int targetSlot) {
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return -1;
   const PluginDescriptor* descriptor = plugins_->descriptor(pluginIndex);
-  if (descriptor == nullptr) return false;
+  if (descriptor == nullptr) return -1;
 
   // Instantiating and activating happen here, on the UI thread. The strip only
   // publishes the insert to the audio thread once it is ready to run.
@@ -521,14 +564,14 @@ bool MixerModel::addInsertAt(int row, int pluginIndex, int targetSlot) {
   if (instance == nullptr) {
     emit errorOccurred(tr("Could not load %1")
                            .arg(QString::fromStdString(descriptor->name)));
-    return false;
+    return -1;
   }
   ChannelStrip* strip = stripFor(row);
   size_t placed_at = 0;
   if (strip == nullptr || !strip->add_insert(std::move(instance), &placed_at)) {
     emit errorOccurred(tr("Could not activate %1")
                            .arg(QString::fromStdString(descriptor->name)));
-    return false;
+    return -1;
   }
   size_t label_at = placed_at;
   if (targetSlot >= 0 && static_cast<int>(placed_at) != targetSlot &&
@@ -543,9 +586,9 @@ bool MixerModel::addInsertAt(int row, int pluginIndex, int targetSlot) {
   while (labels.size() <= static_cast<int>(label_at)) labels.append(QString());
   labels[static_cast<int>(label_at)] = QString::fromStdString(descriptor->name);
   const QModelIndex idx = index(row);
-  emit dataChanged(idx, idx, {InsertsRole});
+  emit dataChanged(idx, idx, {InsertsRole, InsertDetailsRole});
   markDirty();
-  return true;
+  return static_cast<int>(label_at);
 }
 
 void MixerModel::removeInsert(int row, int slot) {
@@ -567,7 +610,7 @@ void MixerModel::removeInsert(int row, int slot) {
   // has to keep the same shape or the two would drift apart.
   channels_[row].inserts[slot].clear();
   const QModelIndex idx = index(row);
-  emit dataChanged(idx, idx, {InsertsRole});
+  emit dataChanged(idx, idx, {InsertsRole, InsertDetailsRole});
   markDirty();
 }
 
@@ -585,7 +628,7 @@ void MixerModel::moveInsert(int row, int slot, int direction) {
   labels.swapItemsAt(slot, target);
 
   const QModelIndex idx = index(row);
-  emit dataChanged(idx, idx, {InsertsRole});
+  emit dataChanged(idx, idx, {InsertsRole, InsertDetailsRole});
   markDirty();
 }
 
@@ -610,6 +653,10 @@ bool MixerModel::openInsertEditor(int row, int slot) {
       return true;
     qWarning("editor: fechada pelo toggle (segundo clique)");
     editors_.erase(existing);
+    // Whatever was done in there is worth a save. LV2 gives the host no way to
+    // hear about a kit or a patch loaded inside the plugin's own window, so the
+    // window closing is the signal.
+    markDirty();
     return true;
   }
 
@@ -621,15 +668,22 @@ bool MixerModel::openInsertEditor(int row, int slot) {
   if (!window->open()) return false;
 
   // Closing through the window manager has to leave the list too, or the next
-  // click would "close" a window that is already gone.
+  // click would "close" a window that is already gone. Queued on purpose:
+  // closed() is emitted from inside the window's own timer callback, and a
+  // direct connection would destroy the window while that callback is still
+  // on the stack.
   PluginWindow* raw = window.get();
-  connect(raw, &PluginWindow::closed, this, [this, raw] {
-    std::erase_if(editors_, [raw](const OpenEditor& editor) {
-      return editor.window.get() == raw;
-    });
-  });
+  connect(
+      raw, &PluginWindow::closed, this,
+      [this, raw] {
+        std::erase_if(editors_, [raw](const OpenEditor& editor) {
+          return editor.window.get() == raw;
+        });
+        markDirty();
+      },
+      Qt::QueuedConnection);
 
-  editors_.push_back({channels_[row].slot, insert,
+  editors_.push_back({channels_[row].slot, channels_[row].is_bus, insert,
                       QDateTime::currentMSecsSinceEpoch(), std::move(window)});
   return true;
 }
@@ -922,6 +976,35 @@ void MixerModel::injectControl(int cc, int channel, int value) {
   handleControl(cc, channel, value);
 }
 
+void MixerModel::setMetersActive(bool on) {
+  if (meters_active_ == on) return;
+  meters_active_ = on;
+  emit metersActiveChanged();
+}
+
+// One poll of ballistics. Rise is instantaneous — a transient that only shows
+// on one frame still has to be visible — and the fall is a fixed slope, about
+// 26 dB per second, which is close to what a hardware meter does. The held mark
+// waits half a second before it starts down, or it never lasts long enough to
+// be read.
+void MixerModel::advanceMeter(qreal peak, qreal& position, qreal& hold,
+                              int& age) {
+  constexpr qreal kFallPerPoll = 0.0115;      // of full travel, per 33 ms tick
+  constexpr qreal kHoldFallPerPoll = 0.0060;  // the mark falls slower
+  constexpr int kHoldTicks = 15;              // ~500 ms before it lets go
+
+  const qreal target = gainToFader(peak);
+  position = target >= position ? target
+                                : std::max(target, position - kFallPerPoll);
+
+  if (target >= hold) {
+    hold = target;
+    age = 0;
+  } else if (++age > kHoldTicks) {
+    hold = std::max(position, hold - kHoldFallPerPoll);
+  }
+}
+
 void MixerModel::pollLevels() {
   if (!engine_.running()) return;
 
@@ -936,6 +1019,8 @@ void MixerModel::pollLevels() {
                   control[i].data[2]);
   }
 
+  // Reading the peaks is what clears them on the audio side, so it happens
+  // whether or not anyone is looking; only the redraw is skipped.
   for (size_t row = 0; row < channels_.size(); ++row) {
     ChannelUi& channel = channels_[row];
     ChannelStrip* strip = stripFor(static_cast<int>(row));
@@ -944,27 +1029,46 @@ void MixerModel::pollLevels() {
     for (int ch = 0; ch < channel.width; ++ch)
       channel.peak[ch] = strip->read_peak(ch);
     if (channel.width == 1) channel.peak[1] = channel.peak[0];
-  }
-  if (!channels_.empty()) {
-    emit dataChanged(index(0), index(static_cast<int>(channels_.size()) - 1),
-                     {PeakLeftRole, PeakRightRole});
+    for (int ch = 0; ch < 2; ++ch) {
+      advanceMeter(channel.peak[ch], channel.position[ch], channel.hold[ch],
+                   channel.hold_age[ch]);
+    }
   }
 
   master_peak_[0] = engine_.graph().read_master_peak(0);
   master_peak_[1] = engine_.graph().read_master_peak(1);
+  for (int ch = 0; ch < 2; ++ch) {
+    advanceMeter(master_peak_[ch], master_position_[ch], master_hold_[ch],
+                 master_hold_age_[ch]);
+  }
   master_clip_ = engine_.graph().read_master_clip() > 0.0f;
-  emit levelsChanged();
+
+  if (meters_active_) {
+    if (!channels_.empty()) {
+      emit dataChanged(index(0), index(static_cast<int>(channels_.size()) - 1),
+                       {PeakLeftRole, PeakRightRole, PositionLeftRole,
+                        PositionRightRole, HoldLeftRole, HoldRightRole});
+    }
+    emit levelsChanged();
+  }
 
   engine_.graph().reclaim();
+  bool plugin_state_moved = false;
   for (size_t row = 0; row < channels_.size(); ++row) {
     ChannelStrip* strip = stripFor(static_cast<int>(row));
     if (strip == nullptr) continue;
     strip->reclaim();
     for (size_t slot = 0; slot < strip->insert_count(); ++slot) {
       PluginInstance* insert = strip->insert_at(slot);
-      if (insert != nullptr) insert->host_idle();
+      if (insert == nullptr) continue;
+      insert->host_idle();
+      // A patch or a preset loaded from the plugin's own window goes through
+      // none of this model's setters, so without asking, the session would
+      // never learn it had anything new to write.
+      if (insert->take_state_dirty()) plugin_state_moved = true;
     }
   }
+  if (plugin_state_moved) markDirty();
 }
 
 // A fader that is linear in decibels spends most of its travel where the ear
@@ -1070,6 +1174,8 @@ void MixerModel::setInsertBypassed(int row, int slot, bool on) {
   ChannelStrip* strip = stripFor(row);
   if (strip == nullptr) return;
   strip->set_insert_bypassed(static_cast<size_t>(slot), on);
+  const QModelIndex idx = index(row);
+  emit dataChanged(idx, idx, {InsertDetailsRole});
   markDirty();
 }
 
@@ -1082,6 +1188,8 @@ void MixerModel::setInsertPostFader(int row, int slot, bool on) {
   ChannelStrip* strip = stripFor(row);
   if (strip == nullptr) return;
   strip->set_insert_post_fader(static_cast<size_t>(slot), on);
+  const QModelIndex idx = index(row);
+  emit dataChanged(idx, idx, {InsertDetailsRole});
   markDirty();
 }
 

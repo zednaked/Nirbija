@@ -1,0 +1,105 @@
+{
+    "version": 1,
+    "tempo": 80,
+    "metronome": false,
+    "midiMaps": [],
+    "master": {
+        "gain": 0.8,
+        "sink": ""
+    },
+    "channels": [
+        {
+            "name": "Modular",
+            "isBus": false,
+            "width": 2,
+            "gain": 0.65,
+            "pan": 0,
+            "muted": false,
+            "soloed": false,
+            "armed": false,
+            "destination": -1,
+            "destinationKind": "master",
+            "audioSource": "",
+            "midiSources": [],
+            "inserts": [
+                { "format": "LV2", "uid": "https://distrho.kx.studio/plugins/cardinal#synth" }
+            ],
+            "sends": [
+                { "bus": -1, "busName": "Fog", "level": 0.4 },
+                { "bus": -1, "busName": "Room", "level": 0.3 }
+            ]
+        },
+        {
+            "name": "Kick",
+            "isBus": false,
+            "width": 2,
+            "gain": 0.75,
+            "pan": 0,
+            "muted": false,
+            "soloed": false,
+            "armed": false,
+            "destination": -1,
+            "destinationKind": "master",
+            "audioSource": "",
+            "midiSources": [],
+            "inserts": [
+                { "format": "LV2", "uid": "http://github.com/Chowdhury-DSP/ChowKick" }
+            ],
+            "sends": [
+                { "bus": -1, "busName": "Room", "level": 0.15 }
+            ]
+        },
+        {
+            "name": "TapeIn",
+            "isBus": false,
+            "width": 2,
+            "gain": 0.7,
+            "pan": 0.1,
+            "muted": false,
+            "soloed": false,
+            "armed": false,
+            "destination": -1,
+            "destinationKind": "bus",
+            "destinationName": "Fog",
+            "audioSource": "",
+            "midiSources": [],
+            "inserts": [
+                { "format": "Internal", "uid": "nirbija.fileplayer" },
+                { "format": "LV2", "uid": "https://github.com/jatinchowdhury18/AnalogTapeModel" }
+            ],
+            "sends": []
+        },
+        {
+            "name": "Fog",
+            "isBus": true,
+            "width": 2,
+            "gain": 0.85,
+            "pan": 0,
+            "muted": false,
+            "soloed": false,
+            "armed": false,
+            "destination": -1,
+            "destinationKind": "master",
+            "inserts": [
+                { "format": "LV2", "uid": "https://distrho.kx.studio/plugins/cardinal#fx" }
+            ],
+            "sends": []
+        },
+        {
+            "name": "Room",
+            "isBus": true,
+            "width": 2,
+            "gain": 0.88,
+            "pan": 0,
+            "muted": false,
+            "soloed": false,
+            "armed": false,
+            "destination": -1,
+            "destinationKind": "master",
+            "inserts": [
+                { "format": "LV2", "uid": "urn:dragonfly:room" }
+            ],
+            "sends": []
+        }
+    ]
+}

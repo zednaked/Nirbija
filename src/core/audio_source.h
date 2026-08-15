@@ -15,6 +15,10 @@ class AudioSource {
   // Realtime thread. Fills `dest` (one pointer per channel) with `frames`
   // samples. Must write every sample, including silence.
   virtual void read(float* const* dest, int channels, uint32_t frames) = 0;
+
+  // UI thread, with the graph's process stopped. Sources that need scratch of
+  // their own size it here; one that reads straight from a port needs nothing.
+  virtual void prepare(uint32_t max_block_frames) { (void)max_block_frames; }
 };
 
 // Where a channel's MIDI comes from. Split from AudioSource because a channel

@@ -1,11 +1,8 @@
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
-#include <QQmlContext>
 #include <QQuickStyle>
 
-#include "mixer_model.h"
 #include "platform.h"
-#include "skin.h"
 
 int main(int argc, char* argv[]) {
   nirbija::force_x11_platform();
@@ -13,16 +10,15 @@ int main(int argc, char* argv[]) {
   QGuiApplication app(argc, argv);
   app.setApplicationName(QStringLiteral("Nirbija"));
   app.setOrganizationName(QStringLiteral("Nirbija"));
+  app.setDesktopFileName(QStringLiteral("Nirbija"));
 
   // Basic draws nothing of its own, which is what a hand-styled mixer wants.
   QQuickStyle::setStyle(QStringLiteral("Basic"));
 
-  nirbija::MixerModel mixer;
-  nirbija::Skin skin;
-
+  // The mixer and the skin register themselves as singletons of the Nirbija
+  // module, so there is nothing to push into the root context here: the engine
+  // builds them on first use and QML refers to them by type.
   QQmlApplicationEngine engine;
-  engine.rootContext()->setContextProperty(QStringLiteral("mixer"), &mixer);
-  engine.rootContext()->setContextProperty(QStringLiteral("Skin"), &skin);
   engine.loadFromModule("Nirbija", "Main");
   if (engine.rootObjects().isEmpty()) return 1;
 

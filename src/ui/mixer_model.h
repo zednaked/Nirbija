@@ -3,10 +3,12 @@
 #include <QAbstractListModel>
 #include <QStringList>
 #include <QByteArray>
+#include <QQmlEngine>
 #include <QUrl>
 #include <QVariantList>
 #include <QTimer>
 #include <QVector>
+#include <qqmlintegration.h>
 
 #include <memory>
 #include <vector>
@@ -23,12 +25,31 @@ namespace nirbija {
 // timer rather than pushed, so a stalled UI cannot back up the audio thread.
 class MixerModel : public QAbstractListModel {
   Q_OBJECT
+  // Registered as the `Mixer` singleton of the Nirbija module rather than
+  // pushed in as a context property: a context property has no type until the
+  // binding runs, so qmllint could not check a single `mixer.foo` in the tree
+  // and the QML compiler had to fall back to a lookup by name for every one.
+  QML_NAMED_ELEMENT(Mixer)
+  QML_SINGLETON
   Q_PROPERTY(bool running READ running NOTIFY runningChanged)
   Q_PROPERTY(QString status READ status NOTIFY statusChanged)
   Q_PROPERTY(double sampleRate READ sampleRate NOTIFY runningChanged)
   Q_PROPERTY(int blockFrames READ blockFrames NOTIFY runningChanged)
   Q_PROPERTY(qreal masterPeakLeft READ masterPeakLeft NOTIFY levelsChanged)
   Q_PROPERTY(qreal masterPeakRight READ masterPeakRight NOTIFY levelsChanged)
+  // The same levels already mapped onto the fader's decibel travel, and the
+  // held peak beside them. Done here because a meter binding that called
+  // gainToFader() crossed into C++ several times per strip per frame, thirty
+  // times a second, for a number this side already has.
+  Q_PROPERTY(qreal masterPositionLeft READ masterPositionLeft NOTIFY levelsChanged)
+  Q_PROPERTY(qreal masterPositionRight READ masterPositionRight NOTIFY levelsChanged)
+  Q_PROPERTY(qreal masterHoldLeft READ masterHoldLeft NOTIFY levelsChanged)
+  Q_PROPERTY(qreal masterHoldRight READ masterHoldRight NOTIFY levelsChanged)
+  // Whether meters are worth computing at all: false while the window is
+  // hidden. The engine is still serviced on the same tick — only the redraw
+  // stops.
+  Q_PROPERTY(bool metersActive READ metersActive WRITE setMetersActive NOTIFY
+                 metersActiveChanged)
   Q_PROPERTY(qreal masterGain READ masterGain WRITE setMasterGain NOTIFY masterGainChanged)
   Q_PROPERTY(QString masterSink READ masterSink NOTIFY routingChanged)
   Q_PROPERTY(bool playing READ playing NOTIFY transportChanged)
@@ -58,10 +79,18 @@ class MixerModel : public QAbstractListModel {
     ArmedRole,
     PeakLeftRole,
     PeakRightRole,
+    PositionLeftRole,
+    PositionRightRole,
+    HoldLeftRole,
+    HoldRightRole,
     InputLabelRole,
     OutputLabelRole,
     MidiLabelRole,
     InsertsRole,
+    // The same chain with the state a slot needs to draw itself:
+    // [{name, bypassed, postFader}]. Bypass used to be invisible until the
+    // menu was opened, which is a poor place to keep "this is not being heard".
+    InsertDetailsRole,
     WidthRole,
     AccentRole,
     IsBusRole,
@@ -82,6 +111,12 @@ class MixerModel : public QAbstractListModel {
   int blockFrames() const { return static_cast<int>(engine_.block_frames()); }
   qreal masterPeakLeft() const { return master_peak_[0]; }
   qreal masterPeakRight() const { return master_peak_[1]; }
+  qreal masterPositionLeft() const { return master_position_[0]; }
+  qreal masterPositionRight() const { return master_position_[1]; }
+  qreal masterHoldLeft() const { return master_hold_[0]; }
+  qreal masterHoldRight() const { return master_hold_[1]; }
+  bool metersActive() const { return meters_active_; }
+  void setMetersActive(bool on);
   qreal masterGain() const { return master_gain_; }
   QString masterSink() const;
   bool playing() const { return playing_ui_; }
@@ -215,6 +250,10 @@ class MixerModel : public QAbstractListModel {
   // takes after the engine queue.
   Q_INVOKABLE void injectControl(int cc, int channel, int value);
 
+  // Test hook: the engine behind the model, so a test can reach a strip and
+  // stand a plugin of its own in place of a scanned one.
+  Engine& engineForTests() { return engine_; }
+
   // File player extras: only meaningful when the insert is one.
   Q_INVOKABLE bool insertIsFilePlayer(int row, int slot) const;
   Q_INVOKABLE bool setInsertFile(int row, int slot, const QUrl& file);
@@ -246,6 +285,11 @@ class MixerModel : public QAbstractListModel {
   bool readSession(const QString& path);
   static QString sessionPath();
 
+  // Every insert's state blob, in the order writeSession emits them. Parks the
+  // graph for the asking and no longer, so the rest of a save runs with the
+  // mixer audible.
+  QVector<QVector<QByteArray>> collectInsertStates() const;
+
   // False when another Nirbija already holds the session. That instance still
   // runs and still loads what is on disk, but never writes: two mixers taking
   // turns overwriting one file loses whichever was edited first.
@@ -268,6 +312,7 @@ class MixerModel : public QAbstractListModel {
   void recordingChanged();
   void errorOccurred(const QString& message);
   void dirtyChanged();
+  void metersActiveChanged();
 
  private:
   struct ChannelUi {
@@ -287,6 +332,14 @@ class MixerModel : public QAbstractListModel {
     bool soloed = false;
     bool armed = false;
     qreal peak[2] = {0.0, 0.0};
+    // Meter ballistics, all in fader travel rather than in amplitude: the bar
+    // jumps to a new peak and falls back at a fixed rate, and the held mark
+    // sits at the loudest thing seen recently. A bar that simply followed the
+    // sampled peak flickered, and left nothing on screen to read a transient
+    // off.
+    qreal position[2] = {0.0, 0.0};
+    qreal hold[2] = {0.0, 0.0};
+    int hold_age[2] = {0, 0};
     QString input_label;
     QString output_label;
     QString midi_label;
@@ -298,6 +351,10 @@ class MixerModel : public QAbstractListModel {
 
   ChannelStrip* stripFor(int row) const;
   PluginInstance* insertFor(int row, int slot) const;
+
+  // Adds an insert and reports which slot took it, or -1. addInsert and
+  // addInsertAt are the boolean faces of this for QML.
+  int placeInsert(int row, int pluginIndex, int targetSlot);
   int busCount() const;
   void pollLevels();
   void handleControl(int cc, int channel, int value);
@@ -344,6 +401,11 @@ class MixerModel : public QAbstractListModel {
   // slot tags each one, so removing a channel closes only its own editors.
   struct OpenEditor {
     size_t slot;
+    // Channels and buses number their slots separately, so the slot alone does
+    // not say which strip this belongs to. Without it, removing channel 2 shut
+    // bus 2's editors and removing a bus shut none of its own — leaving a
+    // window driving a plugin the graph had already reclaimed.
+    bool is_bus = false;
     // Which plugin this window edits, so a second click finds the first window
     // instead of opening a twin.
     PluginInstance* insert;
@@ -354,6 +416,13 @@ class MixerModel : public QAbstractListModel {
   };
   std::vector<OpenEditor> editors_;
   qreal master_peak_[2] = {0.0, 0.0};
+  qreal master_position_[2] = {0.0, 0.0};
+  qreal master_hold_[2] = {0.0, 0.0};
+  int master_hold_age_[2] = {0, 0};
+  bool meters_active_ = true;
+  // Advances one meter by one poll: instant rise, steady fall, and a held mark
+  // that waits before it starts to drop.
+  static void advanceMeter(qreal peak, qreal& position, qreal& hold, int& age);
   qreal master_gain_ = 1.0;
   QString status_;
   bool playing_ui_ = false;

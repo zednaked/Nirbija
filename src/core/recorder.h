@@ -54,6 +54,11 @@ class Recorder {
 
   std::vector<std::unique_ptr<Track>> tracks_;
   std::thread writer_;
+  // How many audio-thread write() calls are inside the tracks right now. stop()
+  // waits for this to fall to zero before freeing them: clearing the vector
+  // under a write() that had already passed its recording() check is a
+  // use-after-free, and the check alone cannot close that window.
+  std::atomic<int> writers_in_flight_{0};
   std::atomic<bool> recording_{false};
   std::atomic<bool> writer_running_{false};
   std::atomic<bool> overran_{false};

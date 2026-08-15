@@ -115,6 +115,26 @@ int main(int argc, char* argv[]) {
       fail("the named session did not bring its rows back");
   }
 
+  // Saving over a session that already exists. The first save always worked —
+  // the file was not there yet — so every check above passed while the second
+  // one silently left the new state in session.json.tmp and the old file in
+  // place. Anything that changed after the very first save was lost.
+  {
+    const QString path = dir.path() + "/session.json";
+    restored.renameChannel(0, QStringLiteral("Renamed"));
+    restored.saveSession();
+
+    if (QFile::exists(path + ".tmp"))
+      fail("the temporary file outlived the save; the rename did not happen");
+
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+      fail("the session file went missing across a resave");
+    } else if (!file.readAll().contains("Renamed")) {
+      fail("a second save did not reach the session file");
+    }
+  }
+
   if (failures > 0) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return 1;

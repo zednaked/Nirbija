@@ -1,5 +1,9 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls.Basic
+import QtQuick.Layouts
+import Nirbija
 
 // The MIDI matrix: sources down the side, channels across the top, a cell per
 // crossing. Any source can feed any number of channels and the other way
@@ -9,56 +13,78 @@ Popup {
 
     property var sources: []
 
-    width: Math.min(720, 200 + mixer.rowCount() * 44)
-    height: Math.min(480, 90 + sources.length * 34)
+    width: Math.min(Skin.px(760), Skin.px(220) + Mixer.rowCount() * Skin.px(46))
+    height: Math.min(Skin.px(500), Skin.px(110) + sources.length * Skin.px(36))
     modal: true
-    padding: 10
+    padding: Skin.spacingL
+    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
     background: Rectangle {
-        color: Skin.strip
+        color: Skin.popup
         border.width: 1
-        border.color: Skin.line
-        radius: Skin.radius
+        border.color: Skin.border
+        radius: Skin.radiusL
+    }
+
+    enter: Transition {
+        NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Skin.fast }
     }
 
     // Fetched on open: the port list is whatever the server offers right now.
-    onAboutToShow: sources = mixer.sources(true)
+    onAboutToShow: root.sources = Mixer.sources(true)
 
-    Column {
-        anchors.fill: parent
-        spacing: 6
+    readonly property int columnWidth: Skin.px(42)
+    readonly property int labelWidth: Skin.px(180)
+
+    contentItem: ColumnLayout {
+        spacing: Skin.spacingS
 
         Text {
+            Layout.fillWidth: true
             text: qsTr("MIDI matrix")
             color: Skin.text
-            font.pixelSize: 13
+            font.pixelSize: Skin.fontL
             font.bold: true
+        }
+
+        Text {
+            Layout.fillWidth: true
+            visible: root.sources.length === 0
+            text: qsTr("No MIDI source is offering ports right now.")
+            color: Skin.textDim
+            font.pixelSize: Skin.font
+            wrapMode: Text.WordWrap
         }
 
         // Column headers: one per channel, buses excluded since they take no
         // MIDI.
         Row {
-            spacing: 4
+            Layout.fillWidth: true
+            spacing: Skin.spacingS
 
             Item {
-                width: 180
-                height: 30
+                width: root.labelWidth
+                height: Skin.px(28)
             }
 
             Repeater {
-                model: mixer
+                model: Mixer
 
                 Item {
-                    visible: !model.isBus
-                    width: visible ? 40 : 0
-                    height: 30
+                    id: header
+                    required property string name
+                    required property bool isBus
+
+                    visible: !isBus
+                    width: visible ? root.columnWidth : 0
+                    height: Skin.px(28)
 
                     Text {
                         anchors.centerIn: parent
-                        width: 38
-                        text: model.name
+                        width: parent.width - Skin.spacingXS
+                        text: header.name
                         color: Skin.textDim
-                        font.pixelSize: 9
+                        font.pixelSize: Skin.fontXS
                         horizontalAlignment: Text.AlignHCenter
                         elide: Text.ElideRight
                     }
@@ -68,54 +94,79 @@ Popup {
 
         ListView {
             id: sourceList
-            width: parent.width
-            height: parent.height - 70
+            Layout.fillWidth: true
+            Layout.fillHeight: true
             clip: true
-            spacing: 4
+            spacing: Skin.spacingS
             model: root.sources
             boundsBehavior: Flickable.StopAtBounds
 
-            delegate: Row {
-                spacing: 4
+            ScrollBar.vertical: ScrollBar {
+                policy: sourceList.contentHeight > sourceList.height
+                        ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+            }
 
+            delegate: Row {
+                id: sourceRow
+                required property string modelData
                 readonly property string sourcePort: modelData
 
+                spacing: Skin.spacingS
+
                 Text {
-                    width: 180
-                    height: 30
-                    text: mixer.shortPortName(sourcePort)
+                    width: root.labelWidth
+                    height: Skin.rowHeight
+                    text: Mixer.shortPortName(sourceRow.sourcePort)
                     color: Skin.text
-                    font.pixelSize: 11
+                    font.pixelSize: Skin.font
                     verticalAlignment: Text.AlignVCenter
                     elide: Text.ElideMiddle
                 }
 
                 Repeater {
-                    model: mixer
+                    model: Mixer
 
                     Rectangle {
-                        visible: !model.isBus
-                        width: visible ? 40 : 0
-                        height: 30
+                        id: cell
+                        required property int index
+                        required property bool isBus
+
+                        visible: !isBus
+                        width: visible ? root.columnWidth : 0
+                        height: Skin.rowHeight
                         radius: Skin.radius
-                        color: linked ? Skin.accent : Skin.slotEmpty
+                        color: linked ? Skin.accent
+                             : cellHover.hovered ? Skin.slotHover
+                             : Skin.slotEmpty
                         border.width: 1
-                        border.color: Skin.line
+                        border.color: linked ? Qt.lighter(Skin.accent, 1.2)
+                                             : Skin.border
+
+                        Behavior on color {
+                            ColorAnimation { duration: Skin.fast }
+                        }
 
                         // Re-read when any routing changes, so two views of the
                         // same link cannot disagree.
                         property bool linked: false
-                        function refresh() { linked = mixer.midiLinked(index, sourcePort) }
+                        function refresh() {
+                            linked = Mixer.midiLinked(cell.index, sourceRow.sourcePort)
+                        }
                         Component.onCompleted: refresh()
 
                         Connections {
-                            target: mixer
-                            function onRoutingChanged() { refresh() }
+                            target: Mixer
+                            function onRoutingChanged() { cell.refresh() }
                         }
 
-                        MouseArea {
-                            anchors.fill: parent
-                            onClicked: mixer.setMidiLink(index, sourcePort, !parent.linked)
+                        HoverHandler {
+                            id: cellHover
+                        }
+
+                        TapHandler {
+                            onSingleTapped: Mixer.setMidiLink(cell.index,
+                                                              sourceRow.sourcePort,
+                                                              !cell.linked)
                         }
                     }
                 }

@@ -1,60 +1,26 @@
 import QtQuick
+import Nirbija
 
 // One send: the bus it feeds and how much of the strip goes there. The bar is
-// the level, dragged sideways, so the amount is visible without a number.
-Rectangle {
+// the level, so the amount is visible without a number — and the number is
+// there anyway, because "about a third" is not a mix decision.
+ValueTrack {
     id: root
 
     property string busName: ""
     property real level: 0
 
     signal levelRequested(real level)
-    signal menuRequested
 
-    height: 20
-    radius: Skin.radius
-    color: Skin.slotEmpty
-    border.width: 1
-    border.color: Skin.line
+    value: root.level
+    label: "→ " + root.busName
+    valueText: Math.round(Math.max(0, Math.min(1, root.level)) * 100) + "%"
+    // Nothing scrolls under a send, so it can answer the first pixel of a drag.
+    pressThreshold: 0
 
-    Rectangle {
-        anchors.left: parent.left
-        anchors.top: parent.top
-        anchors.bottom: parent.bottom
-        anchors.margins: 1
-        width: Math.max(0, Math.min(1, root.level)) * (parent.width - 2)
-        radius: Skin.radius
-        color: Skin.accent
-        opacity: 0.35
-    }
+    tip: qsTr("Send to %1, at %2%. A copy of this strip's output goes there while the strip still feeds its own destination. Drag or scroll to set the amount; right-click to remove.")
+             .arg(root.busName)
+             .arg(Math.round(Math.max(0, Math.min(1, root.level)) * 100))
 
-    Text {
-        anchors.fill: parent
-        anchors.leftMargin: 5
-        anchors.rightMargin: 5
-        verticalAlignment: Text.AlignVCenter
-        text: "→ " + root.busName
-        color: Skin.text
-        font.pixelSize: 10
-        elide: Text.ElideRight
-    }
-
-    MouseArea {
-        anchors.fill: parent
-        acceptedButtons: Qt.LeftButton | Qt.RightButton
-        preventStealing: true
-
-        onPressed: mouse => {
-            if (mouse.button === Qt.RightButton) {
-                root.menuRequested()
-                return
-            }
-            root.levelRequested(mouse.x / width)
-        }
-        onPositionChanged: mouse => {
-            if (pressed)
-                root.levelRequested(Math.max(0, Math.min(1, mouse.x / width)))
-        }
-        onPressAndHold: root.menuRequested()
-    }
+    onMoved: value => root.levelRequested(value)
 }

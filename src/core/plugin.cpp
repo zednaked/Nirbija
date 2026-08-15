@@ -13,7 +13,26 @@
 #include "core/file_player.h"
 #include "core/looper.h"
 
+#include <charconv>
+
 namespace nirbija {
+
+bool parse_number(std::string_view text, double* out) {
+  // Leading blanks are the one thing from_chars will not skip, and a state
+  // blob written with a space after its separator is not corrupt.
+  while (!text.empty() && (text.front() == ' ' || text.front() == '\t' ||
+                           text.front() == '\r' || text.front() == '\n'))
+    text.remove_prefix(1);
+  if (text.empty()) return false;
+
+  double value = 0.0;
+  const auto result =
+      std::from_chars(text.data(), text.data() + text.size(), value);
+  if (result.ec != std::errc{}) return false;
+  if (out != nullptr) *out = value;
+  return true;
+}
+
 namespace {
 
 // The plugins built into the host itself. First in scan order so they head the

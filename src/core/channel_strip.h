@@ -19,6 +19,11 @@ inline constexpr size_t kMaxInserts = 16;
 // without losing the dry signal.
 inline constexpr size_t kMaxSends = 4;
 
+// A strip is mono or stereo, and nothing else: the graph's scratch, the mix
+// bus and the pan law are all two channels wide. Anything wider arriving from
+// a session file or a caller is clamped here rather than indexing past them.
+inline constexpr int kMaxStripChannels = 2;
+
 // One mixer channel: input -> insert chain -> gain/pan -> destination bus.
 // Owned by the graph and only ever touched by the audio thread once attached;
 // the UI mutates it through the engine's command queue.
@@ -80,7 +85,10 @@ class ChannelStrip {
   void set_record_track(int track) { record_track_.store(track, std::memory_order_release); }
   int record_track() const { return record_track_.load(std::memory_order_acquire); }
 
-  // Peak since the last read, for the UI meters. Reading resets it.
+  // Peak since the last read, for the UI meters. Reading resets it. A channel
+  // outside the strip's own width reads zero: the UI's idea of the width and
+  // the strip's can differ across a session load, and that must not index off
+  // the end of the meter array.
   float read_peak(int channel);
 
   // Insert slots, safe to edit while the audio thread is rendering. The plugin
@@ -93,9 +101,9 @@ class ChannelStrip {
   void remove_insert(size_t index);
   void reclaim();
 
-  // Swaps two slots. The audio thread may be part way through the chain when
-  // this lands, so a single block can render the pair in either order; nothing
-  // is dropped or freed, and the block after is correct.
+  // Swaps two slots. The audio thread takes the whole chain as one snapshot
+  // (see chain_seq_), so a block renders either the old order or the new one,
+  // never a mix that runs one of the pair twice.
   void swap_inserts(size_t a, size_t b);
   size_t insert_count() const { return insert_count_.load(std::memory_order_acquire); }
   PluginInstance* insert_at(size_t index) const;
@@ -131,6 +139,26 @@ class ChannelStrip {
   void run_insert(PluginInstance* insert, float* const* buffers, uint32_t frames,
                   const TransportInfo* transport, bool filter_midi);
   static bool midi_allowed(const MidiEvent& event, uint16_t mask);
+
+  // One block's view of the insert chain, taken whole before anything runs.
+  // Not named `slots`: Qt defines that as a macro, and this header is included
+  // from the UI.
+  struct ChainSnapshot {
+    PluginInstance* inserts[kMaxInserts] = {};
+    uint8_t flags[kMaxInserts] = {};
+    size_t count = 0;
+  };
+  // Reads the chain under the sequence counter so the pointers and their flags
+  // all belong to the same instant. False when the UI thread was mid-edit for
+  // every attempt, which costs this block its inserts rather than risking a
+  // chain that runs one plugin twice.
+  bool snapshot_chain(ChainSnapshot* out) const;
+
+  // Brackets a chain edit. The odd value in between is what tells a reader its
+  // snapshot is torn.
+  void begin_chain_edit() { chain_seq_.fetch_add(1, std::memory_order_acq_rel); }
+  void end_chain_edit() { chain_seq_.fetch_add(1, std::memory_order_release); }
+
   std::string name_;
   int channel_count_;
   double sample_rate_ = 0.0;
@@ -166,6 +194,9 @@ class ChannelStrip {
   // is skipped, which keeps the indices of the surviving inserts stable.
   std::array<std::atomic<PluginInstance*>, kMaxInserts> insert_slots_{};
   std::atomic<size_t> insert_count_{0};
+
+  // Even while the chain is settled, odd while the UI thread is rewriting it.
+  std::atomic<uint32_t> chain_seq_{0};
 
   // UI thread only. `retired_` holds inserts pulled out of the chain: the audio
   // thread may still be inside one when it is removed, so they are kept alive

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace nirbija {
@@ -55,6 +56,12 @@ struct ParameterInfo {
   double max_value;
   double default_value;
 };
+
+// A number out of a state blob. Session files are bytes on disk and a hand
+// edited or truncated one must give a plugin its default back, not throw out
+// of load_state and off the top of the call stack — which is what std::stod
+// does on the first character it does not like.
+bool parse_number(std::string_view text, double* out);
 
 // A plugin's own editor window, embedded into one of ours. Every format that
 // ships a Linux editor draws it with X11, so the parent handle is an X11
@@ -154,6 +161,16 @@ class PluginInstance {
   // Main-thread work the plugin asked the host to run even with no editor
   // open: CLAP timers, request_callback, POSIX fds. Default is nothing.
   virtual void host_idle() {}
+
+  // True once after the plugin has changed its own state behind the host's
+  // back — a sampler given a new kit from its editor, a synth loading a patch.
+  // Nothing the host did marks this; it exists because a session is only
+  // written when something says it is worth writing, and a change made inside
+  // a plugin's own window is invisible to every setter the UI has.
+  //
+  // Reading clears it. Backends that have no way to be told return false and
+  // rely on the editor closing to stand in for the notification.
+  virtual bool take_state_dirty() { return false; }
 };
 
 // One per format. Scanning walks the disk, so it never runs on the audio thread.

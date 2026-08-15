@@ -49,7 +49,10 @@ class AudioGraph {
   uint64_t render_generation() const {
     return render_generation_.load(std::memory_order_acquire);
   }
-  void wait_renders(int blocks);
+  // False when the blocks never arrived — a stalled or absent audio thread.
+  // The caller has then *not* been given the guarantee it asked for and must
+  // not treat the graph as quiescent.
+  [[nodiscard]] bool wait_renders(int blocks);
 
   // UI thread. Drops retired strips the audio thread has now left.
   void reclaim();
@@ -140,6 +143,13 @@ class AudioGraph {
   std::array<std::unique_ptr<AudioSource>, kMaxChannels> sources_;
   std::array<std::unique_ptr<MidiSource>, kMaxChannels> midi_sources_;
 
+  // What the audio thread reads, published the same way the strips are. The
+  // unique_ptrs above only own; reading one of those from the audio thread
+  // while add_channel reassigns it would be a race on the pointer itself, not
+  // merely on what it points at.
+  std::array<std::atomic<AudioSource*>, kMaxChannels> live_sources_{};
+  std::array<std::atomic<MidiSource*>, kMaxChannels> live_midi_sources_{};
+
   // What the audio thread actually walks. A null slot was removed and is
   // skipped; the owning pointers above are what keep the object alive.
   std::array<std::atomic<ChannelStrip*>, kMaxChannels> live_{};
@@ -167,6 +177,17 @@ class AudioGraph {
     uint64_t generation = 0;
   };
   std::vector<RetiredStrip> retired_;
+
+  // The sources need exactly the same treatment. A removal leaves them in
+  // place so a render pass already inside the slot keeps its ground, which
+  // means the *next* add_channel to reuse that slot is what would free them —
+  // while that pass may still be in read(). So they are retired too.
+  struct RetiredSource {
+    std::unique_ptr<AudioSource> audio;
+    std::unique_ptr<MidiSource> midi;
+    uint64_t generation = 0;
+  };
+  std::vector<RetiredSource> retired_sources_;
 
   double sample_rate_ = 0.0;
   uint32_t max_block_frames_ = 0;

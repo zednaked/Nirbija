@@ -142,8 +142,10 @@ class Engine {
   void remove_bus(size_t bus) { graph_->remove_bus(bus); }
 
   // Park the graph (silence + two observed blocks) so state I/O and recorder
-  // teardown cannot race process().
-  void park_graph();
+  // teardown cannot race process(). False when those blocks never came, which
+  // means the guarantee was not obtained — with no client there is nothing to
+  // wait for and it is trivially true.
+  bool park_graph();
   void unpark_graph();
 
   // UI thread. Returns false if the queue is full, meaning the audio thread has

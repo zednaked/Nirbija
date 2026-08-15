@@ -63,7 +63,11 @@ bool FilePlayerInstance::load(const std::string& path) {
 
   // The audio thread may be inside the old buffer right now, so it is retired
   // rather than freed.
-  if (owned_ != nullptr) retired_.push_back(owned_);
+  const uint64_t now = process_generation_.load(std::memory_order_acquire);
+  std::erase_if(retired_, [now](const RetiredBuffer& item) {
+    return now >= item.generation + 2;
+  });
+  if (owned_ != nullptr) retired_.push_back({owned_, now});
   owned_ = std::move(buffer);
   live_.store(owned_.get(), std::memory_order_release);
   position_ = 0.0;
@@ -82,8 +86,16 @@ void FilePlayerInstance::set_transport(const TransportInfo& transport) {
   transport_playing_ = transport.playing;
 }
 
-void FilePlayerInstance::process(const float* const*, float* const* outputs,
-                                 uint32_t frames) {
+void FilePlayerInstance::process(const float* const* inputs,
+                                 float* const* outputs, uint32_t frames) {
+  render(inputs, outputs, frames);
+  // Counted on the way out, so a retired buffer two generations old is one no
+  // render can still be reading.
+  process_generation_.fetch_add(1, std::memory_order_release);
+}
+
+void FilePlayerInstance::render(const float* const*, float* const* outputs,
+                                uint32_t frames) {
   for (int ch = 0; ch < channels_; ++ch)
     std::fill_n(outputs[ch], frames, 0.0f);
 
@@ -157,8 +169,14 @@ bool FilePlayerInstance::load_state(const std::vector<uint8_t>& blob) {
   const size_t second = text.find('\n', first + 1);
   if (second == std::string::npos) return false;
 
-  set_parameter(kGain, std::stod(text.substr(first + 1, second - first - 1)));
-  set_parameter(kLoop, std::stod(text.substr(second + 1)));
+  // A malformed number leaves that one parameter at its default rather than
+  // failing the whole load: the path is the part worth rescuing.
+  const std::string_view view(text);
+  double gain = 1.0;
+  double loop = 1.0;
+  if (parse_number(view.substr(first + 1, second - first - 1), &gain))
+    set_parameter(kGain, gain);
+  if (parse_number(view.substr(second + 1), &loop)) set_parameter(kLoop, loop);
 
   const std::string saved_path = text.substr(0, first);
   // A file that has gone missing since the save leaves a silent player rather

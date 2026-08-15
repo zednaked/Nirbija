@@ -85,4 +85,49 @@ std::unique_ptr<PluginInstance> PluginListModel::instantiate(int row) const {
   return backends_[entry.backend_index]->instantiate(entry.descriptor);
 }
 
+// --- PluginFilterModel -------------------------------------------------------
+
+PluginFilterModel::PluginFilterModel(QObject* parent)
+    : QSortFilterProxyModel(parent) {
+  connect(this, &QAbstractItemModel::rowsInserted, this,
+          &PluginFilterModel::countChanged);
+  connect(this, &QAbstractItemModel::rowsRemoved, this,
+          &PluginFilterModel::countChanged);
+  connect(this, &QAbstractItemModel::modelReset, this,
+          &PluginFilterModel::countChanged);
+}
+
+void PluginFilterModel::setQuery(const QString& query) {
+  if (query_ == query) return;
+  query_ = query;
+  invalidateRowsFilter();
+  emit queryChanged();
+  emit countChanged();
+}
+
+int PluginFilterModel::sourceRow(int proxyRow) const {
+  const QModelIndex proxy = index(proxyRow, 0);
+  if (!proxy.isValid()) return -1;
+  return mapToSource(proxy).row();
+}
+
+bool PluginFilterModel::filterAcceptsRow(int source_row,
+                                         const QModelIndex& source_parent) const {
+  if (query_.isEmpty()) return true;
+  const QAbstractItemModel* source = sourceModel();
+  if (source == nullptr) return true;
+
+  // Name, maker and format all match, so "clap" or "surge" or the vendor's name
+  // each narrow the list — a picker where only the name matched meant knowing
+  // what a plugin was called before you could find it.
+  const QModelIndex index = source->index(source_row, 0, source_parent);
+  for (const int role : {PluginListModel::NameRole, PluginListModel::VendorRole,
+                         PluginListModel::FormatRole}) {
+    if (source->data(index, role).toString().contains(query_,
+                                                      Qt::CaseInsensitive))
+      return true;
+  }
+  return false;
+}
+
 }  // namespace nirbija

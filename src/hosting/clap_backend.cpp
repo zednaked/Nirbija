@@ -150,6 +150,11 @@ class ClapInstance : public PluginInstance {
     host_.request_restart = &ClapInstance::host_request_restart;
     host_.request_process = &ClapInstance::host_request_process;
     host_.request_callback = &ClapInstance::host_request_callback;
+
+    // How a CLAP plugin says "my state moved, ask me for it again". Without
+    // answering this, a patch loaded from the plugin's own editor never
+    // reached the session file.
+    state_support_.mark_dirty = &ClapInstance::host_mark_dirty;
   }
 
   ~ClapInstance() override { destroy(); }
@@ -201,6 +206,7 @@ class ClapInstance : public PluginInstance {
     for (auto& channel : output_channels_) output_ptrs_.push_back(channel.data());
     plugin_latency_ = static_cast<const clap_plugin_latency_t*>(
         plugin_->get_extension(plugin_, CLAP_EXT_LATENCY));
+    refresh_latency();
 
     if (!plugin_->start_processing(plugin_)) {
       plugin_->deactivate(plugin_);
@@ -342,7 +348,16 @@ class ClapInstance : public PluginInstance {
     param_queue_.push({id, value});
   }
 
-  void host_idle() override { pump_main_thread(); }
+  bool take_state_dirty() override {
+    return state_dirty_.exchange(false, std::memory_order_acq_rel);
+  }
+
+  void host_idle() override {
+    pump_main_thread();
+    // The main thread is the only place allowed to ask, so the audio thread's
+    // cached copy is refreshed on the same tick that pumps the editor.
+    refresh_latency();
+  }
 
   std::vector<uint8_t> save_state() const override {
     std::vector<uint8_t> blob;
@@ -360,9 +375,15 @@ class ClapInstance : public PluginInstance {
 
   const PluginDescriptor& descriptor() const override { return desc_; }
 
+  // Cached, never asked for here: clap_plugin_latency.get is [main-thread] and
+  // this is called from the audio thread, twice per strip per block.
   uint32_t latency_samples() const override {
-    if (plugin_latency_ == nullptr || plugin_ == nullptr) return 0;
-    return plugin_latency_->get(plugin_);
+    return latency_.load(std::memory_order_relaxed);
+  }
+
+  void refresh_latency() {
+    if (plugin_latency_ == nullptr || plugin_ == nullptr) return;
+    latency_.store(plugin_latency_->get(plugin_), std::memory_order_relaxed);
   }
 
   int extra_output_pairs() const override {
@@ -465,12 +486,15 @@ class ClapInstance : public PluginInstance {
       list.ctx = this;
       list.size = &InEventList::size_fn;
       list.get = &InEventList::get_fn;
+      // Reserved once, here, for the most either side can deliver in a block.
+      // rebuild() runs on the audio thread, where growing this vector was an
+      // allocation in the middle of process().
+      events.reserve(2 * kMaxBlockMidi);
     }
 
     void rebuild(const PendingParam* pending, size_t pending_count,
                  const MidiEvent* midi, size_t midi_count) {
       events.clear();
-      events.reserve(pending_count + midi_count);
 
       // Both kinds share one list, and CLAP wants it sorted by time. Parameter
       // changes all land at frame 0, so putting them first keeps that true.
@@ -633,13 +657,20 @@ class ClapInstance : public PluginInstance {
     return static_cast<ClapInstance*>(host->host_data);
   }
 
-  // Only the two event-loop extensions are offered. Anything else a plugin asks
-  // for is better left unanswered than half-implemented.
+  // The two event-loop extensions and state. Anything else a plugin asks for is
+  // better left unanswered than half-implemented.
   static const void* host_get_extension(const clap_host_t* host, const char* id) {
     ClapInstance* self = self_of(host);
     if (std::strcmp(id, CLAP_EXT_TIMER_SUPPORT) == 0) return &self->timer_support_;
     if (std::strcmp(id, CLAP_EXT_POSIX_FD_SUPPORT) == 0) return &self->fd_support_;
+    if (std::strcmp(id, CLAP_EXT_STATE) == 0) return &self->state_support_;
     return nullptr;
+  }
+
+  // Callable from any thread per the extension, so the flag is atomic and the
+  // UI picks it up on its next poll rather than saving from under the plugin.
+  static void host_mark_dirty(const clap_host_t* host) {
+    self_of(host)->state_dirty_.store(true, std::memory_order_release);
   }
 
   static void host_request_restart(const clap_host_t*) {}
@@ -714,6 +745,8 @@ class ClapInstance : public PluginInstance {
 
   clap_host_timer_support_t timer_support_{};
   clap_host_posix_fd_support_t fd_support_{};
+  clap_host_state_t state_support_{};
+  std::atomic<bool> state_dirty_{false};
   std::vector<Timer> timers_;
   std::vector<RegisteredFd> fds_;
   std::vector<pollfd> poll_set_;
@@ -724,6 +757,7 @@ class ClapInstance : public PluginInstance {
   bool processing_ = false;
   int strip_channels_ = 2;
   int64_t steady_time_ = 0;
+  std::atomic<uint32_t> latency_{0};
 
   std::vector<std::vector<float>> input_channels_, output_channels_;
   std::vector<float*> input_ptrs_, output_ptrs_;

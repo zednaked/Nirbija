@@ -1,4 +1,6 @@
 import QtQuick
+import QtQuick.Layouts
+import Nirbija
 
 // The master bus, pinned to the right of the mixer rather than scrolling with
 // the channels: it is the one strip you always want in reach.
@@ -6,65 +8,87 @@ Rectangle {
     id: root
 
     property real gain: 1.0
-    property real peakLeft: 0
-    property real peakRight: 0
+    property real positionLeft: 0
+    property real positionRight: 0
+    property real holdLeft: 0
+    property real holdRight: 0
     property string sink: ""
 
     signal outputClicked
 
-    width: Skin.stripWidth
+    // Wider than a channel: this is the fader that gets the numbered scale, and
+    // the numbers need the room.
+    width: Skin.stripWidth + Skin.px(16)
     color: Skin.bar
+
+    // A hairline against the mixer area, so the master reads as pinned rather
+    // than as the last strip in the row.
+    Rectangle {
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        width: 1
+        color: Skin.line
+    }
 
     Rectangle {
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
-        height: 3
+        height: Skin.px(3)
         color: Skin.text
         opacity: 0.5
     }
 
-    Column {
+    ColumnLayout {
         anchors.fill: parent
         anchors.margins: Skin.gap
-        anchors.topMargin: Skin.gap + 3
+        anchors.topMargin: Skin.gap + Skin.px(3)
         spacing: Skin.gap
 
         Text {
-            width: parent.width
-            height: 20
+            Layout.fillWidth: true
+            Layout.preferredHeight: Skin.px(20)
             text: qsTr("MASTER")
             color: Skin.text
-            font.pixelSize: 11
+            font.pixelSize: Skin.font
             font.bold: true
+            font.letterSpacing: 1
             horizontalAlignment: Text.AlignHCenter
             verticalAlignment: Text.AlignVCenter
         }
 
         Fader {
-            width: parent.width - 20
-            anchors.horizontalCenter: parent.horizontalCenter
-            height: root.height - 150
+            Layout.fillHeight: true
+            Layout.alignment: Qt.AlignHCenter
+            Layout.preferredWidth: Skin.px(96)
             gain: root.gain
-            peakLeft: root.peakLeft
-            peakRight: root.peakRight
+            positionLeft: root.positionLeft
+            positionRight: root.positionRight
+            holdLeft: root.holdLeft
+            holdRight: root.holdRight
             accent: Skin.text
-            onGainRequested: value => mixer.masterGain = value
+            showScale: true
+            tip: qsTr("Master level, after every strip has been summed. Drag to move it, Shift-drag for fine, scroll for one decibel, double-click for unity.")
+            onGainRequested: value => Mixer.masterGain = value
         }
 
         Text {
-            width: parent.width
+            Layout.fillWidth: true
             horizontalAlignment: Text.AlignHCenter
-            text: mixer.gainLabel(root.gain)
-            color: Skin.textDim
-            font.pixelSize: 10
+            text: Mixer.gainLabel(root.gain)
+            color: Skin.text
+            font.pixelSize: Skin.font
+            font.family: Skin.monoFamily
         }
 
         NodeSlot {
-            width: parent.width
+            Layout.fillWidth: true
+            Layout.preferredHeight: Skin.slotHeight
             label: root.sink.length > 0 ? root.sink : qsTr("no output")
+            tip: qsTr("Where the master goes. Click to pick a hardware output.")
             filled: root.sink.length > 0
-            level: Math.max(root.peakLeft, root.peakRight)
+            position: Math.max(root.positionLeft, root.positionRight)
             onClicked: root.outputClicked()
             onMenuRequested: root.outputClicked()
         }

@@ -9,6 +9,9 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 
+#include <poll.h>
+
+#include <algorithm>
 #include <mutex>
 
 namespace nirbija {
@@ -109,17 +112,29 @@ bool PluginWindow::open() {
   // The plugin inspects the parent as soon as it is handed over, so the map has
   // to have actually happened rather than merely been requested. Timed: a
   // missing MapNotify must not freeze the mixer.
+  //
+  // Blocked on the connection's own descriptor rather than spun on: the poll
+  // sleeps until the server has something to say, where the old loop burned a
+  // core for the whole half second whenever the notify never came.
   {
     XEvent event{};
     QElapsedTimer wait;
     wait.start();
     bool mapped = false;
-    while (wait.elapsed() < 500) {
+    const int fd = ConnectionNumber(display);
+    while (!mapped) {
       if (XCheckTypedWindowEvent(display, window_, MapNotify, &event)) {
         mapped = true;
         break;
       }
+      const int left = 500 - static_cast<int>(wait.elapsed());
+      if (left <= 0) break;
+
       XFlush(display);
+      pollfd waiting{};
+      waiting.fd = fd;
+      waiting.events = POLLIN;
+      if (poll(&waiting, 1, std::min(left, 50)) < 0) break;
     }
     if (!mapped)
       qWarning("plugin editor: MapNotify timed out, attaching anyway");

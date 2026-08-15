@@ -203,8 +203,15 @@ bool LooperInstance::load_state(const std::vector<uint8_t>& blob) {
   const std::string text(blob.begin(), blob.end());
   const size_t split = text.find('\n');
   if (split == std::string::npos) return false;
-  set_parameter(kQuantize, std::stod(text.substr(0, split)));
-  set_parameter(kGain, std::stod(text.substr(split + 1)));
+
+  double quantize = 0.0;
+  double gain = 0.0;
+  const std::string_view view(text);
+  if (!parse_number(view.substr(0, split), &quantize)) return false;
+  if (!parse_number(view.substr(split + 1), &gain)) return false;
+
+  set_parameter(kQuantize, quantize);
+  set_parameter(kGain, gain);
   return true;
 }
 

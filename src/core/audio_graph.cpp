@@ -43,9 +43,11 @@ void AudioGraph::prepare(double sample_rate, uint32_t max_block_frames) {
   }
 
   const size_t count = active_.load(std::memory_order_acquire);
-  for (size_t i = 0; i < count; ++i)
+  for (size_t i = 0; i < count; ++i) {
+    if (sources_[i] != nullptr) sources_[i]->prepare(sized);
     if (channels_[i] != nullptr)
       channels_[i]->prepare(sample_rate, sized, rate_changed);
+  }
 
   const size_t buses = bus_active_.load(std::memory_order_acquire);
   for (size_t i = 0; i < buses; ++i)
@@ -56,20 +58,22 @@ void AudioGraph::park() { parked_.store(true, std::memory_order_release); }
 
 void AudioGraph::unpark() { parked_.store(false, std::memory_order_release); }
 
-void AudioGraph::wait_renders(int blocks) {
+bool AudioGraph::wait_renders(int blocks) {
   const uint64_t seen = render_generation_.load(std::memory_order_acquire);
   const uint64_t want = seen + static_cast<uint64_t>(std::max(blocks, 1));
-  for (int spins = 0;
-       spins < 100 &&
-       render_generation_.load(std::memory_order_acquire) < want;
-       ++spins) {
+  for (int spins = 0; spins < 100; ++spins) {
+    if (render_generation_.load(std::memory_order_acquire) >= want) return true;
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }
+  return render_generation_.load(std::memory_order_acquire) >= want;
 }
 
 void AudioGraph::reclaim() {
   const uint64_t now = render_generation_.load(std::memory_order_acquire);
   std::erase_if(retired_, [now](const RetiredStrip& item) {
+    return now >= item.generation + 2;
+  });
+  std::erase_if(retired_sources_, [now](const RetiredSource& item) {
     return now >= item.generation + 2;
   });
 }
@@ -297,9 +301,12 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
     if (live == nullptr) continue;  // removed channel
     ChannelStrip& strip = *live;
 
-    const int width = strip.channel_count();
-    if (sources_[i] != nullptr)
-      sources_[i]->read(scratch_ptrs_.data(), width, frames);
+    // Two channels wide is all the scratch there is, and a strip wider than
+    // that would walk off the end of it.
+    const int width = std::clamp(strip.channel_count(), 1, 2);
+    AudioSource* source = live_sources_[i].load(std::memory_order_acquire);
+    if (source != nullptr)
+      source->read(scratch_ptrs_.data(), width, frames);
     else
       for (int ch = 0; ch < width; ++ch)
         std::fill_n(scratch_ptrs_[ch], frames, 0.0f);
@@ -318,9 +325,10 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
     }
 
     size_t midi_count = 0;
-    if (midi_sources_[i] != nullptr) {
-      midi_count = midi_sources_[i]->read(midi_scratch_.data(),
-                                          midi_scratch_.size(), frames);
+    if (MidiSource* midi_source =
+            live_midi_sources_[i].load(std::memory_order_acquire)) {
+      midi_count = midi_source->read(midi_scratch_.data(),
+                                     midi_scratch_.size(), frames);
     }
     for (size_t e = 0; e < injected_midi_n_[i] && midi_count < midi_scratch_.size();
          ++e)
@@ -493,8 +501,23 @@ size_t AudioGraph::add_channel(std::string name, int channel_count,
 
   ChannelStrip* raw = strip.get();
   channels_[index] = std::move(strip);
+
+  // Whatever the previous occupant of this slot left behind is retired rather
+  // than dropped here: a render pass that entered the slot before it was
+  // removed can still be inside the old source's read().
+  if (sources_[index] != nullptr || midi_sources_[index] != nullptr) {
+    retired_sources_.push_back({std::move(sources_[index]),
+                                std::move(midi_sources_[index]),
+                                render_generation_.load(std::memory_order_acquire)});
+  }
   sources_[index] = std::move(source);
   midi_sources_[index] = std::move(midi);
+
+  // Published before the strip below, so a pass that can see the channel can
+  // always see the source that feeds it.
+  live_sources_[index].store(sources_[index].get(), std::memory_order_release);
+  live_midi_sources_[index].store(midi_sources_[index].get(),
+                                  std::memory_order_release);
 
   // Release twice over: the slot has to be visible before the count that
   // reaches it, or the audio thread could walk into a slot it cannot read yet.

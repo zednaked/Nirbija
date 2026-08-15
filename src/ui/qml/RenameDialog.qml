@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls.Basic
+import Nirbija
 
 // Renaming a channel. Small on purpose: it is a text field and two ways out.
 Popup {
@@ -9,17 +10,17 @@ Popup {
 
     signal accepted(string name)
 
-    width: 300
-    height: 96
+    width: Skin.px(320)
     modal: true
     anchors.centerIn: Overlay.overlay
-    padding: 10
+    padding: Skin.spacingL
+    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
     background: Rectangle {
-        color: Skin.strip
+        color: Skin.popup
         border.width: 1
-        border.color: Skin.line
-        radius: Skin.radius
+        border.color: Skin.border
+        radius: Skin.radiusL
     }
 
     function openFor(row, current) {
@@ -30,27 +31,34 @@ Popup {
         field.selectAll()
     }
 
-    Column {
-        anchors.fill: parent
-        spacing: 8
+    function commit() {
+        if (field.text.trim().length > 0)
+            root.accepted(field.text.trim())
+        root.close()
+    }
+
+    contentItem: Column {
+        spacing: Skin.spacing
 
         Text {
+            width: parent.width
             text: qsTr("Channel name")
             color: Skin.textDim
-            font.pixelSize: 11
+            font.pixelSize: Skin.font
         }
 
         TextField {
             id: field
             width: parent.width
             color: Skin.text
-            font.pixelSize: 13
+            font.pixelSize: Skin.fontL
+            selectByMouse: true
 
             background: Rectangle {
                 color: Skin.slotEmpty
                 radius: Skin.radius
                 border.width: 1
-                border.color: Skin.line
+                border.color: field.activeFocus ? Skin.focus : Skin.border
             }
 
             // Enter commits and Escape backs out, so the mouse is optional.
@@ -58,11 +66,24 @@ Popup {
             Keys.onEnterPressed: root.commit()
             Keys.onEscapePressed: root.close()
         }
-    }
 
-    function commit() {
-        if (field.text.length > 0)
-            root.accepted(field.text)
-        root.close()
+        Row {
+            anchors.right: parent.right
+            spacing: Skin.spacingS
+
+            StripButton {
+                width: Skin.px(76)
+                label: qsTr("Cancel")
+                onClicked: root.close()
+            }
+
+            StripButton {
+                width: Skin.px(76)
+                label: qsTr("Rename")
+                active: field.text.trim().length > 0
+                enabled: field.text.trim().length > 0
+                onClicked: root.commit()
+            }
+        }
     }
 }

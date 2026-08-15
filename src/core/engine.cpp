@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <ctime>
 
 namespace nirbija {
@@ -43,14 +44,22 @@ class TapSource : public AudioSource {
   TapSource(AudioGraph* graph, size_t source, int pair)
       : graph_(graph), source_(source), pair_(pair) {}
 
+  // Sized once here rather than on the stack: this runs on the JACK realtime
+  // thread, whose stack is far smaller than the two 32 KB arrays this used to
+  // put on it.
+  void prepare(uint32_t max_block_frames) override {
+    if (max_block_frames <= left_.size()) return;  // grow only, never shrink
+    left_.assign(max_block_frames, 0.0f);
+    right_.assign(max_block_frames, 0.0f);
+  }
+
   void read(float* const* dest, int channels, uint32_t frames) override {
-    float left[8192];
-    float right[8192];
-    const uint32_t n = std::min(frames, 8192u);
-    graph_->copy_tap(source_, pair_, left, right, n);
+    const uint32_t n =
+        std::min(frames, static_cast<uint32_t>(left_.size()));
+    graph_->copy_tap(source_, pair_, left_.data(), right_.data(), n);
     for (uint32_t i = 0; i < n; ++i) {
-      dest[0][i] = left[i];
-      if (channels > 1) dest[1][i] = right[i];
+      dest[0][i] = left_[i];
+      if (channels > 1) dest[1][i] = right_[i];
     }
     if (n < frames) {
       std::fill_n(dest[0] + n, frames - n, 0.0f);
@@ -62,6 +71,7 @@ class TapSource : public AudioSource {
   AudioGraph* graph_;
   size_t source_;
   int pair_;
+  std::vector<float> left_, right_;
 };
 
 class JackMidiSource : public MidiSource {
@@ -145,6 +155,10 @@ void Engine::stop() {
 size_t Engine::add_channel(const std::string& name, int channel_count) {
   if (client_ == nullptr) return kMaxChannels;
 
+  // Mono or stereo. A session file is just bytes on disk, and a width of five
+  // arriving from one used to run off the end of the port array below.
+  channel_count = std::clamp(channel_count, 1, kMaxStripChannels);
+
   const size_t index = graph_->next_channel_slot();
   if (index >= kMaxChannels) return kMaxChannels;
 
@@ -197,7 +211,11 @@ size_t Engine::add_channel(const std::string& name, int channel_count) {
     record.audio_out[ch] = jack_port_register(
         client_, out_name.c_str(), JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
   }
-  channel_ports_.push_back(record);
+  // By index, not appended: the slot handed back can be a hole in the middle
+  // (a tap channel that was removed leaves one with no ports of its own), and
+  // pushing there would file this channel's ports under someone else's number.
+  if (channel_ports_.size() <= index) channel_ports_.resize(index + 1);
+  channel_ports_[index] = record;
 
   return graph_->add_channel(name, channel_count,
                              std::make_unique<JackInputSource>(ports[0], ports[1]),
@@ -244,14 +262,24 @@ void Engine::stop_recording() {
   const size_t count = graph_->channel_count();
   for (size_t i = 0; i < count; ++i)
     if (graph_->channel_alive(i)) graph_->channel(i).set_record_track(-1);
-  graph_->wait_renders(2);
+  // Best effort only. What actually makes the teardown safe is the in-flight
+  // guard inside Recorder::stop(), since a write() can already be past its
+  // recording() check when this returns.
+  if (client_ != nullptr) (void)graph_->wait_renders(2);
 
   recorder_.stop();
 }
 
-void Engine::park_graph() {
+bool Engine::park_graph() {
   graph_->park();
-  graph_->wait_renders(2);
+  // With no client there is no audio thread to wait for, and waiting anyway
+  // cost 200 ms of nothing on every save and every plugin restore.
+  if (client_ == nullptr) return true;
+  if (graph_->wait_renders(2)) return true;
+  std::fprintf(stderr,
+               "nirbija: the audio thread did not report two blocks; the graph "
+               "may not be quiescent\n");
+  return false;
 }
 
 void Engine::unpark_graph() { graph_->unpark(); }
@@ -442,9 +470,11 @@ size_t Engine::add_tap_channel(size_t source, int pair) {
   if (client_ == nullptr) return kMaxChannels;
   const size_t index = graph_->next_channel_slot();
   if (index >= kMaxChannels) return kMaxChannels;
-  while (channel_ports_.size() <= index) channel_ports_.push_back({});
-  return graph_->add_channel(
-      "tap", 2, std::make_unique<TapSource>(graph_.get(), source, pair), nullptr);
+  if (channel_ports_.size() <= index) channel_ports_.resize(index + 1);
+
+  auto tap = std::make_unique<TapSource>(graph_.get(), source, pair);
+  tap->prepare(block_frames_);
+  return graph_->add_channel("tap", 2, std::move(tap), nullptr);
 }
 
 void Engine::inject_midi(size_t channel, const MidiEvent& event) {
