@@ -232,8 +232,8 @@ class Lv2Gui : public PluginGui {
     }
   }
 
-  void idle() override {
-    if (handle_ == nullptr) return;
+  int idle() override {
+    if (handle_ == nullptr) return 0;
     push_changed_ports();
 
     // Whatever the DSP produced for its editor since the last tick.
@@ -246,7 +246,8 @@ class Lv2Gui : public PluginGui {
       }
     }
 
-    if (idle_iface_ != nullptr) idle_iface_->idle(handle_);
+    if (idle_iface_ != nullptr) return idle_iface_->idle(handle_);
+    return 0;
   }
 
   // Only known once the editor has asked for a size through ui:resize.
@@ -447,7 +448,17 @@ class Lv2Instance : public PluginInstance {
   ~Lv2Instance() override { deactivate(); }
 
   bool activate(double sample_rate, uint32_t max_block_frames) override {
-    if (instance_ != nullptr) deactivate();
+    // A period change must not free the instance: a live editor holds
+    // instance-access to this handle. Grow buffers and reconnect instead.
+    if (instance_ != nullptr) {
+      if (max_block_frames > max_block_frames_) {
+        max_block_frames_ = max_block_frames;
+        for (auto& buffer : audio_buffers_)
+          buffer.assign(max_block_frames_, 0.0f);
+      }
+      connect_all();
+      return true;
+    }
     max_block_frames_ = max_block_frames;
 
     // Features are handed to the plugin by pointer and must outlive it, so they
@@ -479,8 +490,8 @@ class Lv2Instance : public PluginInstance {
 
   void deactivate() override {
     if (instance_ == nullptr) return;
-    lilv_instance_deactivate(instance_);
     stop_worker();
+    lilv_instance_deactivate(instance_);
     worker_iface_ = nullptr;
     lilv_instance_free(instance_);
     instance_ = nullptr;

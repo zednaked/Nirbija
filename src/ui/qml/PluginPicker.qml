@@ -8,6 +8,7 @@ Popup {
 
     property int targetRow: -1
     property int targetSlot: -1
+    property bool replace: false
 
     width: 380
     height: 460
@@ -99,7 +100,13 @@ Popup {
                 MouseArea {
                     anchors.fill: parent
                     onClicked: {
-                        mixer.addInsert(root.targetRow, index)
+                        if (root.replace && root.targetSlot >= 0)
+                            mixer.removeInsert(root.targetRow, root.targetSlot)
+                        if (root.targetSlot >= 0)
+                            mixer.addInsertAt(root.targetRow, index, root.targetSlot)
+                        else
+                            mixer.addInsert(root.targetRow, index)
+                        root.replace = false
                         root.close()
                     }
                 }

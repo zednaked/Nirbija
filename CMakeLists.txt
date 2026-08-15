@@ -9,7 +9,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 option(NIRBIJA_LV2 "Build the LV2 plugin backend" ON)
 option(NIRBIJA_CLAP "Build the CLAP plugin backend" ON)
 option(NIRBIJA_VST3 "Build the VST3 plugin backend" ON)
-option(NIRBIJA_UI "Build the Qt6 QML user interface" OFF)
+option(NIRBIJA_UI "Build the Qt6 QML user interface" ON)
 option(NIRBIJA_TESTS "Build the CLI test harnesses" ON)
 
 add_compile_options(-Wall -Wextra -Wpedantic)
@@ -44,6 +44,10 @@ if(NIRBIJA_CLAP)
     GIT_TAG 1.2.6
     GIT_SHALLOW TRUE)
   FetchContent_MakeAvailable(clap)
+  # clap's own CMake would otherwise install its headers on `cmake --install`.
+  if(TARGET clap)
+    set_target_properties(clap PROPERTIES EXCLUDE_FROM_ALL TRUE)
+  endif()
 endif()
 
 add_subdirectory(src)

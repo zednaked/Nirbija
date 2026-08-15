@@ -27,7 +27,8 @@ class ChannelStrip {
   ChannelStrip(std::string name, int channel_count);
   ~ChannelStrip();
 
-  void prepare(double sample_rate, uint32_t max_block_frames);
+  void prepare(double sample_rate, uint32_t max_block_frames,
+               bool force_reactivate = false);
 
   // In-place on `buffers`, which holds channel_count() pointers. Any MIDI for
   // this block is handed to the inserts first, so a synth sitting in the chain
@@ -90,6 +91,7 @@ class ChannelStrip {
   bool add_insert(std::unique_ptr<PluginInstance> plugin,
                   size_t* placed_at = nullptr);
   void remove_insert(size_t index);
+  void reclaim();
 
   // Swaps two slots. The audio thread may be part way through the chain when
   // this lands, so a single block can render the pair in either order; nothing
@@ -132,10 +134,14 @@ class ChannelStrip {
 
   // UI thread only. `retired_` holds inserts pulled out of the chain: the audio
   // thread may still be inside one when it is removed, so they are kept alive
-  // until the strip itself dies.
-  // TODO(phase-8): reclaim these once the audio thread has confirmed a pass.
+  // until two process() calls have passed.
+  struct RetiredInsert {
+    std::unique_ptr<PluginInstance> plugin;
+    uint64_t generation = 0;
+  };
   std::vector<std::unique_ptr<PluginInstance>> owned_inserts_;
-  std::vector<std::unique_ptr<PluginInstance>> retired_;
+  std::vector<RetiredInsert> retired_;
+  std::atomic<uint64_t> process_generation_{0};
 
   // Scratch pointers handed to plugins, sized in prepare() so process() never
   // allocates.

@@ -66,6 +66,7 @@ Item {
 
             MouseArea {
                 anchors.fill: parent
+                preventStealing: true
                 onPressed: mouse => setFromY(mouse.y)
                 onPositionChanged: mouse => {
                     if (pressed)

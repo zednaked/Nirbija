@@ -73,12 +73,12 @@ class MixerModel : public QAbstractListModel {
   qreal masterPeakRight() const { return master_peak_[1]; }
   qreal masterGain() const { return master_gain_; }
   QString masterSink() const;
-  bool playing() const { return engine_.playing(); }
+  bool playing() const { return playing_ui_; }
   bool recording() const { return engine_.recording(); }
   QString recordingLabel() const;
   qreal tempo() const { return engine_.tempo(); }
   void setTempo(qreal bpm);
-  bool metronome() const { return engine_.metronome(); }
+  bool metronome() const { return metronome_ui_; }
   Q_INVOKABLE void toggleMetronome();
   PluginListModel* plugins() const { return plugins_.get(); }
   void setMasterGain(qreal gain);
@@ -138,6 +138,9 @@ class MixerModel : public QAbstractListModel {
 
   // Clears the mixer back to nothing and saves that as the session.
   Q_INVOKABLE void newSession();
+  Q_INVOKABLE bool shouldSeedSession() const { return seed_empty_session_; }
+
+  Q_INVOKABLE bool addInsertAt(int row, int pluginIndex, int targetSlot);
 
   // Named sessions, apart from the automatic one: save a copy anywhere, or
   // replace the current mixer with a file's contents. Loading also becomes the
@@ -212,6 +215,7 @@ class MixerModel : public QAbstractListModel {
   void transportChanged();
   void learnChanged();
   void recordingChanged();
+  void errorOccurred(const QString& message);
 
  private:
   struct ChannelUi {
@@ -265,6 +269,8 @@ class MixerModel : public QAbstractListModel {
     int midi_channel = -1;
     enum class Kind { Gain, Pan, Mute, Param } kind = Kind::Gain;
     int row = -1;
+    int graph_slot = -1;
+    bool is_bus = false;
     int slot = -1;
     uint32_t param = 0;
     double min = 0.0;
@@ -298,6 +304,9 @@ class MixerModel : public QAbstractListModel {
   qreal master_peak_[2] = {0.0, 0.0};
   qreal master_gain_ = 1.0;
   QString status_;
+  bool playing_ui_ = false;
+  bool metronome_ui_ = false;
+  bool seed_empty_session_ = true;
 };
 
 }  // namespace nirbija

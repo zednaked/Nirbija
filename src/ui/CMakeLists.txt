@@ -44,3 +44,7 @@ qt_add_qml_module(nirbija
 
 target_link_libraries(nirbija PRIVATE nirbija_ui Qt6::Quick Qt6::QuickControls2)
 target_include_directories(nirbija PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+install(TARGETS nirbija RUNTIME DESTINATION bin)
+install(FILES ${CMAKE_SOURCE_DIR}/packaging/Nirbija.desktop
+        DESTINATION share/applications)

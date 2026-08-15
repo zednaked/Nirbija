@@ -42,6 +42,7 @@ Rectangle {
     MouseArea {
         anchors.fill: parent
         acceptedButtons: Qt.LeftButton | Qt.RightButton
+        preventStealing: true
 
         onPressed: mouse => {
             if (mouse.button === Qt.RightButton) {

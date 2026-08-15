@@ -20,8 +20,11 @@ Row {
 
             // Each dot covers a third of the range, so the last one only lights
             // when the signal is genuinely close to clipping.
+            readonly property real fader: mixer.gainToFader(root.level)
             readonly property real threshold: (index + 1) / root.dots
-            readonly property bool lit: root.level >= threshold - (1 / root.dots)
+            readonly property bool lit: index === 0
+                ? root.level > 0.001
+                : fader >= threshold - (1 / root.dots)
 
             color: lit ? Skin.meterColor(threshold) : Skin.line
             opacity: lit ? 1.0 : 0.6

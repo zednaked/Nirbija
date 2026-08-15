@@ -40,13 +40,27 @@ class AudioGraph {
   // Realtime thread. Sums every audible strip into `master`, two pointers wide.
   void render(float* const* master, uint32_t frames);
 
+  // UI thread. Parks the graph so process() emits silence; wait_renders()
+  // then proves the audio thread is out of every plugin. Used around state
+  // save/load and recorder teardown.
+  void park();
+  void unpark();
+  bool parked() const { return parked_.load(std::memory_order_acquire); }
+  uint64_t render_generation() const {
+    return render_generation_.load(std::memory_order_acquire);
+  }
+  void wait_renders(int blocks);
+
+  // UI thread. Drops retired strips the audio thread has now left.
+  void reclaim();
+
   // Realtime thread. Handed to every insert before it processes.
   void set_transport(const TransportInfo& transport) { transport_ = transport; }
 
   // The recorder is borrowed, not owned: the engine outlives the graph's use of
   // it and is what starts and stops it.
   void set_recorder(Recorder* recorder, int master_track) {
-    master_track_ = master_track;
+    master_track_.store(master_track, std::memory_order_release);
     recorder_.store(recorder, std::memory_order_release);
   }
 
@@ -56,6 +70,10 @@ class AudioGraph {
   size_t add_channel(std::string name, int channel_count,
                      std::unique_ptr<AudioSource> source,
                      std::unique_ptr<MidiSource> midi = nullptr);
+
+  // Slot the next add_channel will take, so the engine can reuse JACK ports
+  // sitting in a hole.
+  size_t next_channel_slot() const;
 
   // How many slots have ever been used. Removed slots keep their index so a
   // removal never renumbers the channels around it.
@@ -82,8 +100,11 @@ class AudioGraph {
   float read_master_peak(int channel);
 
  private:
-  bool any_soloed(size_t count) const;
+  bool any_channel_soloed(size_t count) const;
+  bool any_bus_soloed(size_t count) const;
   void record_master(float* const* master, uint32_t frames);
+  size_t take_channel_slot();
+  size_t take_bus_slot();
 
   // Sums a strip's output into wherever it is pointed, widening a mono strip on
   // the way.
@@ -128,16 +149,22 @@ class AudioGraph {
   std::array<std::vector<float*>, kMaxChannels> channel_ptrs_;
 
   // UI thread only. Removed strips wait here: freeing one while the audio
-  // thread is inside it would be a use-after-free.
-  // TODO: reclaim these once the audio thread has confirmed a pass.
-  std::vector<std::unique_ptr<ChannelStrip>> retired_;
+  // thread is inside it would be a use-after-free. Tagged with the render
+  // generation at retire so reclaim() can drop them two blocks later.
+  struct RetiredStrip {
+    std::unique_ptr<ChannelStrip> strip;
+    uint64_t generation = 0;
+  };
+  std::vector<RetiredStrip> retired_;
 
   double sample_rate_ = 0.0;
   uint32_t max_block_frames_ = 0;
 
   TransportInfo transport_;
   std::atomic<Recorder*> recorder_{nullptr};
-  int master_track_ = -1;
+  std::atomic<int> master_track_{-1};
+  std::atomic<bool> parked_{false};
+  std::atomic<uint64_t> render_generation_{0};
   std::atomic<float> master_gain_{1.0f};
   std::atomic<float> master_peaks_[2]{{0.0f}, {0.0f}};
 

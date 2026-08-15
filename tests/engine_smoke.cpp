@@ -12,7 +12,7 @@ int main() {
   nirbija::Engine engine;
   if (!engine.start("nirbija-smoke")) {
     std::printf("no JACK server available, skipping\n");
-    return 0;
+    return 77;
   }
 
   std::printf("sample rate %.0f Hz, block %u frames\n", engine.sample_rate(),

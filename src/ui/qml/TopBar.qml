@@ -147,9 +147,15 @@ Rectangle {
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.top: parent.top
         anchors.topMargin: 2
-        text: mixer.learning ? qsTr("MIDI learn: move a control…") : root.status
+        text: mixer.learning ? qsTr("MIDI learn: move a control… (Esc cancels)") : root.status
         color: mixer.learning ? Skin.solo : Skin.textDim
         font.pixelSize: 9
+
+        MouseArea {
+            anchors.fill: parent
+            enabled: mixer.learning
+            onClicked: mixer.cancelLearn()
+        }
     }
 
     Text {

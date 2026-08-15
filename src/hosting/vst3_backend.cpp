@@ -78,13 +78,24 @@ std::string utf16_to_utf8(const Vst::TChar* text) {
 
 // Boilerplate every micro-implementation below shares. The interfaces a class
 // answers to are listed in its own queryInterface.
+// Counted only: for members and stack objects. An extra release must not
+// delete a HostApplication that lives inside Vst3Instance, or a MemStream
+// that lives on the stack around getState/setState.
 #define NIRBIJA_REFCOUNT()                                                    \
   std::atomic<int32> refs_{1};                                                \
   uint32 PLUGIN_API addRef() override { return ++refs_; }                     \
   uint32 PLUGIN_API release() override {                                      \
     const int32 left = --refs_;                                               \
+    return left > 0 ? static_cast<uint32>(left) : 0;                          \
+  }
+
+#define NIRBIJA_REFCOUNT_HEAP()                                               \
+  std::atomic<int32> refs_{1};                                                \
+  uint32 PLUGIN_API addRef() override { return ++refs_; }                     \
+  uint32 PLUGIN_API release() override {                                      \
+    const int32 left = --refs_;                                               \
     if (left == 0) delete this;                                               \
-    return left;                                                              \
+    return left > 0 ? static_cast<uint32>(left) : 0;                          \
   }
 
 // --- streams ----------------------------------------------------------------
@@ -181,7 +192,7 @@ struct HostAttributes : Vst::IAttributeList {
   };
   std::map<std::string, Value> values;
 
-  NIRBIJA_REFCOUNT()
+  NIRBIJA_REFCOUNT_HEAP()
   tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
     if (same_iid(iid, FUnknown_iid) || same_iid(iid, Vst::IAttributeList_iid)) {
       addRef();
@@ -251,7 +262,7 @@ struct HostMessage : Vst::IMessage {
 
   ~HostMessage() { attributes->release(); }
 
-  NIRBIJA_REFCOUNT()
+  NIRBIJA_REFCOUNT_HEAP()
   tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
     if (same_iid(iid, FUnknown_iid) || same_iid(iid, Vst::IMessage_iid)) {
       addRef();
@@ -644,13 +655,13 @@ class Vst3Instance : public PluginInstance {
       controller_->setComponentHandler(nullptr);
       // A combined component/controller is terminated once, through the
       // component; its controller reference still came from queryInterface and
-      // still has to go back.
-      if (controller_distinct_) controller_->terminate();
+      // still has to go back. Never terminate a failed initialize.
+      if (controller_distinct_ && controller_inited_) controller_->terminate();
       controller_->release();
     }
     if (processor_ != nullptr) processor_->release();
     if (component_ != nullptr) {
-      component_->terminate();
+      if (component_inited_) component_->terminate();
       component_->release();
     }
   }
@@ -662,6 +673,7 @@ class Vst3Instance : public PluginInstance {
         component_ == nullptr)
       return false;
     if (component_->initialize(&host_) != kResultOk) return false;
+    component_inited_ = true;
 
     // The controller is either its own class or the same object; both shapes
     // are legal and both exist in the wild.
@@ -672,6 +684,7 @@ class Vst3Instance : public PluginInstance {
           controller_ != nullptr) {
         controller_distinct_ = true;
         if (controller_->initialize(&host_) != kResultOk) return false;
+        controller_inited_ = true;
       }
     }
     if (controller_ == nullptr)
@@ -746,6 +759,7 @@ class Vst3Instance : public PluginInstance {
       component_->activateBus(Vst::kAudio, Vst::kOutput, static_cast<int32>(i), true);
     if (has_event_input_)
       component_->activateBus(Vst::kEvent, Vst::kInput, 0, true);
+      component_->activateBus(Vst::kEvent, Vst::kOutput, 0, true);
 
     if (component_->setActive(true) != kResultOk) return false;
     processor_->setProcessing(true);
@@ -1056,6 +1070,8 @@ class Vst3Instance : public PluginInstance {
   Vst::IEditController* controller_ = nullptr;
   Vst::IAudioProcessor* processor_ = nullptr;
   bool controller_distinct_ = false;
+  bool component_inited_ = false;
+  bool controller_inited_ = false;
   bool active_ = false;
   bool has_event_input_ = false;
   int strip_channels_ = 2;
@@ -1133,7 +1149,10 @@ class Vst3Gui : public PluginGui {
     frame_.fds.clear();
   }
 
-  void idle() override { frame_.pump(); }
+  int idle() override {
+    frame_.pump();
+    return 0;
+  }
 
   bool preferred_size(int* width, int* height) const override {
     if (view_ == nullptr) return false;

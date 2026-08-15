@@ -9,6 +9,7 @@ add_test(NAME graph_routing COMMAND nirbija_graph_routing)
 add_executable(nirbija_engine_smoke engine_smoke.cpp)
 target_link_libraries(nirbija_engine_smoke PRIVATE nirbija_core)
 add_test(NAME engine_smoke COMMAND nirbija_engine_smoke)
+set_tests_properties(engine_smoke PROPERTIES SKIP_RETURN_CODE 77)
 
 if(NIRBIJA_LV2)
   add_executable(nirbija_lv2_process lv2_process.cpp)

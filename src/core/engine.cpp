@@ -18,6 +18,10 @@ class JackInputSource : public AudioSource {
 
   void read(float* const* dest, int channels, uint32_t frames) override {
     for (int ch = 0; ch < channels; ++ch) {
+      if (ports_[ch] == nullptr) {
+        std::fill_n(dest[ch], frames, 0.0f);
+        continue;
+      }
       const auto* input = static_cast<const float*>(
           jack_port_get_buffer(ports_[ch], frames));
       if (input != nullptr) {
@@ -92,6 +96,7 @@ bool Engine::start(const std::string& client_name) {
 
   jack_set_process_callback(client_, jack_process_trampoline, this);
   jack_set_buffer_size_callback(client_, jack_buffer_size_trampoline, this);
+  jack_set_sample_rate_callback(client_, jack_sample_rate_trampoline, this);
   if (jack_activate(client_) != 0) {
     stop();
     return false;
@@ -105,14 +110,26 @@ void Engine::stop() {
   jack_client_close(client_);
   client_ = nullptr;
   master_out_[0] = master_out_[1] = nullptr;
+  control_in_ = nullptr;
 }
 
 size_t Engine::add_channel(const std::string& name, int channel_count) {
   if (client_ == nullptr) return kMaxChannels;
 
+  const size_t index = graph_->next_channel_slot();
+  if (index >= kMaxChannels) return kMaxChannels;
+
+  // Revive a hole: ports from the previous occupant are still registered.
+  if (index < channel_ports_.size() && channel_ports_[index].audio[0] != nullptr) {
+    return graph_->add_channel(
+        name, channel_count,
+        std::make_unique<JackInputSource>(channel_ports_[index].audio[0],
+                                          channel_ports_[index].audio[1]),
+        std::make_unique<JackMidiSource>(channel_ports_[index].midi));
+  }
+
   // Ports are named by index, not by the channel's display name: two channels
   // may share a name, but JACK port names must be unique.
-  const size_t index = graph_->channel_count();
   jack_port_t* ports[2] = {nullptr, nullptr};
   for (int ch = 0; ch < channel_count; ++ch) {
     const std::string port_name =
@@ -185,15 +202,23 @@ std::string Engine::start_recording(const std::string& directory) {
 void Engine::stop_recording() {
   if (!recorder_.recording()) return;
 
-  // The graph stops feeding it before it is torn down, so no block can be
-  // writing into a recorder that is closing its files.
+  // Publish the unhook first, then wait until the audio thread has left any
+  // write() that already held the pointer, then join the writer.
   graph_->set_recorder(nullptr, -1);
   const size_t count = graph_->channel_count();
   for (size_t i = 0; i < count; ++i)
     if (graph_->channel_alive(i)) graph_->channel(i).set_record_track(-1);
+  graph_->wait_renders(2);
 
   recorder_.stop();
 }
+
+void Engine::park_graph() {
+  graph_->park();
+  graph_->wait_renders(2);
+}
+
+void Engine::unpark_graph() { graph_->unpark(); }
 
 double Engine::recorded_seconds() const {
   if (sample_rate_ <= 0.0) return 0.0;
@@ -359,11 +384,18 @@ int Engine::jack_process_trampoline(jack_nframes_t frames, void* arg) {
 }
 
 int Engine::jack_buffer_size_trampoline(jack_nframes_t frames, void* arg) {
-  // JACK guarantees this runs with the process callback stopped, so reallocating
-  // the graph's scratch here is safe.
+  // Process is stopped. Scratch grows if needed and is never shrunk; plugins
+  // are not re-activated for a period change.
   auto* engine = static_cast<Engine*>(arg);
   engine->block_frames_ = frames;
   engine->graph_->prepare(engine->sample_rate_, frames);
+  return 0;
+}
+
+int Engine::jack_sample_rate_trampoline(jack_nframes_t rate, void* arg) {
+  auto* engine = static_cast<Engine*>(arg);
+  engine->sample_rate_ = rate;
+  engine->graph_->prepare(rate, engine->block_frames_);
   return 0;
 }
 
@@ -377,13 +409,15 @@ void Engine::drain_commands() {
     // Transport commands are not about any one channel, and each of them makes
     // the next block a discontinuity the plugins have to be told about.
     if (command.kind == EngineCommand::Kind::SetPlaying) {
-      playing_.store(command.value != 0.0f, std::memory_order_relaxed);
-      transport_changed_ = true;
+      const bool next = command.value != 0.0f;
+      const bool was = playing_.load(std::memory_order_relaxed);
+      playing_.store(next, std::memory_order_relaxed);
+      // A start is a discontinuity; a pause is not a seek.
+      if (next && !was) transport_changed_ = true;
       continue;
     }
     if (command.kind == EngineCommand::Kind::SetTempo) {
       if (command.value > 0.0f) tempo_.store(command.value, std::memory_order_relaxed);
-      transport_changed_ = true;
       continue;
     }
     if (command.kind == EngineCommand::Kind::Rewind) {

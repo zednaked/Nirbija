@@ -66,6 +66,7 @@ bool FilePlayerInstance::load(const std::string& path) {
   if (owned_ != nullptr) retired_.push_back(owned_);
   owned_ = std::move(buffer);
   live_.store(owned_.get(), std::memory_order_release);
+  position_ = 0.0;
   return true;
 }
 

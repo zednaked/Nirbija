@@ -9,6 +9,7 @@ Rectangle {
     property int row: 0
     property string channelName: ""
     property real gain: 1.0
+    property real pan: 0
     property bool muted: false
     property bool soloed: false
     property bool armed: false
@@ -138,6 +139,36 @@ Rectangle {
                     color: Skin.textDim
                     font.pixelSize: 10
                 }
+
+                // Balance: centre is rest. Double-click recentres.
+                Rectangle {
+                    width: parent.width
+                    height: 18
+                    radius: 2
+                    color: Skin.slotEmpty
+                    border.width: 1
+                    border.color: Skin.line
+
+                    Rectangle {
+                        width: 4
+                        height: parent.height - 4
+                        radius: 1
+                        color: Skin.accent
+                        anchors.verticalCenter: parent.verticalCenter
+                        x: (parent.width - width) * (root.pan + 1) * 0.5
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        preventStealing: true
+                        onPressed: mouse => mixer.setPan(root.row, mouse.x / width * 2 - 1)
+                        onPositionChanged: mouse => {
+                            if (pressed)
+                                mixer.setPan(root.row, Math.max(-1, Math.min(1, mouse.x / width * 2 - 1)))
+                        }
+                        onDoubleClicked: mixer.setPan(root.row, 0)
+                    }
+                }
             }
         }
 
@@ -147,8 +178,8 @@ Rectangle {
         ListView {
             id: insertList
             width: parent.width
-            height: root.height - y - outputSlot.height - title.height
-                    - root.sends.length * (20 + Skin.gap) - Skin.gap * 3
+            height: Math.max(40, root.height - y - outputSlot.height - title.height
+                    - root.sends.length * (20 + Skin.gap) - Skin.gap * 3)
             clip: true
             spacing: Skin.gap
             // AUM keeps a few empty slots visible below the chain rather than a

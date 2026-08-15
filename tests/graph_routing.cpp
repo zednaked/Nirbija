@@ -122,6 +122,37 @@ int main() {
     graph.channel(a).set_destination(nirbija::kMasterDestination);
   }
 
+  // --- mix bus and send ------------------------------------------------------
+  {
+    graph.channel(a).set_gain(1.0f);
+    graph.channel(b).set_gain(1.0f);
+    graph.channel(a).set_destination(nirbija::kMasterDestination);
+    graph.channel(b).set_destination(nirbija::kMasterDestination);
+    const size_t bus = graph.add_bus("reverb");
+    if (bus >= nirbija::kMaxBuses) {
+      std::fprintf(stderr, "FAIL could not add a bus\n");
+      ++failures;
+    } else {
+      graph.channel(a).set_send(0, static_cast<int>(bus), 1.0f);
+      // a at 0.5 plus send 0.5 through a unity bus, plus b at 0.25 = 1.25
+      expect_near("send to bus is added on top of the dest", settle(graph), 1.25f,
+                  1e-3f);
+
+      graph.channel(a).set_muted(true);
+      // Mute silences dest and send (audio after process); only b remains.
+      expect_near("mute silences dest and send", settle(graph), 0.25f, 1e-3f);
+      graph.channel(a).set_muted(false);
+      graph.channel(a).set_send(0, -1, 0.0f);
+
+      graph.channel(a).set_destination(static_cast<int>(bus));
+      expect_near("channel routed through a bus still sums", settle(graph), 0.75f,
+                  1e-3f);
+      graph.channel(a).set_destination(nirbija::kMasterDestination);
+
+      graph.remove_bus(bus);
+    }
+  }
+
   if (failures > 0) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return 1;

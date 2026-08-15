@@ -3,6 +3,7 @@
 // Qt headers come first on purpose: Xlib defines a `Status` macro that breaks
 // QTextStream if X11 is included ahead of it.
 #include <QDebug>
+#include <QElapsedTimer>
 
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
@@ -106,17 +107,23 @@ bool PluginWindow::open() {
   XFlush(display);
 
   // The plugin inspects the parent as soon as it is handed over, so the map has
-  // to have actually happened rather than merely been requested.
-  XEvent event;
-  XIfEvent(
-      display, &event,
-      [](Display*, XEvent* e, XPointer arg) -> Bool {
-        return (e->type == MapNotify &&
-                e->xmap.window == *reinterpret_cast<Window*>(arg))
-                   ? True
-                   : False;
-      },
-      reinterpret_cast<XPointer>(&window_));
+  // to have actually happened rather than merely been requested. Timed: a
+  // missing MapNotify must not freeze the mixer.
+  {
+    XEvent event{};
+    QElapsedTimer wait;
+    wait.start();
+    bool mapped = false;
+    while (wait.elapsed() < 500) {
+      if (XCheckTypedWindowEvent(display, window_, MapNotify, &event)) {
+        mapped = true;
+        break;
+      }
+      XFlush(display);
+    }
+    if (!mapped)
+      qWarning("plugin editor: MapNotify timed out, attaching anyway");
+  }
 
   if (!gui_->attach(static_cast<uintptr_t>(window_))) {
     close();
@@ -311,7 +318,11 @@ void PluginWindow::pump() {
   // one resize decision instead of one per event.
   if (child_changed) adoptChild();
 
-  if (attached_) gui_->idle();
+  if (attached_ && gui_->idle() != 0) {
+    qWarning("editor '%s': plugin asked to close", qUtf8Printable(title_));
+    close();
+    emit closed();
+  }
 }
 
 }  // namespace nirbija

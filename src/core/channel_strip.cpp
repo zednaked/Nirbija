@@ -18,18 +18,25 @@ ChannelStrip::ChannelStrip(std::string name, int channel_count)
 
 ChannelStrip::~ChannelStrip() = default;
 
-void ChannelStrip::prepare(double sample_rate, uint32_t max_block_frames) {
+void ChannelStrip::prepare(double sample_rate, uint32_t max_block_frames,
+                           bool force_reactivate) {
+  const bool first = sample_rate_ <= 0.0;
+  const bool rate_changed = sample_rate_ > 0.0 && sample_rate_ != sample_rate;
   sample_rate_ = sample_rate;
-  max_block_frames_ = max_block_frames;
+  if (max_block_frames > max_block_frames_) max_block_frames_ = max_block_frames;
   smoothing_coeff_ =
       static_cast<float>(std::exp(-1.0 / (kSmoothingSeconds * sample_rate)));
-  smoothed_gain_ = gain_.load(std::memory_order_relaxed);
-  smoothed_pan_ = pan_.load(std::memory_order_relaxed);
+  if (first) {
+    smoothed_gain_ = gain_.load(std::memory_order_relaxed);
+    smoothed_pan_ = pan_.load(std::memory_order_relaxed);
+  }
 
   plugin_io_.assign(static_cast<size_t>(channel_count_), nullptr);
-  for (auto& insert : owned_inserts_) {
-    insert->set_channel_layout(channel_count_);
-    insert->activate(sample_rate, max_block_frames);
+  if (first || rate_changed || force_reactivate) {
+    for (auto& insert : owned_inserts_) {
+      insert->set_channel_layout(channel_count_);
+      insert->activate(sample_rate, max_block_frames_);
+    }
   }
 }
 
@@ -41,25 +48,9 @@ void ChannelStrip::process(float* const* buffers, uint32_t frames,
   midi_chain_count_ = std::min(midi_count, midi_chain_.size());
   for (size_t i = 0; i < midi_chain_count_; ++i) midi_chain_[i] = midi[i];
 
-  if (muted_.load(std::memory_order_relaxed)) {
-    // Muting silences the channel but must not silence its MIDI: a synth that
-    // missed a note-off because someone hit mute would hang that note forever.
-    const size_t count = insert_count_.load(std::memory_order_acquire);
-    for (size_t i = 0; i < count; ++i) {
-      PluginInstance* insert = insert_slots_[i].load(std::memory_order_acquire);
-      if (insert == nullptr) continue;
-      for (size_t e = 0; e < midi_chain_count_; ++e)
-        insert->queue_midi(midi_chain_[e]);
-    }
-    for (int ch = 0; ch < channel_count_; ++ch)
-      std::fill_n(buffers[ch], frames, 0.0f);
-    return;
-  }
-
-  // Inserts run first, then the fader. An insert can be an instrument, and an
-  // instrument overwrites the buffer rather than adding to it — with the fader
-  // ahead of it, the fader would be applied to silence and then thrown away,
-  // which is exactly what a dead volume control looks like.
+  // Inserts always run, even while muted: a synth that missed a note-off
+  // because someone hit mute would hang that note forever, and a reverb
+  // would lose its tail. Mute is applied to the audio after the chain.
   // TODO: per-slot pre/post, so an effect can be placed after the fader.
   for (int ch = 0; ch < channel_count_; ++ch) plugin_io_[ch] = buffers[ch];
   const size_t insert_count = insert_count_.load(std::memory_order_acquire);
@@ -82,6 +73,13 @@ void ChannelStrip::process(float* const* buffers, uint32_t frames,
           midi_chain_.data() + midi_chain_count_,
           midi_chain_.size() - midi_chain_count_);
     }
+  }
+
+  if (muted_.load(std::memory_order_relaxed)) {
+    for (int ch = 0; ch < channel_count_; ++ch)
+      std::fill_n(buffers[ch], frames, 0.0f);
+    process_generation_.fetch_add(1, std::memory_order_release);
+    return;
   }
 
   const float target_gain = gain_.load(std::memory_order_relaxed);
@@ -111,6 +109,7 @@ void ChannelStrip::process(float* const* buffers, uint32_t frames,
     float previous = peaks_[ch].load(std::memory_order_relaxed);
     if (peak > previous) peaks_[ch].store(peak, std::memory_order_relaxed);
   }
+  process_generation_.fetch_add(1, std::memory_order_release);
 }
 
 float ChannelStrip::read_peak(int channel) {
@@ -135,7 +134,8 @@ bool ChannelStrip::add_insert(std::unique_ptr<PluginInstance> plugin,
   if (index >= kMaxInserts) return false;
 
   plugin->set_channel_layout(channel_count_);
-  if (sample_rate_ > 0.0) plugin->activate(sample_rate_, max_block_frames_);
+  if (sample_rate_ > 0.0 && !plugin->activate(sample_rate_, max_block_frames_))
+    return false;
 
   PluginInstance* raw = plugin.get();
   owned_inserts_.push_back(std::move(plugin));
@@ -158,9 +158,17 @@ void ChannelStrip::remove_insert(size_t index) {
   auto it = std::find_if(owned_inserts_.begin(), owned_inserts_.end(),
                          [raw](const auto& owned) { return owned.get() == raw; });
   if (it != owned_inserts_.end()) {
-    retired_.push_back(std::move(*it));
+    retired_.push_back({std::move(*it),
+                        process_generation_.load(std::memory_order_acquire)});
     owned_inserts_.erase(it);
   }
+}
+
+void ChannelStrip::reclaim() {
+  const uint64_t now = process_generation_.load(std::memory_order_acquire);
+  std::erase_if(retired_, [now](const RetiredInsert& item) {
+    return now >= item.generation + 2;
+  });
 }
 
 void ChannelStrip::swap_inserts(size_t a, size_t b) {

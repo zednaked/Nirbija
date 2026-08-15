@@ -120,6 +120,12 @@ class Engine {
 
   // A bus needs no ports: it is fed by the channels that point at it.
   size_t add_bus(const std::string& name) { return graph_->add_bus(name); }
+  void remove_bus(size_t bus) { graph_->remove_bus(bus); }
+
+  // Park the graph (silence + two observed blocks) so state I/O and recorder
+  // teardown cannot race process().
+  void park_graph();
+  void unpark_graph();
 
   // UI thread. Returns false if the queue is full, meaning the audio thread has
   // stalled — the caller should surface that, not silently retry.
@@ -128,6 +134,7 @@ class Engine {
  private:
   static int jack_process_trampoline(jack_nframes_t frames, void* arg);
   static int jack_buffer_size_trampoline(jack_nframes_t frames, void* arg);
+  static int jack_sample_rate_trampoline(jack_nframes_t rate, void* arg);
   int process(jack_nframes_t frames);
   void drain_commands();
 

@@ -7,9 +7,20 @@ ApplicationWindow {
 
     width: 1100
     height: 640
+    minimumWidth: 640
+    minimumHeight: 420
     visible: true
     title: qsTr("Nirbija")
     color: Skin.background
+
+    Shortcut {
+        sequences: [StandardKey.Cancel, "Escape"]
+        onActivated: mixer.cancelLearn()
+    }
+    Shortcut {
+        sequence: "Space"
+        onActivated: mixer.togglePlay()
+    }
 
     TopBar {
         id: topBar
@@ -78,6 +89,7 @@ ApplicationWindow {
                     row: index
                     channelName: name
                     gain: model.gain
+                    pan: model.pan
                     muted: model.muted
                     soloed: model.soloed
                     armed: model.armed
@@ -131,8 +143,9 @@ ApplicationWindow {
                           action: () => mixer.moveInsert(index, slot, 1) },
                         { label: qsTr("Replace…"),
                           action: () => {
-                              mixer.removeInsert(index, slot)
                               picker.targetRow = index
+                              picker.targetSlot = slot
+                              picker.replace = true
                               picker.open()
                           } },
                         { label: qsTr("Remove"), danger: true,
@@ -157,6 +170,10 @@ ApplicationWindow {
                         for (let i = 0; i < options.length; ++i) {
                             const option = options[i]
                             if (option.destination < 0)
+                                continue
+                            // Sends only feed buses. Channel destinations are
+                            // 1000 + slot; a bus index is a small number.
+                            if (option.destination >= 1000)
                                 continue
                             entries.push({
                                 label: qsTr("Send to %1").arg(option.label),
@@ -340,8 +357,44 @@ ApplicationWindow {
 
     // A session that opens empty gives nothing to look at, and AUM starts with
     // a strip on screen too.
+    Connections {
+        target: mixer
+        function onErrorOccurred(message) {
+            statusToast.text = message
+            statusToast.visible = true
+            toastTimer.restart()
+        }
+    }
+
+    Text {
+        id: statusToast
+        visible: false
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: 12
+        padding: 8
+        color: Skin.text
+        font.pixelSize: 12
+        text: ""
+        z: 20
+        Rectangle {
+            anchors.fill: parent
+            z: -1
+            radius: Skin.radius
+            color: Skin.strip
+            border.color: Skin.line
+            border.width: 1
+        }
+    }
+
+    Timer {
+        id: toastTimer
+        interval: 3500
+        onTriggered: statusToast.visible = false
+    }
+
     Component.onCompleted: {
-        if (mixer.rowCount() === 0) {
+        if (mixer.rowCount() === 0 && mixer.shouldSeedSession()) {
             mixer.addChannel("", 2)
             mixer.addChannel("", 2)
         }

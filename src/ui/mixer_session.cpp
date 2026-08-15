@@ -81,7 +81,10 @@ void MixerModel::saveSession() const {
   // Another instance owns the file. Loading it was useful; writing it would
   // throw away whatever that instance is doing.
   if (session_fd_ < 0) return;
+  auto* self = const_cast<MixerModel*>(this);
+  self->engine_.park_graph();
   writeSession(sessionPath());
+  self->engine_.unpark_graph();
 }
 
 void MixerModel::writeSession(const QString& target) const {
@@ -95,11 +98,26 @@ void MixerModel::writeSession(const QString& target) const {
     entry[QStringLiteral("name")] = channel.name;
     entry[QStringLiteral("isBus")] = channel.is_bus;
     entry[QStringLiteral("destination")] = channel.destination;
+    if (channel.destination < 0) {
+      entry[QStringLiteral("destinationKind")] = QStringLiteral("master");
+    } else {
+      for (const ChannelUi& candidate : channels_) {
+        const int id = candidate.is_bus
+                           ? static_cast<int>(candidate.slot)
+                           : channel_destination(candidate.slot);
+        if (id != channel.destination) continue;
+        entry[QStringLiteral("destinationKind")] =
+            candidate.is_bus ? QStringLiteral("bus") : QStringLiteral("channel");
+        entry[QStringLiteral("destinationName")] = candidate.name;
+        break;
+      }
+    }
     entry[QStringLiteral("width")] = channel.width;
     entry[QStringLiteral("gain")] = channel.gain;
     entry[QStringLiteral("pan")] = channel.pan;
     entry[QStringLiteral("muted")] = channel.muted;
     entry[QStringLiteral("soloed")] = channel.soloed;
+    entry[QStringLiteral("armed")] = channel.armed;
 
     // Ports are stored by name. A source that is gone when the session reopens
     // simply stays unconnected rather than blocking the load. A bus has none.
@@ -145,6 +163,7 @@ void MixerModel::writeSession(const QString& target) const {
       const QVariantMap send = value.toMap();
       QJsonObject saved;
       saved[QStringLiteral("bus")] = send.value(QStringLiteral("bus")).toInt();
+      saved[QStringLiteral("busName")] = send.value(QStringLiteral("name")).toString();
       saved[QStringLiteral("level")] = send.value(QStringLiteral("level")).toDouble();
       sends.append(saved);
     }
@@ -169,6 +188,8 @@ void MixerModel::writeSession(const QString& target) const {
     saved[QStringLiteral("ch")] = map.midi_channel;
     saved[QStringLiteral("kind")] = static_cast<int>(map.kind);
     saved[QStringLiteral("row")] = map.row;
+    saved[QStringLiteral("graphSlot")] = map.graph_slot;
+    saved[QStringLiteral("bus")] = map.is_bus;
     saved[QStringLiteral("slot")] = map.slot;
     saved[QStringLiteral("param")] = static_cast<int>(map.param);
     saved[QStringLiteral("min")] = map.min;
@@ -182,15 +203,19 @@ void MixerModel::writeSession(const QString& target) const {
   const QString path = target;
   QDir().mkpath(QFileInfo(path).absolutePath());
 
-  // Written to a temporary first: a crash halfway through a save would
-  // otherwise leave a truncated session that cannot be opened.
+  // Written to a temporary first, then renamed over the old file. Rename on
+  // the same filesystem is atomic; removing the old file first is not.
   QFile file(path + QStringLiteral(".tmp"));
   if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
-  file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+  const QByteArray payload = QJsonDocument(root).toJson(QJsonDocument::Indented);
+  if (file.write(payload) != payload.size()) {
+    file.close();
+    QFile::remove(file.fileName());
+    return;
+  }
+  file.flush();
   file.close();
-
-  QFile::remove(path);
-  file.rename(path);
+  QFile::rename(file.fileName(), path);
 }
 
 void MixerModel::loadSession() { readSession(sessionPath()); }
@@ -198,35 +223,62 @@ void MixerModel::loadSession() { readSession(sessionPath()); }
 bool MixerModel::saveSessionAs(const QUrl& file) {
   const QString path = file.isLocalFile() ? file.toLocalFile() : file.toString();
   if (path.isEmpty()) return false;
+  engine_.park_graph();
   writeSession(path);
-  return true;
+  engine_.unpark_graph();
+  return QFile::exists(path);
 }
 
 bool MixerModel::loadSessionFrom(const QUrl& file) {
   const QString path = file.isLocalFile() ? file.toLocalFile() : file.toString();
   if (path.isEmpty()) return false;
 
-  // The loaded file replaces the mixer, and then becomes the autosaved state:
-  // restarting after a load comes back to what was loaded, not to what was
-  // there before it.
+  // Validate before wiping the live mixer. A bad file must not become the
+  // autosave.
+  QFile probe(path);
+  if (!probe.open(QIODevice::ReadOnly)) {
+    emit errorOccurred(tr("Could not open session"));
+    return false;
+  }
+  const QJsonDocument document = QJsonDocument::fromJson(probe.readAll());
+  probe.close();
+  if (!document.isObject() ||
+      document.object()[QStringLiteral("version")].toInt() != kSessionVersion) {
+    emit errorOccurred(tr("Session file is not a Nirbija session"));
+    return false;
+  }
+
   newSession();
-  if (!readSession(path)) return false;
+  if (!readSession(path)) {
+    emit errorOccurred(tr("Session could not be restored"));
+    return false;
+  }
   markDirty();
   return true;
 }
 
 bool MixerModel::readSession(const QString& target) {
   if (!engine_.running()) return false;
+  engine_.park_graph();
 
   QFile file(target);
-  if (!file.open(QIODevice::ReadOnly)) return false;
+  if (!file.open(QIODevice::ReadOnly)) {
+    engine_.unpark_graph();
+    return false;
+  }
 
   const QJsonDocument document = QJsonDocument::fromJson(file.readAll());
   file.close();
-  if (!document.isObject()) return false;
+  if (!document.isObject()) {
+    engine_.unpark_graph();
+    return false;
+  }
 
   const QJsonObject root = document.object();
-  if (root[QStringLiteral("version")].toInt() != kSessionVersion) return false;
+  if (root[QStringLiteral("version")].toInt() != kSessionVersion) {
+    engine_.unpark_graph();
+    return false;
+  }
 
   // Restoring drives the same setters the UI does, and each of those would
   // otherwise queue a save of what is only half restored.
@@ -254,6 +306,7 @@ bool MixerModel::readSession(const QString& target) {
     setPan(row, entry[QStringLiteral("pan")].toDouble(0.0));
     if (entry[QStringLiteral("muted")].toBool()) toggleMute(row);
     if (entry[QStringLiteral("soloed")].toBool()) toggleSolo(row);
+    if (entry[QStringLiteral("armed")].toBool()) toggleArm(row);
 
     // Applied after every row exists, further down, since a destination can
     // name a bus that has not been created yet.
@@ -309,14 +362,42 @@ bool MixerModel::readSession(const QString& target) {
   for (const QJsonValue& value : channels) {
     const QJsonObject entry = value.toObject();
 
-    const int destination = entry[QStringLiteral("destination")].toInt(-1);
-    if (destination >= 0) setDestination(row, destination);
+    const QString dest_kind =
+        entry[QStringLiteral("destinationKind")].toString();
+    const QString dest_name =
+        entry[QStringLiteral("destinationName")].toString();
+    int destination = entry[QStringLiteral("destination")].toInt(-1);
+    if (dest_kind == QLatin1String("master") ||
+        (dest_kind.isEmpty() && destination < 0)) {
+      destination = -1;
+    } else if (!dest_name.isEmpty()) {
+      for (const ChannelUi& candidate : channels_) {
+        if (candidate.name != dest_name) continue;
+        if (dest_kind == QLatin1String("bus") && !candidate.is_bus) continue;
+        if (dest_kind == QLatin1String("channel") && candidate.is_bus) continue;
+        destination = candidate.is_bus
+                          ? static_cast<int>(candidate.slot)
+                          : channel_destination(candidate.slot);
+        break;
+      }
+    }
+    if (destination >= 0 || dest_kind == QLatin1String("master"))
+      setDestination(row, destination);
 
     int slot = 0;
     for (const QJsonValue& send : entry[QStringLiteral("sends")].toArray()) {
       const QJsonObject saved = send.toObject();
-      setSend(row, slot++, saved[QStringLiteral("bus")].toInt(-1),
-              saved[QStringLiteral("level")].toDouble(0.0));
+      int bus = saved[QStringLiteral("bus")].toInt(-1);
+      const QString bus_name = saved[QStringLiteral("busName")].toString();
+      if (!bus_name.isEmpty()) {
+        for (const ChannelUi& candidate : channels_) {
+          if (candidate.is_bus && candidate.name == bus_name) {
+            bus = static_cast<int>(candidate.slot);
+            break;
+          }
+        }
+      }
+      setSend(row, slot++, bus, saved[QStringLiteral("level")].toDouble(0.0));
     }
     ++row;
   }
@@ -334,6 +415,8 @@ bool MixerModel::readSession(const QString& target) {
     map.midi_channel = saved[QStringLiteral("ch")].toInt(-1);
     map.kind = static_cast<MidiMapping::Kind>(saved[QStringLiteral("kind")].toInt(0));
     map.row = saved[QStringLiteral("row")].toInt(-1);
+    map.graph_slot = saved[QStringLiteral("graphSlot")].toInt(-1);
+    map.is_bus = saved[QStringLiteral("bus")].toBool();
     map.slot = saved[QStringLiteral("slot")].toInt(-1);
     map.param = static_cast<uint32_t>(saved[QStringLiteral("param")].toInt(0));
     map.min = saved[QStringLiteral("min")].toDouble(0.0);
@@ -348,6 +431,7 @@ bool MixerModel::readSession(const QString& target) {
   if (!sink.isEmpty()) connectMaster(sink);
 
   restoring_ = false;
+  engine_.unpark_graph();
   return true;
 }
 

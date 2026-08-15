@@ -42,8 +42,8 @@ class LooperInstance : public PluginInstance {
   // What the audio thread is doing right now with the loop.
   enum class Stage { Empty, Defining, Playing, Overdubbing, Stopped };
 
-  bool at_boundary() const;
-  void apply_requests();
+  bool at_boundary(uint32_t frames) const;
+  void apply_requests(uint32_t frames);
 
   PluginDescriptor descriptor_;
   int channels_ = 2;

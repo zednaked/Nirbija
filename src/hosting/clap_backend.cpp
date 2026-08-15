@@ -1,11 +1,14 @@
 #include "hosting/clap_backend.h"
 
+#include "core/rt_queue.h"
+
 #include <clap/clap.h>
 #include <dlfcn.h>
 
 #include <poll.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -109,7 +112,7 @@ class ClapGui : public PluginGui {
   // A CLAP plugin does not run its own event loop on Linux: it hands the host
   // timers and file descriptors and expects to be called back. Without this an
   // editor creates its window and then never paints a single pixel.
-  void idle() override;
+  int idle() override;
 
   bool preferred_size(int* width, int* height) const override {
     uint32_t w = 0;
@@ -246,10 +249,15 @@ class ClapInstance : public PluginInstance {
     process.in_events = &in_events_.list;
     process.out_events = &out_events_;
 
-    in_events_.rebuild(pending_params_, pending_midi_);
-    pending_params_.clear();
-    pending_midi_.clear();
-    produced_midi_.clear();
+    PendingParam pending[kMaxBlockMidi];
+    size_t pending_n = 0;
+    PendingParam incoming;
+    while (pending_n < kMaxBlockMidi && param_queue_.pop(incoming))
+      pending[pending_n++] = incoming;
+    in_events_.rebuild(pending, pending_n, pending_midi_.data(),
+                       pending_midi_count_);
+    pending_midi_count_ = 0;
+    produced_midi_count_ = 0;
 
     plugin_->process(plugin_, &process);
     steady_time_ += frames;
@@ -284,9 +292,9 @@ class ClapInstance : public PluginInstance {
   }
 
   size_t take_midi_output(MidiEvent* out, size_t capacity) override {
-    const size_t count = std::min(capacity, produced_midi_.size());
+    const size_t count = std::min(capacity, produced_midi_count_);
     std::copy_n(produced_midi_.begin(), count, out);
-    produced_midi_.clear();
+    produced_midi_count_ = 0;
     return count;
   }
 
@@ -322,15 +330,17 @@ class ClapInstance : public PluginInstance {
   }
 
   void queue_midi(const MidiEvent& event) override {
-    if (event.size == 0 || pending_midi_.size() >= kMaxBlockMidi) return;
-    pending_midi_.push_back(event);
+    if (event.size == 0 || pending_midi_count_ >= kMaxBlockMidi) return;
+    pending_midi_[pending_midi_count_++] = event;
   }
 
   void set_parameter(uint32_t id, double value) override {
     // Parameter changes reach the plugin as events on the next process call,
     // which is the only way CLAP allows them to be sampled in time.
-    pending_params_.push_back({id, value});
+    param_queue_.push({id, value});
   }
+
+  void host_idle() override { pump_main_thread(); }
 
   std::vector<uint8_t> save_state() const override {
     std::vector<uint8_t> blob;
@@ -366,10 +376,16 @@ class ClapInstance : public PluginInstance {
 
     const auto now = std::chrono::steady_clock::now();
     if (plugin_timers_ != nullptr) {
-      for (Timer& timer : timers_) {
+      // Snapshot: on_timer may register/unregister and invalidate the vector.
+      const std::vector<Timer> snapshot = timers_;
+      for (const Timer& timer : snapshot) {
         if (now - timer.last_fired < std::chrono::milliseconds(timer.period_ms))
           continue;
-        timer.last_fired = now;
+        for (Timer& live : timers_) {
+          if (live.id != timer.id) continue;
+          live.last_fired = now;
+          break;
+        }
         plugin_timers_->on_timer(plugin_, timer.id);
       }
     }
@@ -425,14 +441,15 @@ class ClapInstance : public PluginInstance {
       list.get = &InEventList::get_fn;
     }
 
-    void rebuild(const std::vector<PendingParam>& pending,
-                 const std::vector<MidiEvent>& midi) {
+    void rebuild(const PendingParam* pending, size_t pending_count,
+                 const MidiEvent* midi, size_t midi_count) {
       events.clear();
-      events.reserve(pending.size() + midi.size());
+      events.reserve(pending_count + midi_count);
 
       // Both kinds share one list, and CLAP wants it sorted by time. Parameter
       // changes all land at frame 0, so putting them first keeps that true.
-      for (const PendingParam& param : pending) {
+      for (size_t i = 0; i < pending_count; ++i) {
+        const PendingParam& param = pending[i];
         clap_event_param_value_t event{};
         event.header.size = sizeof(event);
         event.header.time = 0;
@@ -449,7 +466,8 @@ class ClapInstance : public PluginInstance {
         events.push_back(Event{event});
       }
 
-      for (const MidiEvent& source : midi) {
+      for (size_t i = 0; i < midi_count; ++i) {
+        const MidiEvent& source = midi[i];
         clap_event_midi_t event{};
         event.header.size = sizeof(event);
         event.header.time = source.frame;
@@ -497,7 +515,7 @@ class ClapInstance : public PluginInstance {
     auto* self = static_cast<ClapInstance*>(list->ctx);
     if (self == nullptr || header == nullptr) return true;
     if (header->space_id != CLAP_CORE_EVENT_SPACE_ID) return true;
-    if (self->produced_midi_.size() >= kMaxBlockMidi) return true;
+    if (self->produced_midi_count_ >= kMaxBlockMidi) return false;
 
     MidiEvent event;
     event.frame = header->time;
@@ -520,14 +538,15 @@ class ClapInstance : public PluginInstance {
         event.size = 3;
         event.data[0] = (header->type == CLAP_EVENT_NOTE_ON ? 0x90 : 0x80) | channel;
         event.data[1] = static_cast<uint8_t>(note->key);
-        event.data[2] = static_cast<uint8_t>(note->velocity * 127.0);
+        event.data[2] = static_cast<uint8_t>(
+            std::clamp(note->velocity * 127.0, 0.0, 127.0));
         break;
       }
       default:
         return true;
     }
 
-    self->produced_midi_.push_back(event);
+    self->produced_midi_[self->produced_midi_count_++] = event;
     return true;
   }
 
@@ -682,16 +701,21 @@ class ClapInstance : public PluginInstance {
   std::vector<std::vector<float>> input_channels_, output_channels_;
   std::vector<float*> input_ptrs_, output_ptrs_;
   static constexpr size_t kMaxBlockMidi = 64;
-  std::vector<PendingParam> pending_params_;
-  std::vector<MidiEvent> pending_midi_;
-  std::vector<MidiEvent> produced_midi_;
+  RtQueue<PendingParam, 64> param_queue_;
+  std::array<MidiEvent, kMaxBlockMidi> pending_midi_{};
+  size_t pending_midi_count_ = 0;
+  std::array<MidiEvent, kMaxBlockMidi> produced_midi_{};
+  size_t produced_midi_count_ = 0;
   clap_event_transport_t transport_event_{};
   bool has_transport_ = false;
   InEventList in_events_;
   clap_output_events_t out_events_{this, &ClapInstance::out_event_push};
 };
 
-void ClapGui::idle() { owner_->pump_main_thread(); }
+int ClapGui::idle() {
+  owner_->pump_main_thread();
+  return 0;
+}
 
 class ClapBackend : public PluginBackend {
  public:

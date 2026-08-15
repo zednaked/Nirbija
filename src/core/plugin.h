@@ -70,8 +70,8 @@ class PluginGui {
   virtual void detach() = 0;
 
   // Editors expect to be called back regularly on the main thread; some only
-  // repaint from here.
-  virtual void idle() = 0;
+  // repaint from here. Non-zero means the editor asked to close.
+  virtual int idle() = 0;
 
   // The editor's preferred size. False leaves the caller to pick one.
   virtual bool preferred_size(int* width, int* height) const = 0;
@@ -127,6 +127,10 @@ class PluginInstance {
   // Null when the plugin ships no editor this host can embed. Backends that
   // have not implemented editors yet inherit this.
   virtual std::unique_ptr<PluginGui> create_gui() { return nullptr; }
+
+  // Main-thread work the plugin asked the host to run even with no editor
+  // open: CLAP timers, request_callback, POSIX fds. Default is nothing.
+  virtual void host_idle() {}
 };
 
 // One per format. Scanning walks the disk, so it never runs on the audio thread.

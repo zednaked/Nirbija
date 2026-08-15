@@ -4,6 +4,7 @@
 
 #include <QDateTime>
 #include <QDir>
+#include <QFile>
 #include <QUrl>
 #include <QStandardPaths>
 #include <QtMath>
@@ -52,7 +53,11 @@ MixerModel::MixerModel(QObject* parent) : QAbstractListModel(parent) {
   connect(&autosave_timer_, &QTimer::timeout, this, &MixerModel::saveSession);
 
   claimSession();
+  const bool had_file = QFile::exists(sessionPath());
   loadSession();
+  seed_empty_session_ = !had_file;
+  playing_ui_ = engine_.playing();
+  metronome_ui_ = engine_.metronome();
 
   if (!ownsSession()) {
     status_ += tr(" · session read-only (another Nirbija has it)");
@@ -142,11 +147,20 @@ void MixerModel::removeChannel(int row) {
   // Editors belonging to this channel go with it: one left open would be
   // editing a plugin that is no longer in the signal path.
   const size_t slot = channels_[row].slot;
-  std::erase_if(editors_, [slot](const OpenEditor& editor) {
+  const bool bus = channels_[row].is_bus;
+  std::erase_if(editors_, [slot, bus, this](const OpenEditor& editor) {
+    if (bus) return false;
     return editor.slot == slot;
   });
 
-  engine_.remove_channel(channels_[row].slot);
+  std::erase_if(midi_maps_, [slot, bus](const MidiMapping& map) {
+    return map.graph_slot == static_cast<int>(slot) && map.is_bus == bus;
+  });
+
+  if (bus)
+    engine_.remove_bus(slot);
+  else
+    engine_.remove_channel(slot);
 
   beginRemoveRows({}, row, row);
   channels_.erase(channels_.begin() + row);
@@ -352,7 +366,8 @@ void MixerModel::post(EngineCommand::Kind kind, int row, float value) {
   command.channel = channels_[row].slot;
   command.bus = channels_[row].is_bus;
   command.value = value;
-  engine_.post(command);
+  if (!engine_.post(command))
+    emit errorOccurred(tr("Audio thread is not keeping up"));
 }
 
 void MixerModel::setGain(int row, qreal gain) {
@@ -414,14 +429,13 @@ void MixerModel::setMasterGain(qreal gain) {
 }
 
 void MixerModel::togglePlay() {
+  playing_ui_ = !playing_ui_;
   EngineCommand command;
   command.kind = EngineCommand::Kind::SetPlaying;
-  command.value = engine_.playing() ? 0.0f : 1.0f;
-  engine_.post(command);
-
-  // The engine only applies this on its next block, so the property is read
-  // back a moment later rather than assumed.
-  QTimer::singleShot(50, this, [this] { emit transportChanged(); });
+  command.value = playing_ui_ ? 1.0f : 0.0f;
+  if (!engine_.post(command))
+    emit errorOccurred(tr("Audio thread is not keeping up"));
+  emit transportChanged();
 }
 
 QString MixerModel::recordingsPath() {
@@ -440,7 +454,10 @@ QString MixerModel::toggleRecord() {
 
   const QString take =
       QString::fromStdString(engine_.start_recording(recordingsPath().toStdString()));
-  if (take.isEmpty()) qWarning("recorder: could not start a take");
+  if (take.isEmpty()) {
+    qWarning("recorder: could not start a take");
+    emit errorOccurred(tr("Could not start recording"));
+  }
   emit recordingChanged();
   return take;
 }
@@ -459,11 +476,12 @@ QString MixerModel::recordingLabel() const {
 }
 
 void MixerModel::toggleMetronome() {
+  metronome_ui_ = !metronome_ui_;
   EngineCommand command;
   command.kind = EngineCommand::Kind::SetMetronome;
-  command.value = engine_.metronome() ? 0.0f : 1.0f;
+  command.value = metronome_ui_ ? 1.0f : 0.0f;
   engine_.post(command);
-  QTimer::singleShot(50, this, [this] { emit transportChanged(); });
+  emit transportChanged();
   markDirty();
 }
 
@@ -486,6 +504,10 @@ void MixerModel::setTempo(qreal bpm) {
 }
 
 bool MixerModel::addInsert(int row, int pluginIndex) {
+  return addInsertAt(row, pluginIndex, -1);
+}
+
+bool MixerModel::addInsertAt(int row, int pluginIndex, int targetSlot) {
   if (row < 0 || row >= static_cast<int>(channels_.size())) return false;
   const PluginDescriptor* descriptor = plugins_->descriptor(pluginIndex);
   if (descriptor == nullptr) return false;
@@ -493,17 +515,30 @@ bool MixerModel::addInsert(int row, int pluginIndex) {
   // Instantiating and activating happen here, on the UI thread. The strip only
   // publishes the insert to the audio thread once it is ready to run.
   std::unique_ptr<PluginInstance> instance = plugins_->instantiate(pluginIndex);
-  if (instance == nullptr) return false;
+  if (instance == nullptr) {
+    emit errorOccurred(tr("Could not load %1")
+                           .arg(QString::fromStdString(descriptor->name)));
+    return false;
+  }
   ChannelStrip* strip = stripFor(row);
   size_t placed_at = 0;
-  if (strip == nullptr || !strip->add_insert(std::move(instance), &placed_at))
+  if (strip == nullptr || !strip->add_insert(std::move(instance), &placed_at)) {
+    emit errorOccurred(tr("Could not activate %1")
+                           .arg(QString::fromStdString(descriptor->name)));
     return false;
+  }
+  size_t label_at = placed_at;
+  if (targetSlot >= 0 && static_cast<int>(placed_at) != targetSlot &&
+      targetSlot < static_cast<int>(strip->insert_count())) {
+    strip->swap_inserts(placed_at, static_cast<size_t>(targetSlot));
+    label_at = static_cast<size_t>(targetSlot);
+  }
 
   // The label list mirrors the engine's slots, holes included, so the new
   // plugin's label lands exactly where the engine put the plugin.
   QStringList& labels = channels_[row].inserts;
-  while (labels.size() <= static_cast<int>(placed_at)) labels.append(QString());
-  labels[static_cast<int>(placed_at)] = QString::fromStdString(descriptor->name);
+  while (labels.size() <= static_cast<int>(label_at)) labels.append(QString());
+  labels[static_cast<int>(label_at)] = QString::fromStdString(descriptor->name);
   const QModelIndex idx = index(row);
   emit dataChanged(idx, idx, {InsertsRole});
   markDirty();
@@ -516,6 +551,14 @@ void MixerModel::removeInsert(int row, int slot) {
 
   ChannelStrip* strip = stripFor(row);
   if (strip == nullptr) return;
+  PluginInstance* dying = strip->insert_at(static_cast<size_t>(slot));
+  std::erase_if(editors_, [dying](const OpenEditor& editor) {
+    return editor.insert == dying;
+  });
+  std::erase_if(midi_maps_, [row, slot](const MidiMapping& map) {
+    return map.kind == MidiMapping::Kind::Param && map.row == row &&
+           map.slot == slot;
+  });
   strip->remove_insert(static_cast<size_t>(slot));
   // The engine leaves a hole so the surviving indices stay put; the label list
   // has to keep the same shape or the two would drift apart.
@@ -756,19 +799,31 @@ QString MixerModel::recordingsUrl() {
 }
 
 void MixerModel::learnGain(int row) {
-  pending_learn_ = {true, {.kind = MidiMapping::Kind::Gain, .row = row}};
+  pending_learn_ = {true,
+                    {.kind = MidiMapping::Kind::Gain,
+                     .row = row,
+                     .graph_slot = static_cast<int>(channels_[row].slot),
+                     .is_bus = channels_[row].is_bus}};
   engine_.connect_all_midi_to_control();
   emit learnChanged();
 }
 
 void MixerModel::learnPan(int row) {
-  pending_learn_ = {true, {.kind = MidiMapping::Kind::Pan, .row = row}};
+  pending_learn_ = {true,
+                    {.kind = MidiMapping::Kind::Pan,
+                     .row = row,
+                     .graph_slot = static_cast<int>(channels_[row].slot),
+                     .is_bus = channels_[row].is_bus}};
   engine_.connect_all_midi_to_control();
   emit learnChanged();
 }
 
 void MixerModel::learnMute(int row) {
-  pending_learn_ = {true, {.kind = MidiMapping::Kind::Mute, .row = row}};
+  pending_learn_ = {true,
+                    {.kind = MidiMapping::Kind::Mute,
+                     .row = row,
+                     .graph_slot = static_cast<int>(channels_[row].slot),
+                     .is_bus = channels_[row].is_bus}};
   engine_.connect_all_midi_to_control();
   emit learnChanged();
 }
@@ -778,6 +833,8 @@ void MixerModel::learnInsertParam(int row, int slot, int param, qreal min,
   pending_learn_ = {true,
                     {.kind = MidiMapping::Kind::Param,
                      .row = row,
+                     .graph_slot = static_cast<int>(channels_[row].slot),
+                     .is_bus = channels_[row].is_bus,
                      .slot = slot,
                      .param = static_cast<uint32_t>(param),
                      .min = min,
@@ -792,8 +849,12 @@ void MixerModel::cancelLearn() {
 }
 
 void MixerModel::clearMidiMaps(int row) {
-  std::erase_if(midi_maps_,
-                [row](const MidiMapping& map) { return map.row == row; });
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return;
+  const int slot = static_cast<int>(channels_[row].slot);
+  const bool bus = channels_[row].is_bus;
+  std::erase_if(midi_maps_, [slot, bus](const MidiMapping& map) {
+    return map.graph_slot == slot && map.is_bus == bus;
+  });
   markDirty();
 }
 
@@ -820,23 +881,34 @@ void MixerModel::handleControl(int cc, int channel, int value) {
   const qreal normal = value / 127.0;
   for (const MidiMapping& map : midi_maps_) {
     if (map.cc != cc || map.midi_channel != channel) continue;
-    if (map.row < 0 || map.row >= static_cast<int>(channels_.size())) continue;
+    int row = map.row;
+    if (map.graph_slot >= 0) {
+      row = -1;
+      for (int i = 0; i < static_cast<int>(channels_.size()); ++i) {
+        if (static_cast<int>(channels_[i].slot) == map.graph_slot &&
+            channels_[i].is_bus == map.is_bus) {
+          row = i;
+          break;
+        }
+      }
+    }
+    if (row < 0 || row >= static_cast<int>(channels_.size())) continue;
 
     switch (map.kind) {
       case MidiMapping::Kind::Gain:
         // Through the fader curve, so the knob feels like the fader it drives.
-        setGain(map.row, faderToGain(normal));
+        setGain(row, faderToGain(normal));
         break;
       case MidiMapping::Kind::Pan:
-        setPan(map.row, normal * 2.0 - 1.0);
+        setPan(row, normal * 2.0 - 1.0);
         break;
       case MidiMapping::Kind::Mute:
         // Absolute, not a toggle: a pedal sending 127/0 means down/up, and a
         // toggle would fall out of step with it.
-        if (channels_[map.row].muted != (value >= 64)) toggleMute(map.row);
+        if (channels_[row].muted != (value >= 64)) toggleMute(row);
         break;
       case MidiMapping::Kind::Param:
-        setInsertParameter(map.row, map.slot, static_cast<int>(map.param),
+        setInsertParameter(row, map.slot, static_cast<int>(map.param),
                            map.min + (map.max - map.min) * normal);
         break;
     }
@@ -878,6 +950,17 @@ void MixerModel::pollLevels() {
   master_peak_[0] = engine_.graph().read_master_peak(0);
   master_peak_[1] = engine_.graph().read_master_peak(1);
   emit levelsChanged();
+
+  engine_.graph().reclaim();
+  for (size_t row = 0; row < channels_.size(); ++row) {
+    ChannelStrip* strip = stripFor(static_cast<int>(row));
+    if (strip == nullptr) continue;
+    strip->reclaim();
+    for (size_t slot = 0; slot < strip->insert_count(); ++slot) {
+      PluginInstance* insert = strip->insert_at(slot);
+      if (insert != nullptr) insert->host_idle();
+    }
+  }
 }
 
 // A fader that is linear in decibels spends most of its travel where the ear

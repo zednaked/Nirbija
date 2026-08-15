@@ -1,7 +1,9 @@
 #include "core/audio_graph.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <thread>
 
 namespace nirbija {
 
@@ -10,45 +12,108 @@ AudioGraph::AudioGraph() = default;
 AudioGraph::~AudioGraph() = default;
 
 void AudioGraph::prepare(double sample_rate, uint32_t max_block_frames) {
+  const bool grew = max_block_frames > max_block_frames_;
+  const bool rate_changed = sample_rate != sample_rate_;
   sample_rate_ = sample_rate;
-  max_block_frames_ = max_block_frames;
+  if (grew) max_block_frames_ = max_block_frames;
+  const uint32_t sized = max_block_frames_;
 
-  // A strip is mono or stereo, never wider, so two scratch buffers always fit.
-  // Keeping the size fixed means add_channel never reallocates behind the audio
-  // thread's back.
-  scratch_.assign(2, std::vector<float>(max_block_frames, 0.0f));
-  scratch_ptrs_.assign(2, nullptr);
-  for (size_t i = 0; i < 2; ++i) scratch_ptrs_[i] = scratch_[i].data();
+  // Grow scratch, never shrink: a JACK buffer-size callback is not a place
+  // to free and realloc under a graph that is about to run again.
+  auto grow = [sized, grew](std::vector<std::vector<float>>& buffers,
+                            std::vector<float*>& ptrs) {
+    if (buffers.size() < 2) buffers.assign(2, {});
+    if (ptrs.size() < 2) ptrs.assign(2, nullptr);
+    for (size_t i = 0; i < 2; ++i) {
+      if (grew || buffers[i].size() < sized) buffers[i].assign(sized, 0.0f);
+      ptrs[i] = buffers[i].data();
+    }
+  };
 
-  for (size_t i = 0; i < kMaxBuses; ++i) {
-    bus_buffers_[i].assign(2, std::vector<float>(max_block_frames, 0.0f));
-    bus_ptrs_[i].assign(2, nullptr);
-    for (size_t ch = 0; ch < 2; ++ch)
-      bus_ptrs_[i][ch] = bus_buffers_[i][ch].data();
-  }
-
-  for (size_t i = 0; i < kMaxChannels; ++i) {
-    channel_buffers_[i].assign(2, std::vector<float>(max_block_frames, 0.0f));
-    channel_ptrs_[i].assign(2, nullptr);
-    for (size_t ch = 0; ch < 2; ++ch)
-      channel_ptrs_[i][ch] = channel_buffers_[i][ch].data();
-  }
+  grow(scratch_, scratch_ptrs_);
+  for (size_t i = 0; i < kMaxBuses; ++i) grow(bus_buffers_[i], bus_ptrs_[i]);
+  for (size_t i = 0; i < kMaxChannels; ++i)
+    grow(channel_buffers_[i], channel_ptrs_[i]);
 
   const size_t count = active_.load(std::memory_order_acquire);
   for (size_t i = 0; i < count; ++i)
-    if (channels_[i] != nullptr) channels_[i]->prepare(sample_rate, max_block_frames);
+    if (channels_[i] != nullptr)
+      channels_[i]->prepare(sample_rate, sized, rate_changed);
 
   const size_t buses = bus_active_.load(std::memory_order_acquire);
   for (size_t i = 0; i < buses; ++i)
-    if (buses_[i] != nullptr) buses_[i]->prepare(sample_rate, max_block_frames);
+    if (buses_[i] != nullptr) buses_[i]->prepare(sample_rate, sized, rate_changed);
 }
 
-bool AudioGraph::any_soloed(size_t count) const {
+void AudioGraph::park() { parked_.store(true, std::memory_order_release); }
+
+void AudioGraph::unpark() { parked_.store(false, std::memory_order_release); }
+
+void AudioGraph::wait_renders(int blocks) {
+  const uint64_t seen = render_generation_.load(std::memory_order_acquire);
+  const uint64_t want = seen + static_cast<uint64_t>(std::max(blocks, 1));
+  for (int spins = 0;
+       spins < 100 &&
+       render_generation_.load(std::memory_order_acquire) < want;
+       ++spins) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+}
+
+void AudioGraph::reclaim() {
+  const uint64_t now = render_generation_.load(std::memory_order_acquire);
+  std::erase_if(retired_, [now](const RetiredStrip& item) {
+    return now >= item.generation + 2;
+  });
+}
+
+bool AudioGraph::any_channel_soloed(size_t count) const {
   for (size_t i = 0; i < count; ++i) {
     const ChannelStrip* strip = live_[i].load(std::memory_order_acquire);
     if (strip != nullptr && strip->soloed()) return true;
   }
   return false;
+}
+
+bool AudioGraph::any_bus_soloed(size_t count) const {
+  for (size_t i = 0; i < count; ++i) {
+    const ChannelStrip* strip = live_buses_[i].load(std::memory_order_acquire);
+    if (strip != nullptr && strip->soloed()) return true;
+  }
+  return false;
+}
+
+size_t AudioGraph::next_channel_slot() const {
+  const size_t used = active_.load(std::memory_order_relaxed);
+  for (size_t i = 0; i < used; ++i) {
+    if (live_[i].load(std::memory_order_acquire) == nullptr &&
+        channels_[i] == nullptr)
+      return i;
+  }
+  if (used >= kMaxChannels) return kMaxChannels;
+  return used;
+}
+
+size_t AudioGraph::take_channel_slot() {
+  const size_t used = active_.load(std::memory_order_relaxed);
+  for (size_t i = 0; i < used; ++i) {
+    if (live_[i].load(std::memory_order_acquire) == nullptr &&
+        channels_[i] == nullptr)
+      return i;
+  }
+  if (used >= kMaxChannels) return kMaxChannels;
+  return used;
+}
+
+size_t AudioGraph::take_bus_slot() {
+  const size_t used = bus_active_.load(std::memory_order_relaxed);
+  for (size_t i = 0; i < used; ++i) {
+    if (live_buses_[i].load(std::memory_order_acquire) == nullptr &&
+        buses_[i] == nullptr)
+      return i;
+  }
+  if (used >= kMaxBuses) return kMaxBuses;
+  return used;
 }
 
 bool AudioGraph::channel_alive(size_t index) const {
@@ -57,7 +122,7 @@ bool AudioGraph::channel_alive(size_t index) const {
 }
 
 size_t AudioGraph::add_bus(std::string name) {
-  const size_t index = bus_active_.load(std::memory_order_relaxed);
+  const size_t index = take_bus_slot();
   if (index >= kMaxBuses) return kMaxBuses;
 
   auto strip = std::make_unique<ChannelStrip>(std::move(name), 2);
@@ -66,7 +131,8 @@ size_t AudioGraph::add_bus(std::string name) {
   ChannelStrip* raw = strip.get();
   buses_[index] = std::move(strip);
   live_buses_[index].store(raw, std::memory_order_release);
-  bus_active_.store(index + 1, std::memory_order_release);
+  const size_t used = bus_active_.load(std::memory_order_relaxed);
+  if (index >= used) bus_active_.store(index + 1, std::memory_order_release);
   return index;
 }
 
@@ -79,15 +145,34 @@ void AudioGraph::remove_bus(size_t index) {
   if (index >= bus_active_.load(std::memory_order_relaxed)) return;
 
   live_buses_[index].store(nullptr, std::memory_order_release);
-  if (buses_[index] != nullptr) retired_.push_back(std::move(buses_[index]));
+  if (buses_[index] != nullptr) {
+    retired_.push_back({std::move(buses_[index]),
+                        render_generation_.load(std::memory_order_acquire)});
+  }
 
   // Anything pointed at the bus that just went away falls back to the master,
-  // which is better than going silent with no visible reason.
+  // which is better than going silent with no visible reason. Sends too.
   const size_t count = active_.load(std::memory_order_acquire);
   for (size_t i = 0; i < count; ++i) {
     ChannelStrip* strip = live_[i].load(std::memory_order_acquire);
-    if (strip != nullptr && strip->destination() == static_cast<int>(index))
+    if (strip == nullptr) continue;
+    if (strip->destination() == static_cast<int>(index))
       strip->set_destination(-1);
+    for (size_t s = 0; s < kMaxSends; ++s) {
+      if (strip->send_bus(s) == static_cast<int>(index))
+        strip->set_send(s, -1, 0.0f);
+    }
+  }
+  const size_t buses = bus_active_.load(std::memory_order_acquire);
+  for (size_t i = 0; i < buses; ++i) {
+    ChannelStrip* strip = live_buses_[i].load(std::memory_order_acquire);
+    if (strip == nullptr) continue;
+    if (strip->destination() == static_cast<int>(index))
+      strip->set_destination(-1);
+    for (size_t s = 0; s < kMaxSends; ++s) {
+      if (strip->send_bus(s) == static_cast<int>(index))
+        strip->set_send(s, -1, 0.0f);
+    }
   }
 }
 
@@ -99,7 +184,10 @@ void AudioGraph::remove_channel(size_t index) {
   // strip is retired rather than freed, and the sources are left exactly where
   // they are: moving them out would pull the ground from under that pass.
   live_[index].store(nullptr, std::memory_order_release);
-  if (channels_[index] != nullptr) retired_.push_back(std::move(channels_[index]));
+  if (channels_[index] != nullptr) {
+    retired_.push_back({std::move(channels_[index]),
+                        render_generation_.load(std::memory_order_acquire)});
+  }
 }
 
 // A mono strip is widened here, with constant-power pan so sweeping it across
@@ -163,7 +251,15 @@ float* const* AudioGraph::destination_for(int destination, float* const* master,
 }
 
 void AudioGraph::render(float* const* master, uint32_t frames) {
+  if (max_block_frames_ > 0 && frames > max_block_frames_)
+    frames = max_block_frames_;
+
   for (int ch = 0; ch < 2; ++ch) std::fill_n(master[ch], frames, 0.0f);
+
+  if (parked_.load(std::memory_order_acquire)) {
+    render_generation_.fetch_add(1, std::memory_order_release);
+    return;
+  }
 
   const size_t buses = bus_active_.load(std::memory_order_acquire);
   for (size_t i = 0; i < buses; ++i)
@@ -176,22 +272,33 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
   Recorder* recorder = recorder_.load(std::memory_order_acquire);
 
   const size_t count = active_.load(std::memory_order_acquire);
-  const bool solo_active = any_soloed(count);
+  const bool channel_solo = any_channel_soloed(count);
+  const bool bus_solo = any_bus_soloed(buses);
 
   for (size_t i = 0; i < count; ++i) {
     ChannelStrip* live = live_[i].load(std::memory_order_acquire);
     if (live == nullptr) continue;  // removed channel
     ChannelStrip& strip = *live;
-    if (solo_active && !strip.soloed()) continue;
 
     const int width = strip.channel_count();
-    sources_[i]->read(scratch_ptrs_.data(), width, frames);
+    if (sources_[i] != nullptr)
+      sources_[i]->read(scratch_ptrs_.data(), width, frames);
+    else
+      for (int ch = 0; ch < width; ++ch)
+        std::fill_n(scratch_ptrs_[ch], frames, 0.0f);
 
     // Whatever an earlier channel sent here is part of this channel's input,
-    // alongside its own port.
-    for (int ch = 0; ch < width; ++ch)
+    // alongside its own port. Fold stereo into mono so the right side is not
+    // thrown away.
+    if (width == 1) {
       for (uint32_t f = 0; f < frames; ++f)
-        scratch_ptrs_[ch][f] += channel_ptrs_[i][std::min(ch, 1)][f];
+        scratch_ptrs_[0][f] +=
+            0.5f * (channel_ptrs_[i][0][f] + channel_ptrs_[i][1][f]);
+    } else {
+      for (int ch = 0; ch < width; ++ch)
+        for (uint32_t f = 0; f < frames; ++f)
+          scratch_ptrs_[ch][f] += channel_ptrs_[i][std::min(ch, 1)][f];
+    }
 
     size_t midi_count = 0;
     if (midi_sources_[i] != nullptr) {
@@ -202,24 +309,48 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
     strip.process(scratch_ptrs_.data(), frames, midi_scratch_.data(), midi_count,
                   &transport_);
 
-    // Recorded post-fader and post-insert: what the channel actually sends to
-    // the mix is what someone expects to hear back.
+    const bool mix_channel =
+        (!channel_solo && !bus_solo) ||
+        (channel_solo && strip.soloed()) ||
+        (!channel_solo && bus_solo &&
+         (strip.destination() >= 0 && strip.destination() < kChannelDestination &&
+          live_buses_[strip.destination()].load(std::memory_order_acquire) !=
+              nullptr &&
+          live_buses_[strip.destination()].load(std::memory_order_acquire)
+              ->soloed()));
+
+    // Recorded post-fader: a silent (non-soloed) armed track still writes so
+    // the take files stay the same length.
     if (recorder != nullptr) {
       const int track = strip.record_track();
-      if (track >= 0)
+      if (track >= 0) {
+        if (!mix_channel && channel_solo)
+          for (int ch = 0; ch < width; ++ch)
+            std::fill_n(scratch_ptrs_[ch], frames, 0.0f);
         recorder->write(static_cast<size_t>(track), scratch_ptrs_.data(), width,
                         frames);
+      }
     }
 
-    // Channels run before every bus, so any live bus is still ahead of them.
-    apply_sends(strip, width, frames, -1);
-    mix_into(destination_for(strip.destination(), master,
-                             static_cast<long long>(i), -1),
-             strip, width, frames);
+    if (mix_channel ||
+        (!channel_solo && bus_solo)) {
+      // With only a bus soloed, still send to that bus (dest or send).
+      if (mix_channel ||
+          (bus_solo && strip.destination() >= 0 &&
+           strip.destination() < kChannelDestination)) {
+        apply_sends(strip, width, frames, -1);
+        mix_into(destination_for(strip.destination(), master,
+                                 static_cast<long long>(i), -1),
+                 strip, width, frames);
+      } else if (bus_solo) {
+        apply_sends(strip, width, frames, -1);
+      }
+    }
   }
 
   // Buses in index order, each summing into the master or into a bus still
-  // ahead of it.
+  // ahead of it. Always processed so their inserts keep state; mix depends
+  // on solo.
   for (size_t i = 0; i < buses; ++i) {
     ChannelStrip* live = live_buses_[i].load(std::memory_order_acquire);
     if (live == nullptr) continue;
@@ -229,19 +360,21 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
 
     live->process(scratch_ptrs_.data(), frames, nullptr, 0, &transport_);
 
+    const bool mix_bus = !bus_solo || live->soloed() || channel_solo;
+
     if (recorder != nullptr) {
       const int track = live->record_track();
       if (track >= 0)
         recorder->write(static_cast<size_t>(track), scratch_ptrs_.data(), 2, frames);
     }
 
-    apply_sends(*live, 2, frames, static_cast<long long>(i));
-    // Every channel is behind a bus by now, so a bus can only feed a later bus
-    // or the master.
-    mix_into(destination_for(live->destination(), master,
-                             static_cast<long long>(kMaxChannels),
-                             static_cast<long long>(i)),
-             *live, 2, frames);
+    if (mix_bus) {
+      apply_sends(*live, 2, frames, static_cast<long long>(i));
+      mix_into(destination_for(live->destination(), master,
+                               static_cast<long long>(kMaxChannels),
+                               static_cast<long long>(i)),
+               *live, 2, frames);
+    }
   }
 
   const float gain = master_gain_.load(std::memory_order_relaxed);
@@ -256,12 +389,14 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
   }
 
   record_master(master, frames);
+  render_generation_.fetch_add(1, std::memory_order_release);
 }
 
 void AudioGraph::record_master(float* const* master, uint32_t frames) {
   Recorder* recorder = recorder_.load(std::memory_order_acquire);
-  if (recorder == nullptr || master_track_ < 0) return;
-  recorder->write(static_cast<size_t>(master_track_), master, 2, frames);
+  const int track = master_track_.load(std::memory_order_acquire);
+  if (recorder == nullptr || track < 0) return;
+  recorder->write(static_cast<size_t>(track), master, 2, frames);
   recorder->advance(frames);
 }
 
@@ -272,7 +407,7 @@ float AudioGraph::read_master_peak(int channel) {
 size_t AudioGraph::add_channel(std::string name, int channel_count,
                                std::unique_ptr<AudioSource> source,
                                std::unique_ptr<MidiSource> midi) {
-  const size_t index = active_.load(std::memory_order_relaxed);
+  const size_t index = take_channel_slot();
   if (index >= kMaxChannels) return kMaxChannels;
 
   auto strip = std::make_unique<ChannelStrip>(std::move(name), channel_count);
@@ -286,7 +421,8 @@ size_t AudioGraph::add_channel(std::string name, int channel_count,
   // Release twice over: the slot has to be visible before the count that
   // reaches it, or the audio thread could walk into a slot it cannot read yet.
   live_[index].store(raw, std::memory_order_release);
-  active_.store(index + 1, std::memory_order_release);
+  const size_t used = active_.load(std::memory_order_relaxed);
+  if (index >= used) active_.store(index + 1, std::memory_order_release);
   return index;
 }
 

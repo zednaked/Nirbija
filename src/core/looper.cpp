@@ -36,29 +36,34 @@ PluginDescriptor LooperInstance::make_descriptor() {
 LooperInstance::LooperInstance() : descriptor_(make_descriptor()) {}
 
 bool LooperInstance::activate(double sample_rate, uint32_t) {
+  if (sample_rate_ == sample_rate && !buffer_.empty()) return true;
   sample_rate_ = sample_rate;
   capacity_frames_ = static_cast<uint64_t>(sample_rate * kMaxLoopSeconds);
   buffer_.assign(capacity_frames_ * 2, 0.0f);
+  length_ = 0;
+  written_ = 0;
+  position_ = 0;
+  stage_ = Stage::Empty;
   return true;
 }
 
 // True when this block crosses the quantise line the pending action waits for.
 // Quantisation only means something while the transport supplies a grid; with
 // it stopped, or with quantise off, every block is a boundary.
-bool LooperInstance::at_boundary() const {
+bool LooperInstance::at_boundary(uint32_t frames) const {
   const int quantize = quantize_.load(std::memory_order_relaxed);
   if (quantize == 0 || !transport_.playing) return true;
 
   const double beats_per_unit = quantize == 1 ? 1.0 : transport_.numerator;
   const double block_beats =
-      transport_.tempo_bpm / 60.0 * (128.0 / sample_rate_);
+      transport_.tempo_bpm / 60.0 * (static_cast<double>(frames) / sample_rate_);
 
   const double before = transport_.beats / beats_per_unit;
   const double after = (transport_.beats + block_beats) / beats_per_unit;
   return std::floor(before) != std::floor(after) || transport_.beats == 0.0;
 }
 
-void LooperInstance::apply_requests() {
+void LooperInstance::apply_requests(uint32_t frames) {
   if (clear_request_.exchange(false, std::memory_order_acquire)) {
     length_ = 0;
     written_ = 0;
@@ -70,7 +75,7 @@ void LooperInstance::apply_requests() {
 
   const bool record = record_request_.load(std::memory_order_acquire);
   if (record == record_active_) return;
-  if (!at_boundary()) return;
+  if (!at_boundary(frames)) return;
 
   record_active_ = record;
   if (record) {
@@ -95,7 +100,7 @@ void LooperInstance::apply_requests() {
 
 void LooperInstance::process(const float* const* inputs, float* const* outputs,
                              uint32_t frames) {
-  apply_requests();
+  apply_requests(frames);
 
   const bool play = play_request_.load(std::memory_order_relaxed);
   const float gain = gain_.load(std::memory_order_relaxed);
@@ -127,9 +132,11 @@ void LooperInstance::process(const float* const* inputs, float* const* outputs,
         [[fallthrough]];
 
       case Stage::Playing:
-        if (length_ > 0 && play) {
-          out[0] += buffer_[position_ * 2] * gain;
-          out[1] += buffer_[position_ * 2 + 1] * gain;
+        if (length_ > 0) {
+          if (play) {
+            out[0] += buffer_[position_ * 2] * gain;
+            out[1] += buffer_[position_ * 2 + 1] * gain;
+          }
           position_ = (position_ + 1) % length_;
         }
         break;
