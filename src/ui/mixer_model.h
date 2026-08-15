@@ -33,6 +33,7 @@ class MixerModel : public QAbstractListModel {
   Q_PROPERTY(bool recording READ recording NOTIFY recordingChanged)
   Q_PROPERTY(QString recordingLabel READ recordingLabel NOTIFY levelsChanged)
   Q_PROPERTY(qreal tempo READ tempo WRITE setTempo NOTIFY transportChanged)
+  Q_PROPERTY(bool metronome READ metronome NOTIFY transportChanged)
   Q_PROPERTY(nirbija::PluginListModel* plugins READ plugins CONSTANT)
 
  public:
@@ -76,6 +77,8 @@ class MixerModel : public QAbstractListModel {
   QString recordingLabel() const;
   qreal tempo() const { return engine_.tempo(); }
   void setTempo(qreal bpm);
+  bool metronome() const { return engine_.metronome(); }
+  Q_INVOKABLE void toggleMetronome();
   PluginListModel* plugins() const { return plugins_.get(); }
   void setMasterGain(qreal gain);
 

@@ -456,6 +456,15 @@ QString MixerModel::recordingLabel() const {
                                      : elapsed;
 }
 
+void MixerModel::toggleMetronome() {
+  EngineCommand command;
+  command.kind = EngineCommand::Kind::SetMetronome;
+  command.value = engine_.metronome() ? 0.0f : 1.0f;
+  engine_.post(command);
+  QTimer::singleShot(50, this, [this] { emit transportChanged(); });
+  markDirty();
+}
+
 void MixerModel::rewind() {
   EngineCommand command;
   command.kind = EngineCommand::Kind::Rewind;

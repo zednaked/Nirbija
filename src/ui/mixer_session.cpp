@@ -152,6 +152,7 @@ void MixerModel::saveSession() const {
   QJsonObject root;
   root[QStringLiteral("version")] = kSessionVersion;
   root[QStringLiteral("tempo")] = engine_.tempo();
+  root[QStringLiteral("metronome")] = engine_.metronome();
   root[QStringLiteral("master")] = master;
   root[QStringLiteral("channels")] = channels;
 
@@ -268,6 +269,8 @@ void MixerModel::loadSession() {
 
   const double tempo = root[QStringLiteral("tempo")].toDouble(120.0);
   if (tempo > 0.0) setTempo(tempo);
+  if (root[QStringLiteral("metronome")].toBool() != engine_.metronome())
+    toggleMetronome();
 
   const QJsonObject master = root[QStringLiteral("master")].toObject();
   setMasterGain(master[QStringLiteral("gain")].toDouble(1.0));

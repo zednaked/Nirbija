@@ -26,6 +26,7 @@ struct EngineCommand {
     SetPlaying,
     SetTempo,
     Rewind,
+    SetMetronome,
   } kind = Kind::None;
   size_t channel = 0;
   // Buses live in their own list in the graph, so the index alone is ambiguous.
@@ -89,6 +90,7 @@ class Engine {
   // Read from the UI thread; the audio thread owns the writing.
   bool playing() const { return playing_.load(std::memory_order_relaxed); }
   double tempo() const { return tempo_.load(std::memory_order_relaxed); }
+  bool metronome() const { return metronome_.load(std::memory_order_relaxed); }
 
   // UI thread. Registers this channel's JACK input ports and adds the strip.
   // Returns the channel index, or kMaxChannels if the graph is full or the
@@ -135,6 +137,16 @@ class Engine {
 
   std::atomic<bool> playing_{false};
   std::atomic<double> tempo_{120.0};
+  std::atomic<bool> metronome_{false};
+
+  // Click synthesis state, audio thread only.
+  uint32_t click_remaining_ = 0;
+  uint32_t click_length_ = 0;
+  double click_phase_ = 0.0;
+  double click_step_ = 0.0;
+
+  void render_metronome(float* const* master, uint32_t frames, bool playing,
+                        double tempo, double start_beats);
   // Song position in frames, advanced by the audio thread while playing.
   uint64_t transport_frame_ = 0;
   bool transport_changed_ = true;

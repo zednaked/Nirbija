@@ -21,6 +21,7 @@ ApplicationWindow {
         tempo: mixer.tempo
         playing: mixer.playing
         recording: mixer.recording
+        metronome: mixer.metronome
         recordingLabel: mixer.recordingLabel
         onMasterOutputClicked: portPicker.openFor("sink", -1, topBar)
     }

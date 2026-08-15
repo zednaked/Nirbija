@@ -3,6 +3,7 @@
 #include <jack/midiport.h>
 
 #include <algorithm>
+#include <cmath>
 #include <ctime>
 
 namespace nirbija {
@@ -363,6 +364,10 @@ void Engine::drain_commands() {
       transport_changed_ = true;
       continue;
     }
+    if (command.kind == EngineCommand::Kind::SetMetronome) {
+      metronome_.store(command.value != 0.0f, std::memory_order_relaxed);
+      continue;
+    }
     if (command.bus) {
       if (command.channel >= graph_->bus_count()) continue;
       if (!graph_->bus_alive(command.channel)) continue;
@@ -381,6 +386,7 @@ void Engine::drain_commands() {
       case EngineCommand::Kind::SetPlaying:
       case EngineCommand::Kind::SetTempo:
       case EngineCommand::Kind::Rewind:
+      case EngineCommand::Kind::SetMetronome:
       case EngineCommand::Kind::None:
         break;
     }
@@ -411,11 +417,51 @@ int Engine::process(jack_nframes_t frames) {
     master[ch] = static_cast<float*>(jack_port_get_buffer(master_out_[ch], frames));
 
   graph_->render(master, frames);
+  render_metronome(master, frames, playing, tempo, transport.beats);
 
   // The clock only moves while playing; stopped means parked, not paused
   // somewhere the plugins cannot see.
   if (playing) transport_frame_ += frames;
   return 0;
+}
+
+// A short sine tick on every beat, a fifth higher on the downbeat. Added after
+// the master fader on purpose: pulling the mix down for a break should not
+// take the count with it.
+void Engine::render_metronome(float* const* master, uint32_t frames, bool playing,
+                              double tempo, double start_beats) {
+  const bool wanted = metronome_.load(std::memory_order_relaxed) && playing;
+  if (!wanted && click_remaining_ == 0) return;
+
+  const double beats_per_frame = tempo / 60.0 / sample_rate_;
+
+  for (uint32_t i = 0; i < frames; ++i) {
+    if (wanted) {
+      const double beat_now = start_beats + beats_per_frame * i;
+      const double beat_next = beat_now + beats_per_frame;
+      if (std::floor(beat_now) != std::floor(beat_next) || beat_now == 0.0) {
+        const long long beat = static_cast<long long>(
+            beat_now == 0.0 ? 0 : std::floor(beat_next));
+        const bool downbeat = beat % 4 == 0;
+        click_length_ = static_cast<uint32_t>(sample_rate_ * 0.03);
+        click_remaining_ = click_length_;
+        click_phase_ = 0.0;
+        click_step_ = 2.0 * 3.14159265358979 * (downbeat ? 1568.0 : 1046.5) /
+                      sample_rate_;
+      }
+    }
+
+    if (click_remaining_ > 0) {
+      const float envelope =
+          static_cast<float>(click_remaining_) / static_cast<float>(click_length_);
+      const float sample =
+          static_cast<float>(std::sin(click_phase_)) * envelope * envelope * 0.4f;
+      click_phase_ += click_step_;
+      --click_remaining_;
+      master[0][i] += sample;
+      master[1][i] += sample;
+    }
+  }
 }
 
 }  // namespace nirbija

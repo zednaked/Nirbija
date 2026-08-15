@@ -8,6 +8,7 @@ Rectangle {
     property real tempo: 120
     property bool playing: false
     property bool recording: false
+    property bool metronome: false
     property string recordingLabel: ""
     property real peakLeft: 0
     property real peakRight: 0
@@ -59,6 +60,15 @@ Rectangle {
             text: root.recordingLabel
             color: Skin.arm
             font.pixelSize: 11
+        }
+
+        StripButton {
+            width: 30
+            height: 28
+            label: "♩"
+            active: root.metronome
+            activeColor: Skin.solo
+            onClicked: mixer.toggleMetronome()
         }
 
         // Tempo is dragged rather than typed: it is a value you nudge while
