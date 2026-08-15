@@ -68,6 +68,11 @@ class Engine {
 
   // What a channel is currently fed from, empty when nothing is connected.
   std::string current_source(size_t channel, bool midi) const;
+  std::vector<std::string> current_sources(size_t channel, bool midi) const;
+
+  // One matrix cell: adds or removes a single MIDI connection without touching
+  // the channel's other sources — many-to-many, unlike connect_source.
+  bool set_midi_link(size_t channel, const std::string& port, bool on);
 
   bool connect_master(const std::string& left, const std::string& right);
   std::string current_master_sink() const;

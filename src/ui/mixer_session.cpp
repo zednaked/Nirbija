@@ -101,8 +101,11 @@ void MixerModel::saveSession() const {
     if (!channel.is_bus) {
       entry[QStringLiteral("audioSource")] =
           QString::fromStdString(engine_.current_source(channel.slot, false));
-      entry[QStringLiteral("midiSource")] =
-          QString::fromStdString(engine_.current_source(channel.slot, true));
+      QJsonArray midi_sources;
+      for (const std::string& source :
+           engine_.current_sources(channel.slot, true))
+        midi_sources.append(QString::fromStdString(source));
+      entry[QStringLiteral("midiSources")] = midi_sources;
     }
 
     QJsonArray inserts;
@@ -214,6 +217,10 @@ void MixerModel::loadSession() {
     // name a bus that has not been created yet.
     const QString audio = entry[QStringLiteral("audioSource")].toString();
     if (!audio.isEmpty()) connectSource(row, audio, false);
+    // Newer sessions carry every source; older ones a single string.
+    const QJsonArray midi_sources = entry[QStringLiteral("midiSources")].toArray();
+    for (const QJsonValue& source : midi_sources)
+      setMidiLink(row, source.toString(), true);
     const QString midi = entry[QStringLiteral("midiSource")].toString();
     if (!midi.isEmpty()) connectSource(row, midi, true);
 

@@ -580,6 +580,22 @@ void MixerModel::connectSource(int row, const QString& port, bool midi) {
   refreshRouting(row);
 }
 
+bool MixerModel::midiLinked(int row, const QString& port) const {
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return false;
+  if (channels_[row].is_bus) return false;
+  for (const std::string& source :
+       engine_.current_sources(channels_[row].slot, true))
+    if (source == port.toStdString()) return true;
+  return false;
+}
+
+void MixerModel::setMidiLink(int row, const QString& port, bool on) {
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return;
+  if (channels_[row].is_bus) return;
+  engine_.set_midi_link(channels_[row].slot, port.toStdString(), on);
+  refreshRouting(row);
+}
+
 void MixerModel::connectMaster(const QString& port) {
   // A stereo sink's right side is the next port of the same client, which is
   // how JACK names a pair.
@@ -617,11 +633,17 @@ void MixerModel::refreshRouting(int row) {
 
   const QString audio = shortPortName(
       QString::fromStdString(engine_.current_source(channel.slot, false)));
-  const QString midi = shortPortName(
-      QString::fromStdString(engine_.current_source(channel.slot, true)));
+  const std::vector<std::string> midi_sources =
+      engine_.current_sources(channel.slot, true);
 
   channel.input_label = audio.isEmpty() ? tr("no input") : audio;
-  channel.midi_label = midi.isEmpty() ? tr("no MIDI") : midi;
+  if (midi_sources.empty()) {
+    channel.midi_label = tr("no MIDI");
+  } else if (midi_sources.size() == 1) {
+    channel.midi_label = shortPortName(QString::fromStdString(midi_sources[0]));
+  } else {
+    channel.midi_label = tr("%1 sources").arg(midi_sources.size());
+  }
 
   const QModelIndex idx = index(row);
   emit dataChanged(idx, idx, {InputLabelRole, MidiLabelRole});

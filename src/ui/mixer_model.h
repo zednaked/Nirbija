@@ -147,6 +147,10 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE QStringList sinks() const;
 
   Q_INVOKABLE void connectSource(int row, const QString& port, bool midi);
+
+  // The MIDI matrix: any source into any channel, several at once.
+  Q_INVOKABLE bool midiLinked(int row, const QString& port) const;
+  Q_INVOKABLE void setMidiLink(int row, const QString& port, bool on);
   Q_INVOKABLE void connectMaster(const QString& port);
 
   // The short form of a port name, for a label that has to fit in a strip.

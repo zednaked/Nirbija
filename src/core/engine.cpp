@@ -283,6 +283,30 @@ bool Engine::connect_source(size_t channel, const std::string& port, bool midi) 
   return ok;
 }
 
+std::vector<std::string> Engine::current_sources(size_t channel, bool midi) const {
+  std::vector<std::string> found;
+  if (client_ == nullptr || channel >= channel_ports_.size()) return found;
+  jack_port_t* port = midi ? channel_ports_[channel].midi
+                           : channel_ports_[channel].audio[0];
+  if (port == nullptr) return found;
+
+  const char** connections = jack_port_get_all_connections(client_, port);
+  for (const char** c = connections; c != nullptr && *c != nullptr; ++c)
+    found.emplace_back(*c);
+  if (connections != nullptr) jack_free(connections);
+  return found;
+}
+
+bool Engine::set_midi_link(size_t channel, const std::string& port, bool on) {
+  if (client_ == nullptr || channel >= channel_ports_.size()) return false;
+  jack_port_t* target = channel_ports_[channel].midi;
+  if (target == nullptr) return false;
+
+  if (on)
+    return jack_connect(client_, port.c_str(), jack_port_name(target)) == 0;
+  return jack_disconnect(client_, port.c_str(), jack_port_name(target)) == 0;
+}
+
 std::string Engine::current_source(size_t channel, bool midi) const {
   if (client_ == nullptr || channel >= channel_ports_.size()) return {};
   jack_port_t* port = midi ? channel_ports_[channel].midi

@@ -240,6 +240,21 @@ int main(int argc, char* argv[]) {
     if (field(mixer, 0, nirbija::MixerModel::MidiLabelRole).toString() !=
         QStringLiteral("no MIDI"))
       fail("disconnecting a MIDI source did not clear the strip label");
+
+    // The matrix path: individual links come and go without touching the rest.
+    mixer.setMidiLink(0, midi_sources.first(), true);
+    if (!mixer.midiLinked(0, midi_sources.first()))
+      fail("the matrix link did not stick");
+    if (midi_sources.size() > 1) {
+      mixer.setMidiLink(0, midi_sources.at(1), true);
+      if (!mixer.midiLinked(0, midi_sources.first()) ||
+          !mixer.midiLinked(0, midi_sources.at(1)))
+        fail("a second matrix link displaced the first");
+      mixer.setMidiLink(0, midi_sources.at(1), false);
+    }
+    mixer.setMidiLink(0, midi_sources.first(), false);
+    if (mixer.midiLinked(0, midi_sources.first()))
+      fail("unlinking through the matrix did not disconnect");
   }
 
   if (failures > 0) {

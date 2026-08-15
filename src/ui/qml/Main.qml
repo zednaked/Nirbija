@@ -25,6 +25,7 @@ ApplicationWindow {
         recordingLabel: mixer.recordingLabel
         onMasterOutputClicked: portPicker.openFor("sink", -1, topBar)
         onNavigatorClicked: navigator.open()
+        onMatrixClicked: midiMatrix.open()
     }
 
     // Strips scroll horizontally as a session grows, which is the one direction
@@ -271,6 +272,11 @@ ApplicationWindow {
     RenameDialog {
         id: renameDialog
         onAccepted: name => mixer.renameChannel(targetRow, name)
+    }
+
+    MidiMatrix {
+        id: midiMatrix
+        anchors.centerIn: Overlay.overlay
     }
 
     Navigator {
