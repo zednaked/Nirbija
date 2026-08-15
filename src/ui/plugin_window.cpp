@@ -125,24 +125,6 @@ void PluginWindow::close() {
   display_ = nullptr;
 }
 
-// The editor creates its own child window and often leaves it at its default
-// size, so the host stretches it to fill.
-void PluginWindow::resizeChildren(int width, int height) {
-  if (display_ == nullptr || window_ == 0) return;
-  Display* display = as_display(display_);
-
-  Window root = 0;
-  Window parent = 0;
-  Window* children = nullptr;
-  unsigned int count = 0;
-  if (XQueryTree(display, window_, &root, &parent, &children, &count) == 0) return;
-
-  for (unsigned int i = 0; i < count; ++i)
-    XResizeWindow(display, children[i], static_cast<unsigned>(width),
-                  static_cast<unsigned>(height));
-  if (children != nullptr) XFree(children);
-}
-
 // Maps the editor's window and sizes this one to match it.
 void PluginWindow::adoptChild() {
   if (display_ == nullptr || window_ == 0) return;
@@ -154,15 +136,19 @@ void PluginWindow::adoptChild() {
   unsigned int count = 0;
   if (XQueryTree(display, window_, &root, &parent, &children, &count) == 0) return;
 
+  XWindowAttributes own{};
+  const bool have_own = XGetWindowAttributes(display, window_, &own) != 0;
+
   for (unsigned int i = 0; i < count; ++i) {
     XWindowAttributes attributes{};
     if (XGetWindowAttributes(display, children[i], &attributes) == 0) continue;
 
-    // The host window takes the editor's size: the editor is the one that
-    // knows, and anything else either clips it or leaves dead space.
-    if (attributes.width > 0 && attributes.height > 0) {
-      // A resize request alone is only advice, and a tiling window manager is
-      // free to ignore it. Size hints are what it actually reads.
+    // The host window takes the editor's size — but only when it actually
+    // differs. Re-issuing the same resize breeds ConfigureNotify events that
+    // arrive back in the pump, and answering those with another resize is the
+    // feedback loop that flickered every editor and livelocked DrumGizmo.
+    if (attributes.width > 0 && attributes.height > 0 && have_own &&
+        (own.width != attributes.width || own.height != attributes.height)) {
       XSizeHints hints{};
       hints.flags = PSize | PMinSize | PMaxSize;
       hints.width = hints.min_width = hints.max_width = attributes.width;
@@ -225,7 +211,13 @@ void PluginWindow::pump() {
   if (display_ == nullptr) return;
   Display* display = as_display(display_);
 
-  while (XPending(display) > 0) {
+  // Sizing flows one way only: the window follows the editor. Stretching the
+  // editor whenever the window changed was the other half of a feedback loop —
+  // each side answering the other's ConfigureNotify with a new resize, all
+  // inside this drain, which never emptied. The cap is the second belt: even a
+  // plugin that floods events cannot keep this loop from returning.
+  bool child_changed = false;
+  for (int drained = 0; drained < 64 && XPending(display) > 0; ++drained) {
     XEvent event;
     XNextEvent(display, &event);
 
@@ -239,29 +231,19 @@ void PluginWindow::pump() {
         break;
 
       case ConfigureNotify:
-        if (event.xconfigure.window == window_) {
-          // A resize the user asked for: pass it on to the editor.
-          resizeChildren(event.xconfigure.width, event.xconfigure.height);
-        } else {
-          // The editor resized itself, which it does once it has laid out its
-          // real contents. The window follows it rather than clipping it.
-          XResizeWindow(display, window_,
-                        static_cast<unsigned>(event.xconfigure.width),
-                        static_cast<unsigned>(event.xconfigure.height));
-        }
-        break;
-
       case CreateNotify:
       case MapNotify:
-        // The editor's window can appear a beat after the handshake, so this is
-        // a second chance to map and size it.
-        if (event.xany.window != window_) adoptChild();
+        if (event.xany.window != window_) child_changed = true;
         break;
 
       default:
         break;
     }
   }
+
+  // One adoption per tick, after the drain, so a burst of child events costs
+  // one resize decision instead of one per event.
+  if (child_changed) adoptChild();
 
   if (attached_) gui_->idle();
 }

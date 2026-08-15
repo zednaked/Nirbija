@@ -37,7 +37,6 @@ class PluginWindow : public QObject {
 
  private:
   void pump();
-  void resizeChildren(int width, int height);
   void adoptChild();
   void reportChildren() const;
 
