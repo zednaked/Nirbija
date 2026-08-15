@@ -39,6 +39,7 @@ QString PluginListModel::format_name(PluginFormat format) {
     case PluginFormat::Lv2: return QStringLiteral("LV2");
     case PluginFormat::Clap: return QStringLiteral("CLAP");
     case PluginFormat::Vst3: return QStringLiteral("VST3");
+    case PluginFormat::Internal: return QStringLiteral("Built-in");
   }
   return {};
 }

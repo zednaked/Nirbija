@@ -55,3 +55,7 @@ endif()
 add_executable(nirbija_recorder_take recorder_take.cpp)
 target_link_libraries(nirbija_recorder_take PRIVATE nirbija_core PkgConfig::SNDFILE)
 add_test(NAME recorder_take COMMAND nirbija_recorder_take)
+
+add_executable(nirbija_file_player file_player_test.cpp)
+target_link_libraries(nirbija_file_player PRIVATE nirbija_core PkgConfig::SNDFILE)
+add_test(NAME file_player COMMAND nirbija_file_player)

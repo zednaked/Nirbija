@@ -26,6 +26,7 @@ QString format_name(PluginFormat format) {
     case PluginFormat::Lv2: return QStringLiteral("LV2");
     case PluginFormat::Clap: return QStringLiteral("CLAP");
     case PluginFormat::Vst3: return QStringLiteral("VST3");
+    case PluginFormat::Internal: return QStringLiteral("Internal");
   }
   return {};
 }
@@ -37,6 +38,8 @@ bool format_from_name(const QString& name, PluginFormat* format) {
     *format = PluginFormat::Clap;
   } else if (name == QLatin1String("VST3")) {
     *format = PluginFormat::Vst3;
+  } else if (name == QLatin1String("Internal")) {
+    *format = PluginFormat::Internal;
   } else {
     return false;
   }

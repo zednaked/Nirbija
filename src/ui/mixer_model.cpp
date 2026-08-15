@@ -1,5 +1,7 @@
 #include "mixer_model.h"
 
+#include "core/file_player.h"
+
 #include <QDir>
 #include <QStandardPaths>
 #include <QtMath>
@@ -654,6 +656,28 @@ QString MixerModel::insertName(int row, int slot) const {
   PluginInstance* insert = insertFor(row, slot);
   if (insert == nullptr) return {};
   return QString::fromStdString(insert->descriptor().name);
+}
+
+bool MixerModel::insertIsFilePlayer(int row, int slot) const {
+  PluginInstance* insert = insertFor(row, slot);
+  return insert != nullptr && insert->descriptor().uid == "nirbija.fileplayer";
+}
+
+bool MixerModel::setInsertFile(int row, int slot, const QUrl& file) {
+  auto* player = dynamic_cast<FilePlayerInstance*>(insertFor(row, slot));
+  if (player == nullptr) return false;
+
+  const QString path = file.isLocalFile() ? file.toLocalFile() : file.toString();
+  const bool loaded = player->load(path.toStdString());
+  if (!loaded) qWarning("file player: could not read %s", qUtf8Printable(path));
+  markDirty();
+  return loaded;
+}
+
+QString MixerModel::insertFilePath(int row, int slot) const {
+  auto* player = dynamic_cast<FilePlayerInstance*>(insertFor(row, slot));
+  if (player == nullptr) return {};
+  return QString::fromStdString(player->path());
 }
 
 void MixerModel::pollLevels() {

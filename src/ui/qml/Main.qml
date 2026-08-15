@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls.Basic
+import QtQuick.Dialogs
 
 ApplicationWindow {
     id: window
@@ -95,6 +96,13 @@ ApplicationWindow {
                     ], model.midiLabel)
 
                     onInsertMenuRequested: slot => slotMenu.openAt(this, [
+                        { label: qsTr("Load file…"),
+                          enabled: mixer.insertIsFilePlayer(index, slot),
+                          action: () => {
+                              fileDialog.targetRow = index
+                              fileDialog.targetSlot = slot
+                              fileDialog.open()
+                          } },
                         { label: qsTr("Open editor"),
                           action: () => {
                               if (!mixer.openInsertEditor(index, slot))
@@ -242,6 +250,16 @@ ApplicationWindow {
 
     ParamEditor {
         id: paramEditor
+    }
+
+    FileDialog {
+        id: fileDialog
+        property int targetRow: -1
+        property int targetSlot: -1
+        title: qsTr("Choose an audio file")
+        nameFilters: [qsTr("Audio files (*.wav *.flac *.ogg *.aiff *.aif)"),
+                      qsTr("All files (*)")]
+        onAccepted: mixer.setInsertFile(targetRow, targetSlot, selectedFile)
     }
 
     SlotMenu {

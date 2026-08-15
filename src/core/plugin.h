@@ -7,7 +7,7 @@
 
 namespace nirbija {
 
-enum class PluginFormat { Lv2, Clap, Vst3 };
+enum class PluginFormat { Lv2, Clap, Vst3, Internal };
 
 // Enough to find and re-instantiate a plugin across sessions.
 struct PluginDescriptor {

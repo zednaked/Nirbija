@@ -2,6 +2,7 @@
 
 #include <QAbstractListModel>
 #include <QStringList>
+#include <QUrl>
 #include <QVariantList>
 #include <QTimer>
 
@@ -129,6 +130,11 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE QVariantList insertParameters(int row, int slot) const;
   Q_INVOKABLE void setInsertParameter(int row, int slot, int id, qreal value);
   Q_INVOKABLE QString insertName(int row, int slot) const;
+
+  // File player extras: only meaningful when the insert is one.
+  Q_INVOKABLE bool insertIsFilePlayer(int row, int slot) const;
+  Q_INVOKABLE bool setInsertFile(int row, int slot, const QUrl& file);
+  Q_INVOKABLE QString insertFilePath(int row, int slot) const;
 
   // --- routing ------------------------------------------------------------
   // Ports a channel can be fed from, ready to show in a picker. `midi` picks
