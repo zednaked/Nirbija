@@ -289,6 +289,9 @@ class MixerModel : public QAbstractListModel {
     // Which plugin this window edits, so a second click finds the first window
     // instead of opening a twin.
     PluginInstance* insert;
+    // When it opened: the second half of a double-click must not count as the
+    // closing click.
+    qint64 opened_ms = 0;
     std::unique_ptr<PluginWindow> window;
   };
   std::vector<OpenEditor> editors_;

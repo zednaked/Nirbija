@@ -2,6 +2,7 @@
 
 #include "core/file_player.h"
 
+#include <QDateTime>
 #include <QDir>
 #include <QUrl>
 #include <QStandardPaths>
@@ -556,6 +557,11 @@ bool MixerModel::openInsertEditor(int row, int slot) {
       editors_.begin(), editors_.end(),
       [insert](const OpenEditor& editor) { return editor.insert == insert; });
   if (existing != editors_.end()) {
+    // A double-click's second press lands right after the open; treating it as
+    // the closing click made every editor "open and shut by itself" for anyone
+    // who double-clicks by habit.
+    if (QDateTime::currentMSecsSinceEpoch() - existing->opened_ms < 600)
+      return true;
     editors_.erase(existing);
     return true;
   }
@@ -576,7 +582,8 @@ bool MixerModel::openInsertEditor(int row, int slot) {
     });
   });
 
-  editors_.push_back({channels_[row].slot, insert, std::move(window)});
+  editors_.push_back({channels_[row].slot, insert,
+                      QDateTime::currentMSecsSinceEpoch(), std::move(window)});
   return true;
 }
 
