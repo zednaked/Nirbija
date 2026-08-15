@@ -272,7 +272,12 @@ class Lv2Gui : public PluginGui {
     }
 
     const bool debug = std::getenv("NIRBIJA_DEBUG_EMBED") != nullptr;
-    library_ = dlopen(binary_path, RTLD_LOCAL | RTLD_NOW);
+    // Same .so as the DSP, already loaded by lilv. Reusing that handle keeps
+    // instance-access pointing at the object the UI's C++ methods expect —
+    // a second RTLD_LOCAL copy would be a second vtable and a dead editor.
+    library_ = dlopen(binary_path, RTLD_NOLOAD | RTLD_LOCAL | RTLD_NOW);
+    if (library_ == nullptr)
+      library_ = dlopen(binary_path, RTLD_LOCAL | RTLD_NOW);
     if (debug && library_ == nullptr)
       std::fprintf(stderr, "lv2 gui: dlopen failed: %s\n", dlerror());
     if (library_ != nullptr) {

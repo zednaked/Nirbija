@@ -38,6 +38,8 @@ class PluginWindow : public QObject {
  private:
   void pump();
   void adoptChild();
+  void applyPreferredSize();
+  void resizeTo(int width, int height);
   void reportChildren() const;
 
   std::unique_ptr<PluginGui> gui_;

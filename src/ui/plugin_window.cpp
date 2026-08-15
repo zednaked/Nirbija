@@ -17,6 +17,10 @@ namespace {
 // no way to ask before the editor exists.
 constexpr int kFallbackWidth = 640;
 constexpr int kFallbackHeight = 420;
+// A child this small has not been laid out yet. DrumGizmo creates its X
+// window at 1x1 and only later follows the parent; treating that as the
+// editor's size collapses the host window.
+constexpr int kMinEditorEdge = 32;
 
 Display* as_display(void* handle) { return static_cast<Display*>(handle); }
 
@@ -120,11 +124,12 @@ bool PluginWindow::open() {
   }
   attached_ = true;
 
-  // The plugin creates its editor window but does not always map it, and an
-  // unmapped child draws nothing however right the rest of the handshake was.
-  // Its own size is also more trustworthy than what get_size reports, which may
-  // be in scaled units, so the host window follows the child rather than the
-  // other way round.
+  // DrumGizmo (and a few other LV2 editors) create the child at 1x1 and only
+  // tell the real size through ui:resize. Following the child's X geometry
+  // then shrinks the host to a speck, which the window manager treats as a
+  // close. Honour the requested size first; adoptChild only follows a child
+  // that has actually been laid out.
+  applyPreferredSize();
   adoptChild();
   XFlush(display);
 
@@ -132,7 +137,10 @@ bool PluginWindow::open() {
 
   // Editors that lay out late report their real size a moment after they are
   // handed the parent, so this catches up with them once.
-  QTimer::singleShot(250, this, [this] { adoptChild(); });
+  QTimer::singleShot(250, this, [this] {
+    applyPreferredSize();
+    adoptChild();
+  });
 
   timer_.start();
   return true;
@@ -153,6 +161,33 @@ void PluginWindow::close() {
   display_ = nullptr;
 }
 
+void PluginWindow::resizeTo(int width, int height) {
+  if (display_ == nullptr || window_ == 0) return;
+  if (width < kMinEditorEdge || height < kMinEditorEdge) return;
+  Display* display = as_display(display_);
+
+  XWindowAttributes own{};
+  if (XGetWindowAttributes(display, window_, &own) != 0 &&
+      own.width == width && own.height == height)
+    return;
+
+  XSizeHints hints{};
+  hints.flags = PSize | PMinSize | PMaxSize;
+  hints.width = hints.min_width = hints.max_width = width;
+  hints.height = hints.min_height = hints.max_height = height;
+  XSetWMNormalHints(display, window_, &hints);
+  XResizeWindow(display, window_, static_cast<unsigned>(width),
+                static_cast<unsigned>(height));
+}
+
+void PluginWindow::applyPreferredSize() {
+  if (gui_ == nullptr) return;
+  int width = 0;
+  int height = 0;
+  if (!gui_->preferred_size(&width, &height)) return;
+  resizeTo(width, height);
+}
+
 // Maps the editor's window and sizes this one to match it.
 void PluginWindow::adoptChild() {
   if (display_ == nullptr || window_ == 0) return;
@@ -164,9 +199,6 @@ void PluginWindow::adoptChild() {
   unsigned int count = 0;
   if (XQueryTree(display, window_, &root, &parent, &children, &count) == 0) return;
 
-  XWindowAttributes own{};
-  const bool have_own = XGetWindowAttributes(display, window_, &own) != 0;
-
   for (unsigned int i = 0; i < count; ++i) {
     XWindowAttributes attributes{};
     if (XGetWindowAttributes(display, children[i], &attributes) == 0) continue;
@@ -175,17 +207,10 @@ void PluginWindow::adoptChild() {
     // differs. Re-issuing the same resize breeds ConfigureNotify events that
     // arrive back in the pump, and answering those with another resize is the
     // feedback loop that flickered every editor and livelocked DrumGizmo.
-    if (attributes.width > 0 && attributes.height > 0 && have_own &&
-        (own.width != attributes.width || own.height != attributes.height)) {
-      XSizeHints hints{};
-      hints.flags = PSize | PMinSize | PMaxSize;
-      hints.width = hints.min_width = hints.max_width = attributes.width;
-      hints.height = hints.min_height = hints.max_height = attributes.height;
-      XSetWMNormalHints(display, window_, &hints);
-
-      XResizeWindow(display, window_, static_cast<unsigned>(attributes.width),
-                    static_cast<unsigned>(attributes.height));
-    }
+    // Tiny children are the "not laid out yet" placeholder, not a size.
+    if (attributes.width >= kMinEditorEdge &&
+        attributes.height >= kMinEditorEdge)
+      resizeTo(attributes.width, attributes.height);
     if (attributes.map_state != IsViewable) XMapWindow(display, children[i]);
   }
 
@@ -261,7 +286,8 @@ void PluginWindow::pump() {
 
     switch (event.type) {
       case ClientMessage:
-        if (static_cast<Atom>(event.xclient.data.l[0]) == delete_atom_) {
+        if (event.xclient.window == window_ &&
+            static_cast<Atom>(event.xclient.data.l[0]) == delete_atom_) {
           qWarning("editor '%s': fechada pelo window manager (WM_DELETE)",
                    qUtf8Printable(title_));
           close();
