@@ -49,6 +49,8 @@ class PluginWindow : public QObject {
   unsigned long window_ = 0;
   unsigned long delete_atom_ = 0;
   bool attached_ = false;
+  // Set from the Xlib IO-error exit handler when the connection dies.
+  bool connection_lost_ = false;
 };
 
 }  // namespace nirbija

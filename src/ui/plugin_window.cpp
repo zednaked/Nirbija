@@ -8,6 +8,8 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 
+#include <mutex>
+
 namespace nirbija {
 namespace {
 
@@ -17,6 +19,18 @@ constexpr int kFallbackWidth = 640;
 constexpr int kFallbackHeight = 420;
 
 Display* as_display(void* handle) { return static_cast<Display*>(handle); }
+
+// Xlib's default error handler exits the whole process. A plugin editor that
+// trips one — a GL context refused by the display is the classic — must not
+// take the mixer down with it: log it, let the editor stay black, keep playing.
+int log_x_error(Display*, XErrorEvent* error) {
+  qWarning("plugin editor X error: request %d.%d code %d — the editor may stay "
+           "black. If this is a GL editor, try __GLX_VENDOR_LIBRARY_NAME=mesa.",
+           error->request_code, error->minor_code, error->error_code);
+  return 0;
+}
+
+std::once_flag x_handler_installed;
 
 }  // namespace
 
@@ -34,8 +48,22 @@ PluginWindow::~PluginWindow() { close(); }
 bool PluginWindow::open() {
   if (window_ != 0) return true;
 
+  // Installed once, before any plugin can err. This only covers Xlib users —
+  // the plugin editors and these windows; Qt itself speaks xcb and is not
+  // affected.
+  std::call_once(x_handler_installed, [] { XSetErrorHandler(&log_x_error); });
+
   display_ = XOpenDisplay(nullptr);
   if (display_ == nullptr) return false;
+
+  // A dead connection would otherwise also exit the process. Marking the
+  // window dead lets the pump stop touching it instead.
+  XSetIOErrorExitHandler(
+      as_display(display_),
+      [](Display*, void* self) {
+        static_cast<PluginWindow*>(self)->connection_lost_ = true;
+      },
+      this);
 
   Display* display = as_display(display_);
   const int screen = DefaultScreen(display);
@@ -209,6 +237,15 @@ void PluginWindow::reportChildren() const {
 
 void PluginWindow::pump() {
   if (display_ == nullptr) return;
+  if (connection_lost_) {
+    // The display died under us; everything on it is gone already.
+    timer_.stop();
+    attached_ = false;
+    window_ = 0;
+    display_ = nullptr;
+    emit closed();
+    return;
+  }
   Display* display = as_display(display_);
 
   // Sizing flows one way only: the window follows the editor. Stretching the
