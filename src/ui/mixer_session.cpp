@@ -81,6 +81,11 @@ void MixerModel::saveSession() const {
   // Another instance owns the file. Loading it was useful; writing it would
   // throw away whatever that instance is doing.
   if (session_fd_ < 0) return;
+  writeSession(sessionPath());
+}
+
+void MixerModel::writeSession(const QString& target) const {
+  if (!engine_.running()) return;
 
   QJsonArray channels;
   for (size_t row = 0; row < channels_.size(); ++row) {
@@ -174,7 +179,7 @@ void MixerModel::saveSession() const {
   root[QStringLiteral("master")] = master;
   root[QStringLiteral("channels")] = channels;
 
-  const QString path = sessionPath();
+  const QString path = target;
   QDir().mkpath(QFileInfo(path).absolutePath());
 
   // Written to a temporary first: a crash halfway through a save would
@@ -188,18 +193,40 @@ void MixerModel::saveSession() const {
   file.rename(path);
 }
 
-void MixerModel::loadSession() {
-  if (!engine_.running()) return;
+void MixerModel::loadSession() { readSession(sessionPath()); }
 
-  QFile file(sessionPath());
-  if (!file.open(QIODevice::ReadOnly)) return;
+bool MixerModel::saveSessionAs(const QUrl& file) {
+  const QString path = file.isLocalFile() ? file.toLocalFile() : file.toString();
+  if (path.isEmpty()) return false;
+  writeSession(path);
+  return true;
+}
+
+bool MixerModel::loadSessionFrom(const QUrl& file) {
+  const QString path = file.isLocalFile() ? file.toLocalFile() : file.toString();
+  if (path.isEmpty()) return false;
+
+  // The loaded file replaces the mixer, and then becomes the autosaved state:
+  // restarting after a load comes back to what was loaded, not to what was
+  // there before it.
+  newSession();
+  if (!readSession(path)) return false;
+  markDirty();
+  return true;
+}
+
+bool MixerModel::readSession(const QString& target) {
+  if (!engine_.running()) return false;
+
+  QFile file(target);
+  if (!file.open(QIODevice::ReadOnly)) return false;
 
   const QJsonDocument document = QJsonDocument::fromJson(file.readAll());
   file.close();
-  if (!document.isObject()) return;
+  if (!document.isObject()) return false;
 
   const QJsonObject root = document.object();
-  if (root[QStringLiteral("version")].toInt() != kSessionVersion) return;
+  if (root[QStringLiteral("version")].toInt() != kSessionVersion) return false;
 
   // Restoring drives the same setters the UI does, and each of those would
   // otherwise queue a save of what is only half restored.
@@ -316,6 +343,7 @@ void MixerModel::loadSession() {
   if (!sink.isEmpty()) connectMaster(sink);
 
   restoring_ = false;
+  return true;
 }
 
 void MixerModel::markDirty() {

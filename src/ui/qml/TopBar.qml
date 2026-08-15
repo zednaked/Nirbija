@@ -16,6 +16,7 @@ Rectangle {
     property string masterSink: ""
 
     signal masterOutputClicked
+    signal menuRequested(var item)
     signal navigatorClicked
     signal matrixClicked
     signal menuClicked
@@ -181,10 +182,11 @@ Rectangle {
         }
 
         StripButton {
+            id: menuButton
             width: 30
             height: 28
             label: "≡"
-            onClicked: root.menuClicked()
+            onClicked: root.menuRequested(menuButton)
         }
     }
 }

@@ -136,6 +136,16 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE QString insertName(int row, int slot) const;
   Q_INVOKABLE void closeAllEditors();
 
+  // Clears the mixer back to nothing and saves that as the session.
+  Q_INVOKABLE void newSession();
+
+  // Named sessions, apart from the automatic one: save a copy anywhere, or
+  // replace the current mixer with a file's contents. Loading also becomes the
+  // autosaved state, so a restart comes back to what was loaded.
+  Q_INVOKABLE bool saveSessionAs(const QUrl& file);
+  Q_INVOKABLE bool loadSessionFrom(const QUrl& file);
+  Q_INVOKABLE static QString recordingsUrl();
+
   // --- MIDI learn -----------------------------------------------------------
   // Arms a target; the next controller message that arrives binds to it.
   Q_INVOKABLE void learnGain(int row);
@@ -178,6 +188,8 @@ class MixerModel : public QAbstractListModel {
   // left off.
   void saveSession() const;
   void loadSession();
+  void writeSession(const QString& path) const;
+  bool readSession(const QString& path);
   static QString sessionPath();
 
   // False when another Nirbija already holds the session. That instance still

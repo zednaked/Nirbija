@@ -26,6 +26,18 @@ ApplicationWindow {
         onMasterOutputClicked: portPicker.openFor("sink", -1, topBar)
         onNavigatorClicked: navigator.open()
         onMatrixClicked: midiMatrix.open()
+        onMenuRequested: item => slotMenu.openAt(item, [
+            { label: qsTr("Rescan plugins"),
+              action: () => mixer.plugins.rescan() },
+            { label: qsTr("Recordings folder"),
+              action: () => Qt.openUrlExternally(mixer.recordingsUrl()) },
+            { label: qsTr("Save session as…"),
+              action: () => sessionSaveDialog.open() },
+            { label: qsTr("Load session…"),
+              action: () => sessionLoadDialog.open() },
+            { label: qsTr("New session"), danger: true,
+              action: () => mixer.newSession() }
+        ], qsTr("Nirbija"))
     }
 
     // Strips scroll horizontally as a session grows, which is the one direction
@@ -79,26 +91,26 @@ ApplicationWindow {
                     isBus: model.isBus
                     sends: model.sends
 
-                    onInputSlotClicked: portPicker.openFor("audio", index, this)
-                    onMidiSlotClicked: portPicker.openFor("midi", index, this)
+                    onInputSlotClicked: item => portPicker.openFor("audio", index, item)
+                    onMidiSlotClicked: item => portPicker.openFor("midi", index, item)
 
-                    onInputMenuRequested: slotMenu.openAt(this, [
+                    onInputMenuRequested: item => slotMenu.openAt(item, [
                         { label: qsTr("Change input…"),
-                          action: () => portPicker.openFor("audio", index, this) },
+                          action: () => portPicker.openFor("audio", index, item) },
                         { label: qsTr("Disconnect"), danger: true,
                           enabled: model.inputLabel !== qsTr("no input"),
                           action: () => mixer.connectSource(index, "", false) }
                     ], model.inputLabel)
 
-                    onMidiMenuRequested: slotMenu.openAt(this, [
+                    onMidiMenuRequested: item => slotMenu.openAt(item, [
                         { label: qsTr("Change MIDI source…"),
-                          action: () => portPicker.openFor("midi", index, this) },
+                          action: () => portPicker.openFor("midi", index, item) },
                         { label: qsTr("Disconnect"), danger: true,
                           enabled: model.midiLabel !== qsTr("no MIDI"),
                           action: () => mixer.connectSource(index, "", true) }
                     ], model.midiLabel)
 
-                    onInsertMenuRequested: slot => slotMenu.openAt(this, [
+                    onInsertMenuRequested: (slot, item) => slotMenu.openAt(item, [
                         { label: qsTr("Load file…"),
                           enabled: mixer.insertIsFilePlayer(index, slot),
                           action: () => {
@@ -127,7 +139,7 @@ ApplicationWindow {
                           action: () => mixer.removeInsert(index, slot) }
                     ], model.inserts[slot])
 
-                    onOutputSlotClicked: {
+                    onOutputSlotClicked: item => {
                         const options = mixer.destinationsFor(index)
                         const entries = []
                         for (let i = 0; i < options.length; ++i) {
@@ -163,18 +175,18 @@ ApplicationWindow {
                             action: () => mixer.sendRowToNewBus(index)
                         })
 
-                        slotMenu.openAt(this, entries, qsTr("Output"))
+                        slotMenu.openAt(item, entries, qsTr("Output"))
                     }
 
                     onSendLevelRequested: (slot, level) =>
                         mixer.setSend(index, slot, model.sends[slot].bus, level)
 
-                    onSendMenuRequested: slot => slotMenu.openAt(this, [
+                    onSendMenuRequested: (slot, item) => slotMenu.openAt(item, [
                         { label: qsTr("Remove send"), danger: true,
                           action: () => mixer.removeSend(index, slot) }
                     ], model.sends[slot].name)
 
-                    onTitleClicked: slotMenu.openAt(this, [
+                    onTitleClicked: item => slotMenu.openAt(item, [
                         { label: qsTr("Rename…"),
                           action: () => renameDialog.openFor(index, model.name) },
                         { label: qsTr("MIDI learn: fader"),
@@ -189,7 +201,7 @@ ApplicationWindow {
                           action: () => mixer.removeChannel(index) }
                     ], model.name)
 
-                    onInsertSlotClicked: slot => {
+                    onInsertSlotClicked: (slot, item) => {
                         // A filled slot opens the plugin's own editor; an empty
                         // one opens the picker to fill it.
                         if (slot < model.inserts.length
@@ -261,6 +273,22 @@ ApplicationWindow {
 
     ParamEditor {
         id: paramEditor
+    }
+
+    FileDialog {
+        id: sessionSaveDialog
+        title: qsTr("Save session as")
+        fileMode: FileDialog.SaveFile
+        nameFilters: [qsTr("Nirbija sessions (*.json)")]
+        defaultSuffix: "json"
+        onAccepted: mixer.saveSessionAs(selectedFile)
+    }
+
+    FileDialog {
+        id: sessionLoadDialog
+        title: qsTr("Load session")
+        nameFilters: [qsTr("Nirbija sessions (*.json)")]
+        onAccepted: mixer.loadSessionFrom(selectedFile)
     }
 
     FileDialog {

@@ -22,16 +22,16 @@ Rectangle {
     property var sends: []
     property color accent: Skin.accent
 
-    signal insertSlotClicked(int slot)
-    signal insertMenuRequested(int slot)
-    signal titleClicked
-    signal inputSlotClicked
-    signal midiSlotClicked
-    signal inputMenuRequested
-    signal midiMenuRequested
-    signal outputSlotClicked
+    signal insertSlotClicked(int slot, var item)
+    signal insertMenuRequested(int slot, var item)
+    signal titleClicked(var item)
+    signal inputSlotClicked(var item)
+    signal midiSlotClicked(var item)
+    signal inputMenuRequested(var item)
+    signal midiMenuRequested(var item)
+    signal outputSlotClicked(var item)
     signal sendLevelRequested(int slot, real level)
-    signal sendMenuRequested(int slot)
+    signal sendMenuRequested(int slot, var item)
 
     width: Skin.stripWidth
     color: Skin.strip
@@ -63,8 +63,8 @@ Rectangle {
             label: root.inputLabel
             filled: root.inputLabel !== qsTr("no input")
             level: Math.max(root.peakLeft, root.peakRight)
-            onClicked: root.inputSlotClicked()
-            onMenuRequested: root.inputMenuRequested()
+            onClicked: root.inputSlotClicked(this)
+            onMenuRequested: root.inputMenuRequested(this)
         }
 
         // MIDI gets its own node slot rather than hiding in a menu: on this
@@ -76,8 +76,8 @@ Rectangle {
             label: root.midiLabel
             filled: root.midiLabel !== qsTr("no MIDI")
             level: 0
-            onClicked: root.midiSlotClicked()
-            onMenuRequested: root.midiMenuRequested()
+            onClicked: root.midiSlotClicked(this)
+            onMenuRequested: root.midiMenuRequested(this)
         }
 
         // --- fader, mute and solo -------------------------------------------
@@ -159,11 +159,11 @@ Rectangle {
             delegate: InsertSlot {
                 width: insertList.width
                 pluginName: index < root.inserts.length ? root.inserts[index] : ""
-                onClicked: root.insertSlotClicked(index)
+                onClicked: root.insertSlotClicked(index, this)
                 onMenuRequested: {
                     if (index < root.inserts.length
                             && root.inserts[index].length > 0)
-                        root.insertMenuRequested(index)
+                        root.insertMenuRequested(index, this)
                 }
             }
         }
@@ -181,7 +181,7 @@ Rectangle {
                     busName: modelData.name
                     level: modelData.level
                     onLevelRequested: value => root.sendLevelRequested(index, value)
-                    onMenuRequested: root.sendMenuRequested(index)
+                    onMenuRequested: root.sendMenuRequested(index, this)
                 }
             }
         }
@@ -191,8 +191,8 @@ Rectangle {
             width: parent.width
             label: root.outputLabel
             level: Math.max(root.peakLeft, root.peakRight)
-            onClicked: root.outputSlotClicked()
-            onMenuRequested: root.outputSlotClicked()
+            onClicked: root.outputSlotClicked(this)
+            onMenuRequested: root.outputSlotClicked(this)
         }
 
         // The channel title is where AUM keeps renaming and removal, so it is
@@ -218,7 +218,7 @@ Rectangle {
 
             MouseArea {
                 anchors.fill: parent
-                onClicked: root.titleClicked()
+                onClicked: root.titleClicked(title)
             }
         }
     }

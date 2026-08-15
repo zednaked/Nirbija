@@ -26,13 +26,23 @@ Popup {
         root.entries = entries
         root.heading = heading
 
-        // Anchored to the thing that was clicked, then nudged back on screen if
-        // it would fall off the bottom or the right.
-        const point = item.mapToItem(Overlay.overlay, 0, item.height)
+        // The height is computed rather than read: implicitHeight is not
+        // settled the instant the entries change, and clamping against a stale
+        // value is how a menu ends up half off the screen.
+        const estimated = 8 + (heading.length > 0 ? 22 : 0) + entries.length * 31
+        const below = item.mapToItem(Overlay.overlay, 0, item.height + 2)
         const overlayWidth = Overlay.overlay.width
         const overlayHeight = Overlay.overlay.height
-        root.x = Math.min(point.x, overlayWidth - root.width - 4)
-        root.y = Math.min(point.y, overlayHeight - root.implicitHeight - 4)
+
+        root.x = Math.max(4, Math.min(below.x, overlayWidth - root.width - 4))
+
+        if (below.y + estimated <= overlayHeight - 4) {
+            root.y = below.y
+        } else {
+            // No room below: open upwards from the item's top edge.
+            const above = item.mapToItem(Overlay.overlay, 0, -2)
+            root.y = Math.max(4, above.y - estimated)
+        }
         root.open()
     }
 

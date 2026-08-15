@@ -3,6 +3,7 @@
 #include "core/file_player.h"
 
 #include <QDir>
+#include <QUrl>
 #include <QStandardPaths>
 #include <QtMath>
 
@@ -712,6 +713,20 @@ QString MixerModel::insertFilePath(int row, int slot) const {
 }
 
 void MixerModel::closeAllEditors() { editors_.clear(); }
+
+void MixerModel::newSession() {
+  closeAllEditors();
+  midi_maps_.clear();
+  while (rowCount() > 0) removeChannel(0);
+  setMasterGain(1.0);
+  setTempo(120.0);
+  if (engine_.metronome()) toggleMetronome();
+  saveSession();
+}
+
+QString MixerModel::recordingsUrl() {
+  return QUrl::fromLocalFile(recordingsPath()).toString();
+}
 
 void MixerModel::learnGain(int row) {
   pending_learn_ = {true, {.kind = MidiMapping::Kind::Gain, .row = row}};
