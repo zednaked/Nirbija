@@ -4,6 +4,7 @@
 #include <QGuiApplication>
 #include <QFile>
 #include <QTemporaryDir>
+#include <QUrl>
 
 #include <cstdio>
 #include <string>
@@ -97,6 +98,21 @@ int main(int argc, char* argv[]) {
       fail("the insert did not come back");
     else
       std::printf("  insert restored: %s\n", effect_name.toUtf8().constData());
+  }
+
+  // Loading a file into a mixer that already has channels walks the removal
+  // path first; restoring a bus insert's state through the channel list used
+  // to dereference the removed channel's null strip right here.
+  {
+    restored.addBus(QStringLiteral("FX"));
+    const int effect = pick_effect(restored);
+    if (effect >= 0) restored.addInsert(restored.rowCount() - 1, effect);
+    restored.saveSessionAs(QUrl::fromLocalFile(dir.path() + "/named.json"));
+
+    if (!restored.loadSessionFrom(QUrl::fromLocalFile(dir.path() + "/named.json")))
+      fail("loading a named session over a live mixer failed");
+    if (restored.rowCount() < 3)
+      fail("the named session did not bring its rows back");
   }
 
   if (failures > 0) {

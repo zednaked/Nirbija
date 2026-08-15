@@ -288,8 +288,13 @@ bool MixerModel::readSession(const QString& target) {
       if (state.isEmpty()) continue;
 
       const QByteArray bytes = QByteArray::fromBase64(state.toLatin1());
-      ChannelStrip& strip = engine_.graph().channel(channels_[row].slot);
-      PluginInstance* insert = strip.insert_at(strip.insert_count() - 1);
+      // Through stripFor, which knows a bus from a channel: reaching into the
+      // channel list with a bus slot lands on whatever channel shares the
+      // number — or, after a load has cleared the old session, on a null
+      // pointer, which is exactly the crash loading a session used to be.
+      ChannelStrip* strip = stripFor(row);
+      if (strip == nullptr || strip->insert_count() == 0) continue;
+      PluginInstance* insert = strip->insert_at(strip->insert_count() - 1);
       if (insert == nullptr) continue;
 
       const std::vector<uint8_t> blob(bytes.begin(), bytes.end());
