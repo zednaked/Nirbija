@@ -241,7 +241,6 @@ Rectangle {
             tip: qsTr("Mute the master. Meters keep reading what would have played.")
             active: Mixer.masterMute
             activeColor: Skin.mute
-            danger: true
             onClicked: Mixer.toggleMasterMute()
         }
         StripButton {

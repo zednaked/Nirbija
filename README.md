@@ -23,6 +23,19 @@ __GLX_VENDOR_LIBRARY_NAME=mesa ./build/src/ui/nirbija
 
 A Hyprland window rule for class `nirbija-plugin` should float editor windows.
 
+## Using it
+
+Every control answers a drag, the wheel and the keyboard: Shift makes a drag ten
+times finer, one notch of the wheel is a decibel on a fader, and Tab reaches the
+faders, pans, sends and slots in turn. `F1` lists the lot.
+
+The whole interface is sized off one number, so a 4K panel or a touchscreen
+needs no editing:
+
+```sh
+NIRBIJA_UI_SCALE=1.25 ./build/src/ui/nirbija
+```
+
 ## Tests
 
 ```sh
@@ -32,6 +45,12 @@ ctest --test-dir build --output-on-failure
 Tests that need a JACK server or a named plugin **skip** (CTest 77) instead
 of passing. Offline DSP tests (`graph_routing`, `file_player`, `looper`) run
 anywhere.
+
+The QML is checked separately, and is expected to stay silent:
+
+```sh
+cmake --build build --target nirbija_ui_qmllint
+```
 
 ## Licence
 

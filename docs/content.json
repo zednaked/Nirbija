@@ -1,0 +1,99 @@
+{
+  "name": "nirbija",
+  "product": "mixer.",
+  "lede": [
+    "a row of channels.",
+    "plugins live in the strip.",
+    "press play."
+  ],
+  "pages": "",
+  "compat": ["linux", "pipewire", "jack", "clap", "lv2", "vst3"],
+  "video": {
+    "youtube": "",
+    "caption": "session tape"
+  },
+  "shots": [
+    {
+      "src": "img/hero.png",
+      "alt": "Nirbija mixer: five strips, inserts, sends and a master",
+      "hero": true
+    }
+  ],
+  "index": [
+    {
+      "id": "01",
+      "name": "host",
+      "copy": "clap, lv2, vst3. native editors, same slot."
+    },
+    {
+      "id": "02",
+      "name": "mixer",
+      "copy": "inserts, sends, buses. one strip per voice."
+    },
+    {
+      "id": "03",
+      "name": "loop",
+      "copy": "quantised. play against yourself."
+    },
+    {
+      "id": "04",
+      "name": "record",
+      "copy": "armed channels and the master."
+    },
+    {
+      "id": "05",
+      "name": "midi",
+      "copy": "jack ports, learn, keys on the strip."
+    },
+    {
+      "id": "06",
+      "name": "session",
+      "copy": "the graph and the plugin state."
+    }
+  ],
+  "does": [
+    "host the plugins you already have",
+    "mix, send, loop, record",
+    "talk to pipewire and jack",
+    "keep a session"
+  ],
+  "doesNot": [
+    "arrange clips on a timeline",
+    "replace a daw",
+    "come with sounds",
+    "run on windows or macos"
+  ],
+  "requires": [
+    "a linux desktop",
+    "pipewire or jack",
+    "the plugins you already own"
+  ],
+  "coming": {
+    "kicker": "no binary yet",
+    "body": "a public build is coming.",
+    "cta": "itch.io"
+  },
+  "license": "gplv3",
+  "year": 2026,
+  "footer": "seedless.",
+  "itch": {
+    "url": "",
+    "title": "Nirbija",
+    "shortText": "a mixer you play. linux. clap, lv2, vst3.",
+    "classification": "tools",
+    "type": "application",
+    "kind": "coming soon — no build attached",
+    "price": "name your price",
+    "tags": [
+      "linux",
+      "audio",
+      "mixer",
+      "plugin-host",
+      "clap",
+      "lv2",
+      "vst3",
+      "pipewire",
+      "jack"
+    ]
+  }
+}

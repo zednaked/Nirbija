@@ -130,27 +130,6 @@
             ],
             "soloed": false,
             "width": 2
-        },
-        {
-            "armed": false,
-            "audioSource": "",
-            "channelSink": "",
-            "destination": -1,
-            "destinationKind": "master",
-            "gain": 1,
-            "inserts": [
-            ],
-            "isBus": false,
-            "midiMask": 65535,
-            "midiSources": [
-            ],
-            "muted": false,
-            "name": "Channel 4",
-            "pan": 0,
-            "sends": [
-            ],
-            "soloed": false,
-            "width": 2
         }
     ],
     "master": {

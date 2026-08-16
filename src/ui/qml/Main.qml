@@ -8,10 +8,12 @@ import Nirbija
 ApplicationWindow {
     id: window
 
-    width: 1200
-    height: 700
-    minimumWidth: 640
-    minimumHeight: 460
+    // In scaled pixels, like everything else: at NIRBIJA_UI_SCALE=1.35 a window
+    // still 700 px tall squeezes the insert chain out of every strip.
+    width: Skin.px(1200)
+    height: Skin.px(700)
+    minimumWidth: Skin.px(660)
+    minimumHeight: Skin.px(520)
     visible: true
     title: Mixer.dirty ? qsTr("Nirbija •") : qsTr("Nirbija")
     color: Skin.background

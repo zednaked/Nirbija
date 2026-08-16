@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>nirbija — mixer.</title>
+  <meta name="description" content="a mixer you play. linux. clap, lv2, vst3. no timeline.">
+  <meta name="theme-color" content="#ebe4d4">
+  <meta property="og:title" content="nirbija — mixer.">
+  <meta property="og:description" content="a row of channels. plugins live in the strip. press play.">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="img/hero.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/site.css?v=11">
+</head>
+<body>
+  <header class="nav">
+    <a class="brand" href="./">
+      <svg width="18" height="12" viewBox="0 0 18 12" aria-hidden="true">
+        <rect x="1" y="5" width="2" height="6" fill="currentColor"/>
+        <rect x="8" y="1" width="2" height="10" fill="currentColor"/>
+        <rect x="15" y="3" width="2" height="8" fill="currentColor"/>
+      </svg>
+      nirbija
+    </a>
+    <ul class="nav-links">
+      <li><a href="#index">index</a></li>
+      <li><a href="#signal">watch</a></li>
+      <li hidden data-itch><a href="#">itch</a></li>
+    </ul>
+  </header>
+
+  <main>
+    <section class="fold">
+      <div class="hero wrap">
+        <p class="kicker">linux instrument</p>
+        <h1 class="wordmark">nirbija</h1>
+        <p class="product">mixer.</p>
+        <p class="lede">a row of channels. plugins live in the strip. press play.</p>
+        <ul class="compat">
+          <li>linux</li>
+          <li>pipewire</li>
+          <li>jack</li>
+          <li>clap</li>
+          <li>lv2</li>
+          <li>vst3</li>
+        </ul>
+      </div>
+      <figure class="device">
+        <img src="img/hero.png?v=11" width="1204" height="704"
+             alt="Nirbija mixer">
+      </figure>
+    </section>
+
+    <section class="tape wrap" id="tape" hidden>
+      <div class="section-head"><span>session tape</span><span>00</span></div>
+      <div class="tape-frame" data-tape>
+        <div class="tape-idle">
+          <div class="play" aria-hidden="true"><i></i></div>
+          coming
+        </div>
+      </div>
+    </section>
+
+    <section class="sheet wrap" id="index">
+      <div class="section-head"><span>index</span><span>01–06</span></div>
+      <div class="index">
+        <article class="item">
+          <span class="id">01</span>
+          <span class="name">host</span>
+          <span class="copy">clap, lv2, vst3. native editors, same slot.</span>
+        </article>
+        <article class="item">
+          <span class="id">02</span>
+          <span class="name">mixer</span>
+          <span class="copy">inserts, sends, buses. one strip per voice.</span>
+        </article>
+        <article class="item">
+          <span class="id">03</span>
+          <span class="name">loop</span>
+          <span class="copy">quantised. play against yourself.</span>
+        </article>
+        <article class="item">
+          <span class="id">04</span>
+          <span class="name">record</span>
+          <span class="copy">armed channels and the master.</span>
+        </article>
+        <article class="item">
+          <span class="id">05</span>
+          <span class="name">midi</span>
+          <span class="copy">jack ports, learn, keys on the strip.</span>
+        </article>
+        <article class="item">
+          <span class="id">06</span>
+          <span class="name">session</span>
+          <span class="copy">the graph and the plugin state.</span>
+        </article>
+      </div>
+
+      <div class="section-head sub"><span>manual</span><span>does / does not</span></div>
+      <div class="cols">
+        <div>
+          <h3>does</h3>
+          <ul>
+            <li>host the plugins you already have</li>
+            <li>mix, send, loop, record</li>
+            <li>talk to pipewire and jack</li>
+            <li>keep a session</li>
+          </ul>
+        </div>
+        <div class="dim">
+          <h3>does not</h3>
+          <ul>
+            <li>arrange clips on a timeline</li>
+            <li>replace a daw</li>
+            <li>come with sounds</li>
+            <li>run on windows or macos</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="section-head sub"><span>requires</span><span></span></div>
+      <ul class="requires">
+        <li>a linux desktop</li>
+        <li>pipewire or jack</li>
+        <li>the plugins you already own</li>
+      </ul>
+    </section>
+
+    <section class="signal wrap" id="signal">
+      <p class="kicker">no binary yet</p>
+      <h2>the instrument is being finished.</h2>
+      <p>a public build is coming.</p>
+      <a class="cta" hidden data-itch href="#">itch.io</a>
+    </section>
+  </main>
+
+  <footer class="foot wrap">
+    <span>seedless.</span>
+    <span>gplv3 · 2026</span>
+    <a hidden data-itch href="#">itch.io</a>
+  </footer>
+
+  <script src="js/site.js" defer></script>
+</body>
+</html>

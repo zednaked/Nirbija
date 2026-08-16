@@ -16,6 +16,9 @@ AbstractButton {
     signal menuRequested
 
     implicitHeight: Skin.slotHeight
+    padding: Skin.spacingS
+    // Clears the bypass mark down the left edge.
+    leftPadding: Skin.spacing + Skin.spacingXS
     hoverEnabled: true
     focusPolicy: Qt.StrongFocus
 

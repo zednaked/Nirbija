@@ -22,6 +22,9 @@ AbstractButton {
     // Destructive or loud toggles get a hotter resting state so the eye finds
     // them before the hand does.
     property bool danger: false
+    // Draws as plain text until it is pointed at. For buttons that are mostly
+    // labels — a channel title — where a resting outline would be noise.
+    property bool flat: false
 
     implicitWidth: Math.max(Skin.touchTarget,
                             textItem.implicitWidth + 2 * Skin.spacing)
@@ -49,8 +52,10 @@ AbstractButton {
         color: root.active ? root.activeColor
              : root.down ? Skin.slotHover
              : root.hovered ? Skin.slotHover
+             : root.flat ? "transparent"
              : Skin.slot
-        border.width: 1
+        border.width: root.flat && !root.hovered && !root.visualFocus
+                      && !root.active ? 0 : 1
         border.color: root.visualFocus ? Skin.focus
                     : root.active ? Qt.lighter(root.activeColor, 1.25)
                     : root.danger ? Qt.darker(Skin.mute, 1.6)

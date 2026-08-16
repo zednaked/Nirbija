@@ -116,7 +116,10 @@ Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.minimumHeight: Skin.px(150)
-            Layout.preferredHeight: Skin.px(190)
+            Layout.preferredHeight: Skin.px(200)
+            // Past about this, a taller fader is no easier to set, while the
+            // insert chain is always easier to read with another slot showing.
+            Layout.maximumHeight: Skin.px(250)
             spacing: Skin.gap
 
             Fader {
@@ -259,6 +262,7 @@ Rectangle {
             Layout.fillWidth: true
             Layout.preferredHeight: Skin.px(20)
             label: root.channelName
+            flat: true
             tip: qsTr("%1 — click to rename this strip, duplicate it, or remove it.").arg(root.channelName)
             onClicked: root.titleClicked(title)
         }

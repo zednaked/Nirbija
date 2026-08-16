@@ -79,7 +79,6 @@ Item {
             font.pixelSize: Skin.fontXS
             font.family: Skin.monoFamily
             visible: hover.hovered || root.activeFocus
-                     || Math.abs(root.clamped) >= 0.02
         }
     }
 

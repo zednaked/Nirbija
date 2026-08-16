@@ -128,7 +128,7 @@ Item {
                 width: Skin.px(5)
                 radius: width / 2
                 color: root.accent
-                opacity: 0.35
+                opacity: 0.28
                 y: handle.y + handle.height / 2
                 height: Math.max(0, track.height - y)
             }

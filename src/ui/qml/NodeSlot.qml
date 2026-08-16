@@ -16,6 +16,7 @@ AbstractButton {
     signal menuRequested
 
     implicitHeight: Skin.slotHeight
+    padding: Skin.spacingS + 1
     hoverEnabled: true
     focusPolicy: Qt.StrongFocus
 
