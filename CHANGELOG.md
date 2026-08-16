@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 — unreleased
+## 0.1.0 — 2026-08-16
 
 First public build. A plugin host and mixer for Linux: a row of channel
 strips, plugins in the strip, and a session that reopens where you left it.
