@@ -7,7 +7,14 @@
     "press play."
   ],
   "pages": "https://zednaked.github.io/nirbija-site/",
-  "compat": ["linux", "pipewire", "jack", "clap", "lv2", "vst3"],
+  "compat": [
+    "linux",
+    "pipewire",
+    "jack",
+    "clap",
+    "lv2",
+    "vst3"
+  ],
   "video": {
     "youtube": "",
     "caption": "session tape"
@@ -32,30 +39,41 @@
     },
     {
       "id": "03",
+      "name": "sequence",
+      "copy": "sixteen steps on a grid, against the transport."
+    },
+    {
+      "id": "04",
+      "name": "arpeggio",
+      "copy": "hold a chord. it walks it, in time."
+    },
+    {
+      "id": "05",
+      "name": "script",
+      "copy": "a midi plugin you write in lua, in the mixer."
+    },
+    {
+      "id": "06",
       "name": "loop",
       "copy": "quantised. play against yourself."
     },
     {
-      "id": "04",
-      "name": "record",
-      "copy": "armed channels and the master."
+      "id": "07",
+      "name": "strips",
+      "copy": "save a chain with its state. hand it over."
     },
     {
-      "id": "05",
+      "id": "08",
       "name": "midi",
-      "copy": "jack ports, learn, keys on the strip."
-    },
-    {
-      "id": "06",
-      "name": "session",
-      "copy": "the graph and the plugin state."
+      "copy": "jack ports, learn, keys, an outside clock."
     }
   ],
   "does": [
     "host the plugins you already have",
+    "play them from sequencers of its own",
     "mix, send, loop, record",
-    "talk to pipewire and jack",
-    "keep a session"
+    "talk to pipewire, jack, and a clock from outside",
+    "keep a session \u2014 or one strip, on its own"
   ],
   "doesNot": [
     "arrange clips on a timeline",
@@ -77,12 +95,12 @@
   "year": 2026,
   "footer": "seedless.",
   "itch": {
-    "url": "https://zedcave.itch.io/nirbija",
+    "url": "",
     "title": "Nirbija",
     "shortText": "a mixer you play. linux. clap, lv2, vst3.",
     "classification": "tools",
     "type": "application",
-    "kind": "coming soon — no build attached",
+    "kind": "coming soon \u2014 no build attached",
     "price": "name your price",
     "tags": [
       "linux",
