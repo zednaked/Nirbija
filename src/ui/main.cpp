@@ -1,4 +1,4 @@
-#include <QGuiApplication>
+#include <QApplication>
 #include <QIcon>
 #include <QQmlApplicationEngine>
 #include <QQuickStyle>
@@ -72,7 +72,12 @@ int main(int argc, char* argv[]) {
 
   nirbija::force_x11_platform();
 
-  QGuiApplication app(argc, argv);
+  // QApplication, not QGuiApplication, and the interface here draws no widget.
+  // Plenty of plugin editors are built on Qt Widgets - padthv1 is one - and the
+  // first QWidget any of them constructs calls qFatal if the application object
+  // is not a QApplication. qFatal aborts, so the plugin's editor took the whole
+  // mixer down with it, from inside Lv2Gui::instantiate.
+  QApplication app(argc, argv);
   app.setApplicationName(QStringLiteral("Nirbija"));
   app.setOrganizationName(QStringLiteral("Nirbija"));
   app.setApplicationVersion(QStringLiteral(NIRBIJA_VERSION));

@@ -1,4 +1,7 @@
-find_package(Qt6 6.5 REQUIRED COMPONENTS Quick QuickControls2)
+# Widgets is not for this interface, which is QML throughout. It is for the
+# plugins: an editor built on Qt Widgets calls qFatal on its first QWidget
+# unless the application object is a QApplication, and qFatal aborts the host.
+find_package(Qt6 6.5 REQUIRED COMPONENTS Quick QuickControls2 Widgets)
 # Plugin editor windows are created with Xlib directly, not through Qt.
 pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
 qt_standard_project_setup(REQUIRES 6.5)
@@ -71,7 +74,7 @@ qt_add_qml_module(nirbija_ui
   QML_FILES ${nirbija_qml}
 )
 
-target_link_libraries(nirbija_ui PUBLIC nirbija_core Qt6::Quick PRIVATE PkgConfig::X11)
+target_link_libraries(nirbija_ui PUBLIC nirbija_core Qt6::Quick Qt6::Widgets PRIVATE PkgConfig::X11)
 target_include_directories(nirbija_ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 # The app icon is baked in as well as installed: the app forces itself onto
@@ -90,7 +93,7 @@ qt_add_executable(nirbija
 # The backing library is static, so the module's plugin has to be linked
 # explicitly or nothing registers the types at startup.
 target_link_libraries(nirbija
-  PRIVATE nirbija_ui nirbija_uiplugin Qt6::Quick Qt6::QuickControls2)
+  PRIVATE nirbija_ui nirbija_uiplugin Qt6::Quick Qt6::QuickControls2 Qt6::Widgets)
 target_include_directories(nirbija PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 # One source for the version number: project() in the top-level CMakeLists.
 target_compile_definitions(nirbija PRIVATE NIRBIJA_VERSION="${PROJECT_VERSION}")

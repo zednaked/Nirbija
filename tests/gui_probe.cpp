@@ -3,7 +3,7 @@
 //
 //   nirbija_gui_probe "Dragonfly Hall Reverb"
 
-#include <QGuiApplication>
+#include <QApplication>
 #include <QTimer>
 
 #include <cstdio>
@@ -15,7 +15,9 @@
 int main(int argc, char* argv[]) {
   nirbija::force_x11_platform();
 
-  QGuiApplication app(argc, argv);
+  // Same reason as the app: a Qt Widgets plugin editor calls qFatal on its
+  // first QWidget unless the application object is a QApplication.
+  QApplication app(argc, argv);
   std::printf("platform: %s\n", app.platformName().toUtf8().constData());
   const QStringList args = app.arguments();
   if (args.size() < 2) {
@@ -60,6 +62,6 @@ int main(int argc, char* argv[]) {
   }
 
   std::printf("embedded %s, closing in %d s\n", wanted.c_str(), seconds);
-  QTimer::singleShot(seconds * 1000, &app, &QGuiApplication::quit);
+  QTimer::singleShot(seconds * 1000, &app, &QApplication::quit);
   return app.exec();
 }
