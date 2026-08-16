@@ -1331,6 +1331,11 @@ void MixerModel::toggleMidiClock() {
   emit transportChanged();
 }
 
+void MixerModel::toggleFollowMidiClock() {
+  engine_.set_follow_midi_clock(!engine_.follow_midi_clock());
+  emit transportChanged();
+}
+
 void MixerModel::setTimeSignature(int num, int den) {
   engine_.set_time_signature(num, den);
   emit transportChanged();

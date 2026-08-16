@@ -131,6 +131,8 @@ bool Engine::start(const std::string& client_name) {
                                    JackPortIsInput, 0);
   clock_out_ = jack_port_register(client_, "clock_out", JACK_DEFAULT_MIDI_TYPE,
                                   JackPortIsOutput, 0);
+  clock_in_ = jack_port_register(client_, "clock_in", JACK_DEFAULT_MIDI_TYPE,
+                                 JackPortIsInput, 0);
 
   jack_set_process_callback(client_, jack_process_trampoline, this);
   jack_set_buffer_size_callback(client_, jack_buffer_size_trampoline, this);
@@ -150,6 +152,7 @@ void Engine::stop() {
   master_out_[0] = master_out_[1] = nullptr;
   control_in_ = nullptr;
   clock_out_ = nullptr;
+  clock_in_ = nullptr;
 }
 
 size_t Engine::add_channel(const std::string& name, int channel_count) {
@@ -622,6 +625,10 @@ int Engine::process(jack_nframes_t frames) {
   while (injected_midi_.pop(injected))
     graph_->push_injected_midi(injected.channel, injected.event);
 
+  // Before anything reads the transport: while following, start, stop, tempo
+  // and position all arrive on a wire rather than from our own counter.
+  read_external_clock(frames);
+
   const bool playing = playing_.load(std::memory_order_relaxed);
   const double tempo = tempo_.load(std::memory_order_relaxed);
   const uint64_t frame = transport_frame_.load(std::memory_order_relaxed);
@@ -684,8 +691,99 @@ int Engine::process(jack_nframes_t frames) {
     }
   }
 
-  if (playing) transport_frame_.store(frame + frames, std::memory_order_relaxed);
+  if (playing && !follow_clock_.load(std::memory_order_relaxed))
+    transport_frame_.store(frame + frames, std::memory_order_relaxed);
   return 0;
+}
+
+// Reads MIDI beat clock off `clock_in` and makes the transport follow it.
+//
+// The wire carries twenty-four ticks to the quarter note and nothing else: no
+// tempo, no position. Tempo is inferred from how far apart the ticks land, and
+// position is simply how many have gone by. Counting ticks rather than frames
+// is what keeps the two from fighting - a tempo estimate that wobbles must not
+// make the song position wobble with it.
+void Engine::read_external_clock(uint32_t frames) {
+  if (!follow_clock_.load(std::memory_order_relaxed) || clock_in_ == nullptr)
+    return;
+
+  void* buffer = jack_port_get_buffer(clock_in_, frames);
+  if (buffer == nullptr) return;
+
+  const uint32_t count = jack_midi_get_event_count(buffer);
+  double consumed = 0.0;  // frames of this block already charged to a gap
+
+  for (uint32_t i = 0; i < count; ++i) {
+    jack_midi_event_t event;
+    if (jack_midi_event_get(&event, buffer, i) != 0 || event.size < 1) continue;
+
+    switch (event.buffer[0]) {
+      case 0xf8: {  // timing clock
+        const double gap = frames_since_tick_ + event.time - consumed;
+        consumed = event.time;
+        frames_since_tick_ = 0.0;
+
+        // A gap under a millisecond or over a second is a sender starting up,
+        // a dropout, or a port being connected mid-stream - none of which is a
+        // tempo. Smoothed, because one late tick is jitter, not a rallentando.
+        if (gap > sample_rate_ * 0.001 && gap < sample_rate_) {
+          tick_frames_ = tick_frames_ > 0.0 ? tick_frames_ * 0.8 + gap * 0.2 : gap;
+          const double bpm = 60.0 * sample_rate_ / (tick_frames_ * 24.0);
+          if (bpm > 20.0 && bpm < 400.0)
+            tempo_.store(bpm, std::memory_order_relaxed);
+        }
+        if (external_running_) ++clock_ticks_;
+        break;
+      }
+      case 0xfa:  // start: from the top
+        clock_ticks_ = 0;
+        frames_since_tick_ = 0.0;
+        external_running_ = true;
+        playing_.store(true, std::memory_order_relaxed);
+        transport_changed_ = true;
+        break;
+      case 0xfb:  // continue: from where it stopped
+        external_running_ = true;
+        playing_.store(true, std::memory_order_relaxed);
+        transport_changed_ = true;
+        break;
+      case 0xfc:  // stop
+        external_running_ = false;
+        playing_.store(false, std::memory_order_relaxed);
+        transport_changed_ = true;
+        break;
+      case 0xf2:  // song position, in sixteenths, fourteen bits little end first
+        if (event.size >= 3) {
+          const uint32_t sixteenths =
+              static_cast<uint32_t>(event.buffer[1] & 0x7f) |
+              (static_cast<uint32_t>(event.buffer[2] & 0x7f) << 7);
+          clock_ticks_ = static_cast<uint64_t>(sixteenths) * 6;
+          frames_since_tick_ = 0.0;
+          transport_changed_ = true;
+        }
+        break;
+      default:
+        break;
+    }
+  }
+  frames_since_tick_ += frames - consumed;
+
+  // Ticks to beats, with the fraction of a tick since the last one so the
+  // position moves smoothly between them rather than in twenty-fourths.
+  double beats = static_cast<double>(clock_ticks_) / 24.0;
+  if (external_running_ && tick_frames_ > 0.0)
+    beats += frames_since_tick_ / tick_frames_ / 24.0;
+
+  // The rest of the engine reads a frame count and multiplies it by the tempo
+  // to get beats, so the frame written here is the one that gives back exactly
+  // the position the clock asked for - and it is recomputed every block, so a
+  // change in the tempo estimate moves the tempo without moving the song.
+  const double tempo = tempo_.load(std::memory_order_relaxed);
+  if (tempo > 0.0 && sample_rate_ > 0.0) {
+    transport_frame_.store(
+        static_cast<uint64_t>(beats * 60.0 / tempo * sample_rate_),
+        std::memory_order_relaxed);
+  }
 }
 
 // A short sine tick on every beat, a fifth higher on the downbeat. Added after

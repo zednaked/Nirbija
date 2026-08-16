@@ -228,6 +228,7 @@ void MixerModel::writeSession(const QString& target) const {
   root[QStringLiteral("tempo")] = engine_.tempo();
   root[QStringLiteral("metronome")] = engine_.metronome();
   root[QStringLiteral("midiClock")] = engine_.midi_clock();
+  root[QStringLiteral("followMidiClock")] = engine_.follow_midi_clock();
   root[QStringLiteral("timeNumerator")] = engine_.time_numerator();
   root[QStringLiteral("timeDenominator")] = engine_.time_denominator();
 
@@ -490,6 +491,8 @@ bool MixerModel::readSession(const QString& target) {
     toggleMetronome();
   if (root[QStringLiteral("midiClock")].toBool() != engine_.midi_clock())
     toggleMidiClock();
+  if (root[QStringLiteral("followMidiClock")].toBool() != engine_.follow_midi_clock())
+    toggleFollowMidiClock();
   setTimeSignature(root[QStringLiteral("timeNumerator")].toInt(4),
                    root[QStringLiteral("timeDenominator")].toInt(4));
 

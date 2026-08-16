@@ -91,6 +91,16 @@ class Engine {
   void inject_midi(size_t channel, const MidiEvent& event);
   void set_midi_clock(bool on) { clock_enabled_.store(on, std::memory_order_relaxed); }
   bool midi_clock() const { return clock_enabled_.load(std::memory_order_relaxed); }
+
+  // Follow a clock arriving on the `clock_in` port instead of running our own:
+  // start, stop, position and tempo all come from whatever is sending. The
+  // transport controls in the UI stop being in charge while this is on.
+  void set_follow_midi_clock(bool on) {
+    follow_clock_.store(on, std::memory_order_relaxed);
+  }
+  bool follow_midi_clock() const {
+    return follow_clock_.load(std::memory_order_relaxed);
+  }
   void set_time_signature(int num, int den);
 
   // Wires the master to the system's default output, the way a mixer that just
@@ -179,6 +189,7 @@ class Engine {
   jack_port_t* master_out_[2] = {nullptr, nullptr};
   jack_port_t* control_in_ = nullptr;
   jack_port_t* clock_out_ = nullptr;
+  jack_port_t* clock_in_ = nullptr;
   RtQueue<MidiEvent, 256> control_events_;
   RtQueue<InjectedMidi, 256> injected_midi_;
   std::vector<ChannelPorts> channel_ports_;
@@ -193,6 +204,7 @@ class Engine {
   std::atomic<double> tempo_{120.0};
   std::atomic<bool> metronome_{false};
   std::atomic<bool> clock_enabled_{false};
+  std::atomic<bool> follow_clock_{false};
   std::atomic<int> time_num_{4};
   std::atomic<int> time_den_{4};
   std::atomic<uint64_t> transport_frame_{0};
@@ -206,6 +218,16 @@ class Engine {
   void render_metronome(float* const* master, uint32_t frames, bool playing,
                         double tempo, double start_beats);
   double clock_phase_ = 0.0;
+
+  // --- following an external clock, audio thread only ------------------------
+  // Position is counted in clock ticks - twenty-four to the quarter note -
+  // rather than in frames, because ticks are what actually arrives. The frame
+  // the rest of the engine reads is computed back from them.
+  void read_external_clock(uint32_t frames);
+  uint64_t clock_ticks_ = 0;
+  double frames_since_tick_ = 0.0;
+  double tick_frames_ = 0.0;  // smoothed frames between ticks
+  bool external_running_ = false;
   bool transport_changed_ = true;
   RtQueue<EngineCommand, 1024> commands_;
 };

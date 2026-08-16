@@ -67,6 +67,7 @@ class MixerModel : public QAbstractListModel {
   Q_PROPERTY(bool masterMute READ masterMute NOTIFY masterGainChanged)
   Q_PROPERTY(bool masterMono READ masterMono NOTIFY masterGainChanged)
   Q_PROPERTY(bool midiClock READ midiClock NOTIFY transportChanged)
+  Q_PROPERTY(bool followMidiClock READ followMidiClock NOTIFY transportChanged)
   Q_PROPERTY(bool masterClip READ masterClip NOTIFY levelsChanged)
 
  public:
@@ -221,10 +222,12 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE void toggleMasterMute();
   Q_INVOKABLE void toggleMasterMono();
   Q_INVOKABLE void toggleMidiClock();
+  Q_INVOKABLE void toggleFollowMidiClock();
   bool masterDim() const { return engine_.graph().master_dim(); }
   bool masterMute() const { return engine_.graph().master_mute(); }
   bool masterMono() const { return engine_.graph().master_mono(); }
   bool midiClock() const { return engine_.midi_clock(); }
+  bool followMidiClock() const { return engine_.follow_midi_clock(); }
   bool masterClip() const { return master_clip_; }
   Q_INVOKABLE void setTimeSignature(int num, int den);
 

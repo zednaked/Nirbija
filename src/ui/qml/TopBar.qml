@@ -225,6 +225,15 @@ Rectangle {
             onClicked: Mixer.toggleMidiClock()
         }
 
+        StripButton {
+            Layout.preferredWidth: Skin.px(40)
+            label: qsTr("ext")
+            tip: qsTr("Follow a MIDI clock arriving on clock_in: start, stop, position and tempo all come from it, and the transport here stops being in charge.")
+            active: Mixer.followMidiClock
+            activeColor: Skin.arm
+            onClicked: Mixer.toggleFollowMidiClock()
+        }
+
         Separator {}
 
         // --- what the master is doing -----------------------------------------

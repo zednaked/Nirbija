@@ -47,6 +47,11 @@ add_executable(nirbija_midi_jack midi_jack.cpp)
 target_link_libraries(nirbija_midi_jack PRIVATE nirbija_core)
 add_test(NAME midi_jack COMMAND nirbija_midi_jack)
 
+add_executable(nirbija_midi_clock_follow midi_clock_follow.cpp)
+target_link_libraries(nirbija_midi_clock_follow PRIVATE nirbija_core)
+add_test(NAME midi_clock_follow COMMAND nirbija_midi_clock_follow)
+set_tests_properties(midi_clock_follow PROPERTIES SKIP_RETURN_CODE 77)
+
 # Manual tool, not a ctest target: needs a MIDI source and someone to play it.
 add_executable(nirbija_live live_session.cpp)
 target_link_libraries(nirbija_live PRIVATE nirbija_core)
