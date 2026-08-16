@@ -1,5 +1,65 @@
 # Changelog
 
+## 0.3.0 — 2026-08-16
+
+### Instruments of its own
+
+Three MIDI plugins ship inside the host, filling what `ECOSYSTEM.md` counted
+as the gap: of the MIDI plugins installed on a typical Linux machine, nearly
+all process notes that already exist and almost none make any.
+
+- **Step Sequencer** — sixteen steps, snapped to the transport, with a grid
+  to play it on rather than eighty-five sliders. Monophonic, which stops
+  being a limit once they chain: `sessions/jam-goth.json` stacks four ahead
+  of DrumGizmo and gets a four-voice kit out of it.
+- **Arpeggiator** — up, down, up-down, down-up, as played, random and chord,
+  with an octave stack, gate and latch. Up-down turns without striking the
+  ends twice, which is the difference between a figure and a stutter.
+- **Script** — a MIDI plugin written in Lua, in the mixer, without compiling
+  anything. The script never runs on the audio thread: it compiles lookup
+  tables on the UI thread and the realtime side only indexes them. Sandboxed
+  by allow list, with an instruction budget.
+
+None of the three needed anything new from the host. `set_transport`,
+`take_midi_output` and the MIDI chain in `channel_strip.cpp` were already
+carrying notes from one insert to the next.
+
+### Strips you can keep
+
+**Save strip…** and **Load strip…**: a chain you liked, in a file, with every
+plugin's state — a sequencer arrives with its pattern, a synth with its
+patch. A strip file is a session holding one channel, written and read by the
+same code sessions use, so the two cannot drift.
+
+A plugin the sender had and the receiver does not is the ordinary case for a
+file that travelled: the strip still arrives, with a hole, and the hole is
+named on screen.
+
+### Following
+
+An **`ext`** button and a `clock_in` port: start, stop, song position and
+tempo can come from an external MIDI clock. Position is counted in ticks
+rather than frames, so a wobbling tempo estimate moves the tempo without
+moving the song underneath it.
+
+### Fixed
+
+- **Duplicating a strip** copied the name and the fader and left the chain
+  empty, which is not a copy of anything. It brings the plugins and their
+  state now.
+- **Two strips could wear the same colour.** The accent came from the graph
+  slot, and channels and buses draw slots from separate pools; four channels
+  and two buses was enough to collide twice with two colours unused.
+- padthv1 is out of the demo sessions: driven with notes it raises its own Qt
+  machinery inside the host and falls over in it. Reproducible in a process
+  that builds no Qt application at all, so it is the plugin, not the host.
+
+### Also
+
+- `sessions/jam-techno.json`, where every built-in plugin carries a real
+  part, and `sessions/jam-goth.json`.
+- Lua 5.4 is a new build dependency.
+
 ## 0.2.0 — 2026-08-16
 
 ### The picker knows what a plugin is

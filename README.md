@@ -37,6 +37,14 @@ cmake --install build --prefix ~/.local
 Lays down the binary, the launcher and the icon — four files, nothing else.
 See `packaging/README.md` for the desktop and Hyprland side of it.
 
+## Strips
+
+A chain worth keeping goes in a file of its own — click a strip's name for
+**Save strip…**, and right-click the `+ add strip` square for **Load strip…**.
+Every plugin's state travels with it, so a sequencer arrives with its pattern.
+A plugin the file wants and this machine does not have is named on screen, and
+the rest of the strip still loads.
+
 ## Packaging
 
 ```sh
@@ -48,6 +56,23 @@ packaging/dist.sh appimage   # self-contained, Qt bundled in
 Everything lands in `dist/`. The binary tree links against the Qt and JACK of
 the machine that built it, so it travels only to an identical distro; anything
 else wants the AppImage or the source.
+
+## Built in
+
+Besides whatever LV2, CLAP and VST3 you have installed, a few plugins live in
+the host and need nothing installed at all:
+
+| | |
+|---|---|
+| **Step Sequencer** | sixteen steps against the transport, with a grid to play |
+| **Arpeggiator** | up, down, up-down, as played, random, chord; octaves and latch |
+| **Script** | a MIDI plugin you write in Lua, in the mixer |
+| **Looper** | quantised launch, in an insert slot |
+| **File Player** | a file into a strip |
+
+They sit in the picker's **midi** bucket alongside everything else. A
+sequencer above a synth in the same strip plays it: the MIDI a plugin makes
+joins what the next one in the chain receives.
 
 ## Using it
 
