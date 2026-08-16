@@ -1,0 +1,42 @@
+{
+    "channels": [
+        {
+            "armed": false,
+            "audioSource": "",
+            "channelSink": "",
+            "destination": 1,
+            "destinationKind": "bus",
+            "destinationName": "Tape",
+            "gain": 0.75,
+            "inserts": [
+                {
+                    "bypassed": false,
+                    "format": "Internal",
+                    "postFader": false,
+                    "state": "MgoxLjAwMDAwMA==",
+                    "uid": "nirbija.looper"
+                },
+                {
+                    "bypassed": false,
+                    "format": "LV2",
+                    "postFader": false,
+                    "state": "PHVybjpuaXJiaWphOnN0YXRlPgoJYSBwc2V0OlByZXNldCA7CglsdjI6YXBwbGllc1RvIDxodHRwczovL2FpcndpbmRvd3MuY29tLy9wbHVnaW5zL0FpcndpbmRvd3NfQ29uc29saWRhdGVkPiA7CglsdjI6cG9ydCBbCgkJbHYyOnN5bWJvbCAiZW5hYmxlZCIgOwoJCXBzZXQ6dmFsdWUgMS4wCgldICwgWwoJCWx2MjpzeW1ib2wgImZyZWVXaGVlbGluZyIgOwoJCXBzZXQ6dmFsdWUgMC4wCgldIDsKCXN0YXRlOnN0YXRlIFsKCQk8aHR0cHM6Ly9haXJ3aW5kb3dzLmNvbS8vcGx1Z2lucy9BaXJ3aW5kb3dzX0NvbnNvbGlkYXRlZDpTdGF0ZVN0cmluZz4gIjMxNC5WTWpMZ0RTLi4uLk8rZldhckFoY2tJMmJvOGxhOEhSTHQuaUhmVGxhaThGWW80MVk4SFJVVFlUSzNIeE85LkJPZ2MyWHU0MWJ1d1ZaakVGY2tRRkh5UW1ia0VWYW80MVlWVWxieWsxYXQwaUgzVGlMekhCSGlVbWJ4VWxhekFrYnVNVll5TTJheDRUWHNVVk9oYlRYckUxWHprMVhoLlJYMkEyV3Z6aUh2M1JNaC5SWDJBMld3emlIdjNSTWguUlgyQTJXeHppSHYzUk1oLlJYMkEyV3l6aUh3M0JMaC5SWDJBMld6emlIdzNCTGguUlgyQTJXMHppSHYzQkxoLlJYMkEyVzF6aUh2M0JMaC5SWDJBMlcyemlIdjNCTGguUlgyQTJXM3ppSHYzQkxoLlJYMkEyVzR6aUh2M0JMaC5SWnR3VlkxMGlIdjNSTXZEU0wzYmlMdlR5THdQaU15WGlMaC54YTBRR2FrWVdPaC5pSzAuU0x3ZnlNeC5TTXlEQ00xTGlNeEhCSHM4bGF1SVRZbkVsY284VmN4MGlIdkh4SzkuLiIKCV0gLgo=",
+                    "uid": "https://airwindows.com//plugins/Airwindows_Consolidated"
+                }
+            ],
+            "isBus": false,
+            "midiMask": 65535,
+            "midiSources": [
+            ],
+            "muted": false,
+            "name": "Air",
+            "pan": -0.15,
+            "sends": [
+            ],
+            "soloed": false,
+            "width": 2
+        }
+    ],
+    "kind": "strip",
+    "version": 1
+}
