@@ -1156,16 +1156,66 @@ void MixerModel::duplicateChannel(int row) {
   if (row < 0 || row >= static_cast<int>(channels_.size())) return;
   pushUndo();
   const ChannelUi src = channels_[row];
+
+  // Every plugin's state, taken with the graph parked - the LV2 spec is clear
+  // that save_state is not something to ask for while the instance is running,
+  // and the same rule is what makes a saved session reload correctly.
+  std::vector<std::vector<uint8_t>> blobs;
+  std::vector<int> plugin_rows;
+  std::vector<bool> bypassed;
+  std::vector<bool> post_fader;
+  if (ChannelStrip* strip = stripFor(row)) {
+    engine_.park_graph();
+    for (size_t slot = 0; slot < strip->insert_count(); ++slot) {
+      PluginInstance* insert = strip->insert_at(slot);
+      if (insert == nullptr) continue;  // a hole left by a removal
+      const PluginDescriptor& descriptor = insert->descriptor();
+      plugin_rows.push_back(plugins_->rowFor(descriptor.format, descriptor.uid));
+      blobs.push_back(insert->save_state());
+      bypassed.push_back(strip->insert_bypassed(slot));
+      post_fader.push_back(strip->insert_post_fader(slot));
+    }
+    engine_.unpark_graph();
+  }
+
   if (src.is_bus) {
     addBus(src.name + QStringLiteral(" copy"));
   } else {
     addChannel(src.name + QStringLiteral(" copy"), src.width);
   }
   const int dest = rowCount() - 1;
+  if (dest == row) return;  // the graph was full
+
   setGain(dest, src.gain);
   setPan(dest, src.pan);
   if (src.muted) toggleMute(dest);
   if (src.soloed) toggleSolo(dest);
+  setMidiMask(dest, midiMask(row));
+  setDestination(dest, src.destination);
+
+  // The chain, in order, each plugin handed back the state its twin was in.
+  // A copy of a strip that arrives empty is not a copy of anything.
+  for (size_t i = 0; i < plugin_rows.size(); ++i) {
+    if (plugin_rows[i] < 0) continue;  // no longer installed
+    const int slot = placeInsert(dest, plugin_rows[i], -1);
+    if (slot < 0) break;  // the chain is full
+    setInsertBypassed(dest, slot, bypassed[i]);
+    setInsertPostFader(dest, slot, post_fader[i]);
+    if (blobs[i].empty()) continue;
+
+    ChannelStrip* strip = stripFor(dest);
+    if (strip == nullptr) break;
+    PluginInstance* insert = strip->insert_at(static_cast<size_t>(slot));
+    if (insert != nullptr) insert->load_state(blobs[i]);
+  }
+
+  // Sends last, the way a session restores them, since they name a bus.
+  const QVariantList sends = src.sends;
+  for (int slot = 0; slot < sends.size(); ++slot) {
+    const QVariantMap send = sends[slot].toMap();
+    setSend(dest, slot, send.value(QStringLiteral("bus")).toInt(),
+            send.value(QStringLiteral("level")).toDouble());
+  }
 }
 
 void MixerModel::moveChannel(int row, int direction) {

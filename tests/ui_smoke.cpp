@@ -333,6 +333,53 @@ int main(int argc, char* argv[]) {
     if (filter.rowCount() != all) fail("clearing the filters did not restore it");
   }
 
+  // --- duplicating a strip brings the chain with it --------------------------
+  //
+  // It used to copy the name, the fader and the pan and leave the chain empty,
+  // which is not a copy of anything: the point of duplicating a strip is
+  // having the same instrument twice.
+  {
+    int effect = -1;
+    for (int i = 0; i < mixer.plugins()->rowCount(); ++i) {
+      const nirbija::PluginDescriptor* descriptor = mixer.plugins()->descriptor(i);
+      if (descriptor != nullptr && descriptor->audio_inputs >= 2) {
+        effect = i;
+        break;
+      }
+    }
+    if (effect < 0) {
+      std::printf("no stereo effect found, skipping the duplicate check\n");
+    } else {
+      mixer.addChannel(QStringLiteral("Source"), 2);
+      const int source = mixer.rowCount() - 1;
+      mixer.addInsert(source, effect);
+      mixer.setGain(source, 0.42);
+      mixer.setPan(source, -0.3);
+
+      const QStringList before =
+          field(mixer, source, nirbija::MixerModel::InsertsRole).toStringList();
+
+      mixer.duplicateChannel(source);
+      const int copy = mixer.rowCount() - 1;
+      if (copy == source) {
+        fail("duplicateChannel did not add a row");
+      } else {
+        const QStringList after =
+            field(mixer, copy, nirbija::MixerModel::InsertsRole).toStringList();
+        if (after != before)
+          fail("the copy's chain does not match the original's");
+        if (std::abs(field(mixer, copy, nirbija::MixerModel::GainRole).toReal()
+                     - 0.42) > 1e-9)
+          fail("the copy did not take the gain");
+        if (std::abs(field(mixer, copy, nirbija::MixerModel::PanRole).toReal()
+                     + 0.3) > 1e-9)
+          fail("the copy did not take the pan");
+      }
+      mixer.removeChannel(mixer.rowCount() - 1);
+      mixer.removeChannel(source);
+    }
+  }
+
   // --- File -> Load session replaces the mixer, it does not add to it --------
   //
   // Loading over a mixer that already had strips left one behind, so a session
