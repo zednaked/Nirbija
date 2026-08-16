@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.2.0 — 2026-08-16
+
+### The picker knows what a plugin is
+
+All three formats state their own classification and none of it was being
+read. LV2 has a class hierarchy with a label, CLAP a feature list, VST3 a
+`subCategories` string. The picker filters by **instrument, effect, midi,
+analyser and utility**, and shows what the plugin calls itself beside the
+maker — so `reverb` finds Dragonfly without knowing it is called Dragonfly.
+
+Where a label is unreadable the ports decide: nothing with no audio ports at
+all is an audio effect, whatever it claims. On the machine this was built on,
+286 plugins come out as 148 effects, 45 midi, 44 analysers, 31 utilities and
+18 instruments, with nothing left unclassified.
+
+### Fixed
+
+- **A plugin editor built on Qt Widgets aborted the host.** padthv1 caught
+  it: the first `QWidget` a plugin constructs calls `qFatal` unless the
+  application object is a `QApplication`, and `qFatal` cannot be recovered
+  from. The app is a `QApplication` now — the interface is still QML and
+  draws no widget of its own.
+- **Right-click on an insert or output slot** asked for the menu and clicked
+  at the same time, so the editor opened over the menu.
+- **Clicking anything drawn over the add-strip square** added a channel,
+  which is where a stray empty strip in a freshly loaded session came from.
+
+The last two share a cause: a Qt pointer handler sits on the delivery path
+rather than in the stacking order, so it answers taps belonging to whatever
+is drawn on top of it.
+
+### Also
+
+- `sessions/try-picker-kinds.json`, a session holding one plugin of each kind.
+- `ECOSYSTEM.md` and `design/`, on what the free plugin world is missing.
+- The AppImage is 61 MB rather than 55: Qt Widgets travels with it now.
+
 ## 0.1.0 — 2026-08-16
 
 First public build. A plugin host and mixer for Linux: a row of channel
