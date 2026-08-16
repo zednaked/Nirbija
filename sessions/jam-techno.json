@@ -1,0 +1,244 @@
+{
+    "version": 1,
+    "tempo": 130,
+    "metronome": false,
+    "midiMaps": [],
+    "master": {
+        "gain": 0.75,
+        "sink": ""
+    },
+    "channels": [
+        {
+            "name": "Kick",
+            "isBus": false,
+            "width": 2,
+            "gain": 0.28,
+            "pan": 0.0,
+            "muted": false,
+            "soloed": false,
+            "armed": false,
+            "destination": -1,
+            "destinationKind": "master",
+            "inserts": [
+                {
+                    "format": "Internal",
+                    "uid": "nirbija.stepseq",
+                    "bypassed": false,
+                    "postFader": false,
+                    "state": "ZGl2aXNpb24gMgpsZW5ndGggMTYKZ2F0ZSAwLjI1MDAKdHJhbnNwb3NlIDAKY2hhbm5lbCAwCnN0ZXAgMzYgMTIwIDEKc3RlcCA2MCAxMDAgMApzdGVwIDYwIDEwMCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCAzNiAxMjAgMQpzdGVwIDYwIDEwMCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCA2MCAxMDAgMApzdGVwIDM2IDEyMCAxCnN0ZXAgNjAgMTAwIDAKc3RlcCA2MCAxMDAgMApzdGVwIDYwIDEwMCAwCnN0ZXAgMzYgMTIwIDEKc3RlcCA2MCAxMDAgMApzdGVwIDYwIDEwMCAwCnN0ZXAgNjAgMTAwIDAK"
+                },
+                {
+                    "format": "LV2",
+                    "uid": "http://github.com/Chowdhury-DSP/ChowKick",
+                    "bypassed": false,
+                    "postFader": false
+                }
+            ],
+            "sends": [],
+            "audioSource": "",
+            "midiSources": []
+        },
+        {
+            "name": "Drums",
+            "isBus": false,
+            "width": 2,
+            "gain": 0.42,
+            "pan": 0.0,
+            "muted": false,
+            "soloed": false,
+            "armed": false,
+            "destination": -1,
+            "destinationKind": "master",
+            "inserts": [
+                {
+                    "format": "Internal",
+                    "uid": "nirbija.stepseq",
+                    "bypassed": false,
+                    "postFader": false,
+                    "state": "ZGl2aXNpb24gMgpsZW5ndGggMTYKZ2F0ZSAwLjI1MDAKdHJhbnNwb3NlIDAKY2hhbm5lbCAwCnN0ZXAgNDIgNzQgMQpzdGVwIDQyIDUyIDEKc3RlcCA2MCAxMDAgMApzdGVwIDQyIDUyIDEKc3RlcCA0MiA3NCAxCnN0ZXAgNDIgNTIgMQpzdGVwIDYwIDEwMCAwCnN0ZXAgNDIgNTIgMQpzdGVwIDQyIDc0IDEKc3RlcCA0MiA1MiAxCnN0ZXAgNjAgMTAwIDAKc3RlcCA0MiA1MiAxCnN0ZXAgNDIgNzQgMQpzdGVwIDQyIDUyIDEKc3RlcCA2MCAxMDAgMApzdGVwIDQyIDUyIDEK"
+                },
+                {
+                    "format": "Internal",
+                    "uid": "nirbija.stepseq",
+                    "bypassed": false,
+                    "postFader": false,
+                    "state": "ZGl2aXNpb24gMgpsZW5ndGggMTYKZ2F0ZSAwLjQ1MDAKdHJhbnNwb3NlIDAKY2hhbm5lbCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCA2MCAxMDAgMApzdGVwIDU4IDkyIDEKc3RlcCA2MCAxMDAgMApzdGVwIDYwIDEwMCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCA1OCA5MiAxCnN0ZXAgNjAgMTAwIDAKc3RlcCA2MCAxMDAgMApzdGVwIDYwIDEwMCAwCnN0ZXAgNTggOTIgMQpzdGVwIDYwIDEwMCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCA2MCAxMDAgMApzdGVwIDU4IDk2IDEKc3RlcCA2MCAxMDAgMAo="
+                },
+                {
+                    "format": "Internal",
+                    "uid": "nirbija.stepseq",
+                    "bypassed": false,
+                    "postFader": false,
+                    "state": "ZGl2aXNpb24gMgpsZW5ndGggMTYKZ2F0ZSAwLjI1MDAKdHJhbnNwb3NlIDAKY2hhbm5lbCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCA2MCAxMDAgMApzdGVwIDYwIDEwMCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCAzOCAxMTIgMQpzdGVwIDYwIDEwMCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCA2MCAxMDAgMApzdGVwIDYwIDEwMCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCA2MCAxMDAgMApzdGVwIDYwIDEwMCAwCnN0ZXAgMzggMTEyIDEKc3RlcCA2MCAxMDAgMApzdGVwIDYwIDEwMCAwCnN0ZXAgNjAgMTAwIDAK"
+                },
+                {
+                    "format": "LV2",
+                    "uid": "http://drumgizmo.org/lv2",
+                    "bypassed": false,
+                    "postFader": false
+                }
+            ],
+            "sends": [
+                {
+                    "bus": -1,
+                    "busName": "Room",
+                    "level": 0.22
+                }
+            ],
+            "audioSource": "",
+            "midiSources": []
+        },
+        {
+            "name": "Bass",
+            "isBus": false,
+            "width": 2,
+            "gain": 0.4,
+            "pan": 0.0,
+            "muted": false,
+            "soloed": false,
+            "armed": false,
+            "destination": -1,
+            "destinationKind": "master",
+            "inserts": [
+                {
+                    "format": "Internal",
+                    "uid": "nirbija.stepseq",
+                    "bypassed": false,
+                    "postFader": false,
+                    "state": "ZGl2aXNpb24gMgpsZW5ndGggMTYKZ2F0ZSAwLjM1MDAKdHJhbnNwb3NlIDAKY2hhbm5lbCAwCnN0ZXAgMzMgMTIwIDEKc3RlcCAzMyA3MCAxCnN0ZXAgNjAgMTAwIDAKc3RlcCAzNiAxMDAgMQpzdGVwIDYwIDEwMCAwCnN0ZXAgMzMgODAgMQpzdGVwIDQwIDExMCAxCnN0ZXAgNjAgMTAwIDAKc3RlcCAzMyAxMjAgMQpzdGVwIDYwIDEwMCAwCnN0ZXAgNDMgMTAwIDEKc3RlcCAzMyA3MCAxCnN0ZXAgNjAgMTAwIDAKc3RlcCAzOCAxMDUgMQpzdGVwIDYwIDEwMCAwCnN0ZXAgMzYgOTUgMQo="
+                },
+                {
+                    "format": "Internal",
+                    "uid": "nirbija.script",
+                    "bypassed": false,
+                    "postFader": false,
+                    "state": "a25vYiAwIDAuMDAwMDAwCmtub2IgMSAwLjAwMDAwMAprbm9iIDIgMC4wMDAwMDAKa25vYiAzIDAuMDAwMDAwCnNjcmlwdAotLSBGb2xkcyBldmVyeSBub3RlIG9udG8gQSBtaW5vciwgc28gYW55dGhpbmcgc2NyaWJibGVkIG9uIGEgc3RlcCBncmlkCi0tIHVwc3RyZWFtIG9mIHRoaXMgbGFuZHMgaW4ga2V5LiBLbm9iIDEgbW92ZXMgdGhlIHJvb3QuCmxvY2FsIHNjYWxlID0geyAwLCAyLCAzLCA1LCA3LCA4LCAxMCB9CgpmdW5jdGlvbiBidWlsZChrbm9iKQogIGxvY2FsIHJvb3QgPSA5ICsgbWF0aC5mbG9vcihrbm9iWzFdICogMTEgKyAwLjUpICAgLS0gOSBpcyBBCiAgbG9jYWwgbm90ZV9tYXAgPSB7fQogIGZvciBuID0gMCwgMTI3IGRvCiAgICBsb2NhbCBvY3RhdmUgPSBtYXRoLmZsb29yKG4gLyAxMikKICAgIGxvY2FsIGRlZ3JlZSA9IChuIC0gcm9vdCkgJSAxMgogICAgbG9jYWwgYmVzdCA9IHNjYWxlWzFdCiAgICBmb3IgXywgc3RlcCBpbiBpcGFpcnMoc2NhbGUpIGRvCiAgICAgIGlmIG1hdGguYWJzKHN0ZXAgLSBkZWdyZWUpIDwgbWF0aC5hYnMoYmVzdCAtIGRlZ3JlZSkgdGhlbiBiZXN0ID0gc3RlcCBlbmQKICAgIGVuZAogICAgbm90ZV9tYXBbbl0gPSBtYXRoLm1heCgwLCBtYXRoLm1pbigxMjcsIG9jdGF2ZSAqIDEyICsgcm9vdCArIGJlc3QpKQogIGVuZAogIHJldHVybiB7IG5vdGVfbWFwID0gbm90ZV9tYXAgfQplbmQK"
+                },
+                {
+                    "format": "LV2",
+                    "uid": "https://thewavewarden.com/odin2",
+                    "bypassed": false,
+                    "postFader": false
+                },
+                {
+                    "format": "LV2",
+                    "uid": "http://calf.sourceforge.net/plugins/Filter",
+                    "bypassed": false,
+                    "postFader": false
+                }
+            ],
+            "sends": [
+                {
+                    "bus": -1,
+                    "busName": "Delay",
+                    "level": 0.18
+                }
+            ],
+            "audioSource": "",
+            "midiSources": []
+        },
+        {
+            "name": "Lead",
+            "isBus": false,
+            "width": 2,
+            "gain": 0.34,
+            "pan": 0.12,
+            "muted": false,
+            "soloed": false,
+            "armed": false,
+            "destination": -1,
+            "destinationKind": "master",
+            "inserts": [
+                {
+                    "format": "Internal",
+                    "uid": "nirbija.stepseq",
+                    "bypassed": false,
+                    "postFader": false,
+                    "state": "ZGl2aXNpb24gMApsZW5ndGggNApnYXRlIDEuMDAwMAp0cmFuc3Bvc2UgMApjaGFubmVsIDAKc3RlcCA1NyAxMDAgMQpzdGVwIDYwIDEwMCAxCnN0ZXAgNjQgMTAwIDEKc3RlcCA1NSAxMDAgMQpzdGVwIDYwIDEwMCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCA2MCAxMDAgMApzdGVwIDYwIDEwMCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCA2MCAxMDAgMApzdGVwIDYwIDEwMCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCA2MCAxMDAgMApzdGVwIDYwIDEwMCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCA2MCAxMDAgMAo="
+                },
+                {
+                    "format": "Internal",
+                    "uid": "nirbija.arp",
+                    "bypassed": false,
+                    "postFader": false,
+                    "state": "ZGl2aXNpb24gMgptb2RlIDAKb2N0YXZlcyAyCmdhdGUgMC40MDAwCnRyYW5zcG9zZSAwCmxhdGNoIDAKdGhydSAwCg=="
+                },
+                {
+                    "format": "LV2",
+                    "uid": "https://thewavewarden.com/odin2",
+                    "bypassed": false,
+                    "postFader": false
+                },
+                {
+                    "format": "Internal",
+                    "uid": "nirbija.looper",
+                    "bypassed": false,
+                    "postFader": false,
+                    "state": "MgoxLjA="
+                }
+            ],
+            "sends": [
+                {
+                    "bus": -1,
+                    "busName": "Delay",
+                    "level": 0.3
+                },
+                {
+                    "bus": -1,
+                    "busName": "Room",
+                    "level": 0.25
+                }
+            ],
+            "audioSource": "",
+            "midiSources": []
+        },
+        {
+            "name": "Delay",
+            "isBus": true,
+            "width": 2,
+            "gain": 0.38,
+            "pan": 0.0,
+            "muted": false,
+            "soloed": false,
+            "armed": false,
+            "destination": -1,
+            "destinationKind": "master",
+            "inserts": [
+                {
+                    "format": "LV2",
+                    "uid": "http://calf.sourceforge.net/plugins/VintageDelay",
+                    "bypassed": false,
+                    "postFader": false
+                }
+            ],
+            "sends": [
+                {
+                    "bus": -1,
+                    "busName": "Room",
+                    "level": 0.2
+                }
+            ]
+        },
+        {
+            "name": "Room",
+            "isBus": true,
+            "width": 2,
+            "gain": 0.42,
+            "pan": 0.0,
+            "muted": false,
+            "soloed": false,
+            "armed": false,
+            "destination": -1,
+            "destinationKind": "master",
+            "inserts": [
+                {
+                    "format": "LV2",
+                    "uid": "urn:dragonfly:room",
+                    "bypassed": false,
+                    "postFader": false
+                }
+            ],
+            "sends": []
+        }
+    ]
+}
