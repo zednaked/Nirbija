@@ -125,3 +125,9 @@ cauda 0.104) e Stochas (editora JUCE desenhando).
 
 **Licença**: mesmo sem compilar fontes do SDK, as pluginterfaces são
 GPLv3/proprietária dupla — o projeto assume **GPLv3**.
+
+## Outras plataformas
+
+Decisão: **não portar**. O levantamento medido de o que custaria — quanto do
+código já é portátil, onde o X11 está cravado, e o que fica mais fácil fora do
+Linux — está em `PORTING.md`, com as linhas de comando pra refazer a conta.
