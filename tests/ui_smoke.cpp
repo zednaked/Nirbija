@@ -3,10 +3,13 @@
 // and the engine, which a compile check cannot.
 
 #include <QGuiApplication>
+#include <QFile>
 #include <QTemporaryDir>
+#include <QUrl>
 
 #include <cstdio>
 #include <string>
+#include <utility>
 
 #include "mixer_model.h"
 
@@ -328,6 +331,46 @@ int main(int argc, char* argv[]) {
     filter.setQuery({});
     filter.setKind(nirbija::PluginFilterModel::AnyKind);
     if (filter.rowCount() != all) fail("clearing the filters did not restore it");
+  }
+
+  // --- File -> Load session replaces the mixer, it does not add to it --------
+  //
+  // Loading over a mixer that already had strips left one behind, so a session
+  // opened from the menu showed a stray empty channel that was not in the file.
+  {
+    const QString path = dir.path() + QStringLiteral("/two.json");
+    QFile out(path);
+    if (!out.open(QIODevice::WriteOnly)) {
+      fail("could not write a session to load");
+    } else {
+      out.write(R"({
+        "version": 1, "tempo": 120, "master": { "gain": 0.8 },
+        "channels": [
+          { "name": "One", "isBus": false, "width": 2, "inserts": [], "sends": [] },
+          { "name": "Two", "isBus": false, "width": 2, "inserts": [], "sends": [] },
+          { "name": "Bus", "isBus": true, "width": 2, "inserts": [], "sends": [] }
+        ]
+      })");
+      out.close();
+
+      // Deliberately more strips than the file holds, so a load that appended
+      // instead of replacing would leave the extras behind.
+      while (mixer.rowCount() < 4) mixer.addChannel({}, 2);
+
+      if (!mixer.loadSessionFrom(QUrl::fromLocalFile(path))) {
+        fail("loading a valid session reported failure");
+      } else if (mixer.rowCount() != 3) {
+        fail(QStringLiteral("load left %1 strips, the file holds 3")
+                 .arg(mixer.rowCount())
+                 .toStdString());
+      } else {
+        for (const auto& [row, want] :
+             {std::pair{0, "One"}, std::pair{1, "Two"}, std::pair{2, "Bus"}}) {
+          if (field(mixer, row, nirbija::MixerModel::NameRole).toString() != want)
+            fail("a loaded strip carries the wrong name");
+        }
+      }
+    }
   }
 
   if (failures > 0) {

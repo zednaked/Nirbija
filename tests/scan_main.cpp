@@ -41,9 +41,10 @@ int main() {
     const auto found = backend->scan();
     std::printf("%s: %zu plugin(s)\n", label, found.size());
     for (const auto& desc : found) {
-      std::printf("  %-38s %-11s %2d in %2d out  %s\n", desc.name.c_str(),
+      std::printf("  %-38s %-11s %2d in %2d out  %-28s %s\n", desc.name.c_str(),
                   kind_name(desc.kind), desc.audio_inputs, desc.audio_outputs,
-                  desc.category.empty() ? "-" : desc.category.c_str());
+                  desc.category.empty() ? "-" : desc.category.c_str(),
+                  desc.uid.c_str());
       ++by_kind[kind_name(desc.kind)];
     }
     total += found.size();
