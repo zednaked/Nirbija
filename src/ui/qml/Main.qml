@@ -449,17 +449,24 @@ ApplicationWindow {
                     visible: addHover.hovered
                 }
 
-                TapHandler {
-                    acceptedButtons: Qt.LeftButton
-                    onSingleTapped: Mixer.addChannel("", 2)
-                    onLongPressed: slotMenu.openAt(addSquare, window.addMenu(),
-                                                   qsTr("Add"))
-                }
-
-                TapHandler {
-                    acceptedButtons: Qt.RightButton
-                    gesturePolicy: TapHandler.ReleaseWithinBounds
-                    onSingleTapped: slotMenu.openAt(addSquare, window.addMenu(),
+                // A MouseArea, not TapHandlers. This square is the full height
+                // of the mixer, so a good deal of what opens over it lands
+                // inside its bounds - and a handler still answered those taps,
+                // because handlers sit on the pointer delivery path rather than
+                // in the stacking order. Clicking a menu that had opened over
+                // here quietly added a channel. A MouseArea is covered by what
+                // is drawn on top of it, which is the whole point.
+                MouseArea {
+                    anchors.fill: parent
+                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                    onClicked: mouse => {
+                        if (mouse.button === Qt.RightButton)
+                            slotMenu.openAt(addSquare, window.addMenu(), qsTr("Add"))
+                        else
+                            Mixer.addChannel("", 2)
+                    }
+                    // The touch route to the same menu.
+                    onPressAndHold: slotMenu.openAt(addSquare, window.addMenu(),
                                                     qsTr("Add"))
                 }
             }
