@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.0 — unreleased
+
+### The interface resizes
+
+**Ctrl+=** and **Ctrl+-** while the mixer is open, **Ctrl+0** back to where it
+started. A toast says where it landed, because without one the keys feel dead
+at either end of the range.
+
+Every token derived from the scale stopped being a constant, so the tree
+relays itself rather than keeping the sizes it was built with. The chosen size
+is remembered per machine, not in the session: how big the interface should be
+is a fact about the screen in front of you, and a jam opened on a laptop has
+no business resizing the desktop it came from. `NIRBIJA_UI_SCALE` still sets
+it at startup and wins when it is given.
+
+### Also
+
+- The landing page says what the mixer does now: eight entries rather than
+  six, with the sequencers, the Lua plugin and strip files.
+
 ## 0.3.0 — 2026-08-16
 
 ### Instruments of its own
