@@ -1167,7 +1167,45 @@ class Lv2Backend : public PluginBackend {
         plugin, world_->classes->output, world_->classes->audio, nullptr));
     desc.has_midi_input = lilv_plugin_get_num_ports_of_class(
                               plugin, world_->classes->input, world_->classes->atom, nullptr) > 0;
+
+    // LV2 states its class as a URI in a hierarchy - lv2:ReverbPlugin is under
+    // lv2:DelayPlugin is under lv2:Plugin - and carries a human label beside
+    // it. The label is what the picker shows; the URI is what it classifies by,
+    // since a label is free text and a URI is not.
+    if (const LilvPluginClass* klass = lilv_plugin_get_class(plugin)) {
+      if (const LilvNode* label = lilv_plugin_class_get_label(klass))
+        desc.category = lilv_node_as_string(label);
+      if (const LilvNode* uri = lilv_plugin_class_get_uri(klass))
+        desc.kind = kind_from_class_uri(lilv_node_as_uri(uri));
+    }
+    // Ports outrank the label. A plugin with no audio ports at all cannot be
+    // an audio effect whatever its class says, and the LV2 class for MIDI has
+    // no constant in the core header to compare against - the x42 MIDI suite
+    // calls itself "MIDI", the one before it "Utility Plugin", and both only
+    // move notes around.
+    if (desc.audio_inputs == 0 && desc.audio_outputs == 0 && desc.has_midi_input)
+      desc.kind = PluginKind::MidiEffect;
+    else if (desc.kind == PluginKind::Unknown)
+      desc.kind = kind_from_ports(desc.audio_inputs, desc.audio_outputs,
+                                  desc.has_midi_input);
     return desc;
+  }
+
+  // Only the handful of classes that change which bucket a plugin lands in.
+  // Everything under lv2:Plugin that is not called out here is an effect,
+  // which is true of the great majority of them.
+  static PluginKind kind_from_class_uri(const char* uri) {
+    if (uri == nullptr) return PluginKind::Unknown;
+    const std::string_view u(uri);
+    if (u == LV2_CORE__InstrumentPlugin) return PluginKind::Instrument;
+    if (u == LV2_CORE__AnalyserPlugin) return PluginKind::Analyzer;
+    if (u == LV2_CORE__UtilityPlugin || u == LV2_CORE__MixerPlugin ||
+        u == LV2_CORE__GeneratorPlugin)
+      return PluginKind::Utility;
+    // lv2:Plugin itself is the root: saying only "I am a plugin" is saying
+    // nothing, so let the port counts decide instead.
+    if (u == LV2_CORE__Plugin) return PluginKind::Unknown;
+    return PluginKind::Effect;
   }
 
   std::shared_ptr<Lv2World> world_;

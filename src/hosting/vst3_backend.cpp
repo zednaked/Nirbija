@@ -1334,6 +1334,13 @@ class Vst3Backend : public PluginBackend {
     PFactoryInfo factory_info{};
     factory->getFactoryInfo(&factory_info);
 
+    // Version 2 of the factory is the one that carries subCategories, which is
+    // the only place a VST3 says whether it is an instrument. Old plugins that
+    // only answer to the version 1 factory keep an empty category.
+    IPluginFactory2* factory2 = nullptr;
+    factory->queryInterface(IPluginFactory2_iid,
+                            reinterpret_cast<void**>(&factory2));
+
     const int32 count = factory->countClasses();
     for (int32 i = 0; i < count; ++i) {
       PClassInfo info{};
@@ -1345,6 +1352,12 @@ class Vst3Backend : public PluginBackend {
       desc.name = info.name;
       desc.vendor = factory_info.vendor;
       desc.path = bundle.string();
+
+      if (factory2 != nullptr) {
+        PClassInfo2 info2{};
+        if (factory2->getClassInfo2(i, &info2) == kResultOk)
+          read_subcategories(info2.subCategories, desc);
+      }
       char hex[33] = {};
       for (int b = 0; b < 16; ++b)
         std::snprintf(hex + b * 2, 3, "%02x",
@@ -1352,6 +1365,24 @@ class Vst3Backend : public PluginBackend {
       desc.uid = hex;
       out.push_back(std::move(desc));
     }
+    if (factory2 != nullptr) factory2->release();
+  }
+
+  // subCategories is a bar-separated string: "Fx|Reverb", "Instrument|Synth",
+  // "Fx|Analyzer". The leading word carries the bucket, the rest describe.
+  static void read_subcategories(const char* subcategories,
+                                 PluginDescriptor& desc) {
+    if (subcategories == nullptr || *subcategories == '\0') return;
+    desc.category = subcategories;
+    std::replace(desc.category.begin(), desc.category.end(), '|', ' ');
+
+    const std::string_view all(subcategories);
+    if (all.find("Instrument") != std::string_view::npos)
+      desc.kind = PluginKind::Instrument;
+    else if (all.find("Analyzer") != std::string_view::npos)
+      desc.kind = PluginKind::Analyzer;
+    else if (all.find("Fx") != std::string_view::npos)
+      desc.kind = PluginKind::Effect;
   }
 
   std::mutex mutex_;

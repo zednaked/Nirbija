@@ -17,6 +17,16 @@
 
 namespace nirbija {
 
+PluginKind kind_from_ports(int audio_inputs, int audio_outputs,
+                           bool has_midi_input) {
+  if (audio_inputs == 0 && audio_outputs == 0)
+    return has_midi_input ? PluginKind::MidiEffect : PluginKind::Unknown;
+  if (audio_inputs == 0 && audio_outputs > 0)
+    return has_midi_input ? PluginKind::Instrument : PluginKind::Utility;
+  if (audio_outputs == 0) return PluginKind::Analyzer;
+  return PluginKind::Effect;
+}
+
 bool parse_number(std::string_view text, double* out) {
   // Leading blanks are the one thing from_chars will not skip, and a state
   // blob written with a space after its separator is not corrupt.

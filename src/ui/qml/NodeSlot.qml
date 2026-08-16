@@ -64,10 +64,13 @@ AbstractButton {
 
     // Right-click and long press both reach the menu, so the gesture works with
     // a mouse and with a touchscreen.
-    TapHandler {
+    // Consumes the right button instead of only listening for it: alongside a
+    // handler, AbstractButton answered the same press with `clicked`, so the
+    // menu was asked for and then covered by whatever the click did.
+    MouseArea {
+        anchors.fill: parent
         acceptedButtons: Qt.RightButton
-        gesturePolicy: TapHandler.ReleaseWithinBounds
-        onSingleTapped: root.menuRequested()
+        onClicked: root.menuRequested()
     }
 
     TapHandler {

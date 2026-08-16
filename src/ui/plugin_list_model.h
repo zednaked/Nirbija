@@ -29,6 +29,8 @@ class PluginListModel : public QAbstractListModel {
     VendorRole,
     FormatRole,
     UidRole,
+    CategoryRole,  // the plugin's own words, shown beside the name
+    KindRole,      // the bucket, as an int matching PluginKind, for filtering
   };
 
   explicit PluginListModel(QObject* parent = nullptr);
@@ -72,12 +74,33 @@ class PluginFilterModel : public QSortFilterProxyModel {
   QML_ELEMENT
   Q_PROPERTY(QString query READ query WRITE setQuery NOTIFY queryChanged)
   Q_PROPERTY(int count READ rowCount NOTIFY countChanged)
+  // -1 shows everything; otherwise a PluginKind. Two hundred plugins is too
+  // many to read, and "I want a synth" is the question people actually arrive
+  // with, so the kind filter narrows before a single letter is typed.
+  Q_PROPERTY(int kind READ kind WRITE setKind NOTIFY kindChanged)
 
  public:
+  // Mirrors nirbija::PluginKind so QML can name a filter without knowing the
+  // core header. Kept in the same order, and checked against it at compile
+  // time in the .cpp.
+  enum Kind {
+    AnyKind = -1,
+    Instrument = 0,
+    Effect,
+    MidiEffect,
+    Analyzer,
+    Utility,
+    Unknown,
+  };
+  Q_ENUM(Kind)
+
   explicit PluginFilterModel(QObject* parent = nullptr);
 
   QString query() const { return query_; }
   void setQuery(const QString& query);
+
+  int kind() const { return kind_; }
+  void setKind(int kind);
 
   // The row this proxy row stands for in the scan, which is what the mixer's
   // insert calls take.
@@ -86,13 +109,17 @@ class PluginFilterModel : public QSortFilterProxyModel {
  signals:
   void queryChanged();
   void countChanged();
+  void kindChanged();
 
  protected:
   bool filterAcceptsRow(int source_row,
                         const QModelIndex& source_parent) const override;
 
  private:
+  void refilter();
+
   QString query_;
+  int kind_ = AnyKind;
 };
 
 }  // namespace nirbija

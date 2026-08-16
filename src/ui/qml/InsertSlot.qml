@@ -97,10 +97,16 @@ AbstractButton {
         }
     }
 
-    TapHandler {
+    // A MouseArea rather than a TapHandler, and it has to take the button
+    // rather than merely watch for it: a handler runs alongside AbstractButton,
+    // which answered the right press with `clicked` as well, so the editor
+    // opened over the menu that had just been asked for. Accepting only the
+    // right button here consumes it before the button sees it, and leaves the
+    // left one, hover and the wheel untouched.
+    MouseArea {
+        anchors.fill: parent
         acceptedButtons: Qt.RightButton
-        gesturePolicy: TapHandler.ReleaseWithinBounds
-        onSingleTapped: root.menuRequested()
+        onClicked: root.menuRequested()
     }
 
     TapHandler {

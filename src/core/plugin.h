@@ -10,17 +10,45 @@ namespace nirbija {
 
 enum class PluginFormat { Lv2, Clap, Vst3, Internal };
 
+// The coarse bucket the picker sorts by. Every format has its own vocabulary
+// for this - LV2 has a class hierarchy, CLAP a feature list, VST3 a string of
+// subcategories - and none of them agree, so each backend maps its own onto
+// these five. Deliberately few: with two hundred plugins installed the useful
+// question is "is this a synth or a reverb", not which of forty labels it wore.
+enum class PluginKind {
+  Instrument,  // makes sound from notes
+  Effect,      // audio in, audio out
+  MidiEffect,  // notes in, notes out: arpeggiators, filters, sequencers
+  Analyzer,    // looks, does not touch: meters, scopes
+  Utility,     // routing, gain, test signals
+  Unknown,     // said nothing we could read
+};
+
 // Enough to find and re-instantiate a plugin across sessions.
 struct PluginDescriptor {
-  PluginFormat format;
-  std::string uid;   // LV2 URI, CLAP id, VST3 class UID
-  std::string path;  // bundle or module on disk
-  std::string name;
-  std::string vendor;
+  PluginFormat format = PluginFormat::Internal;
+  // Every member carries its own default so a descriptor can be written with
+  // designated initialisers, naming only what matters, and adding a field here
+  // does not quietly shift what an existing one meant.
+  std::string uid{};   // LV2 URI, CLAP id, VST3 class UID
+  std::string path{};  // bundle or module on disk
+  std::string name{};
+  std::string vendor{};
+  // What the plugin calls itself, in its own words: "Reverb", "Fx|Delay",
+  // "instrument synthesizer". Shown as-is, never parsed for meaning - `kind`
+  // is what carries meaning.
+  std::string category{};
+  PluginKind kind = PluginKind::Unknown;
   int audio_inputs = 0;
   int audio_outputs = 0;
   bool has_midi_input = false;
 };
+
+// Last resort, for a plugin whose own words said nothing useful. Port counts
+// are the only evidence left: something with notes in and no audio in is a
+// synth, something with no audio at all only moves notes around.
+PluginKind kind_from_ports(int audio_inputs, int audio_outputs,
+                           bool has_midi_input);
 
 // Where the song is and whether it is moving. Plugins that generate anything
 // rhythmic — sequencers, arpeggiators, tempo-synced delays — do nothing useful

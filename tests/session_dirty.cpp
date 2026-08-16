@@ -52,8 +52,15 @@ class DirtyPlugin : public nirbija::PluginInstance {
 
  private:
   bool dirty_ = false;
-  nirbija::PluginDescriptor desc_{nirbija::PluginFormat::Internal, "test.dirty",
-                                  "", "Dirty", "Nirbija", 2, 2, false};
+  // Named rather than positional: a new field in PluginDescriptor should not
+  // silently shift what this test thinks it is saying.
+  nirbija::PluginDescriptor desc_{.format = nirbija::PluginFormat::Internal,
+                                  .uid = "test.dirty",
+                                  .name = "Dirty",
+                                  .vendor = "Nirbija",
+                                  .kind = nirbija::PluginKind::Effect,
+                                  .audio_inputs = 2,
+                                  .audio_outputs = 2};
 };
 
 // The poll runs on a 33 ms timer; give it a few turns of the event loop.

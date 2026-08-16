@@ -52,6 +52,8 @@ QVariant PluginListModel::data(const QModelIndex& index, int role) const {
     case VendorRole: return QString::fromStdString(descriptor.vendor);
     case FormatRole: return format_name(descriptor.format);
     case UidRole: return QString::fromStdString(descriptor.uid);
+    case CategoryRole: return QString::fromStdString(descriptor.category);
+    case KindRole: return static_cast<int>(descriptor.kind);
     default: return {};
   }
 }
@@ -62,6 +64,8 @@ QHash<int, QByteArray> PluginListModel::roleNames() const {
       {VendorRole, "vendor"},
       {FormatRole, "format"},
       {UidRole, "uid"},
+      {CategoryRole, "category"},
+      {KindRole, "kind"},
   };
 }
 
@@ -97,9 +101,21 @@ PluginFilterModel::PluginFilterModel(QObject* parent)
           &PluginFilterModel::countChanged);
 }
 
-void PluginFilterModel::setQuery(const QString& query) {
-  if (query_ == query) return;
-  query_ = query;
+// The QML enum and the core one have to agree, since the role carries a plain
+// int across. Checked here rather than trusted.
+static_assert(PluginFilterModel::Instrument ==
+              static_cast<int>(PluginKind::Instrument));
+static_assert(PluginFilterModel::Effect == static_cast<int>(PluginKind::Effect));
+static_assert(PluginFilterModel::MidiEffect ==
+              static_cast<int>(PluginKind::MidiEffect));
+static_assert(PluginFilterModel::Analyzer ==
+              static_cast<int>(PluginKind::Analyzer));
+static_assert(PluginFilterModel::Utility ==
+              static_cast<int>(PluginKind::Utility));
+static_assert(PluginFilterModel::Unknown ==
+              static_cast<int>(PluginKind::Unknown));
+
+void PluginFilterModel::refilter() {
   // Only the rows are filtered here, so this is the right call. Qt deprecates
   // it in favour of begin/endFilterChange(), which the 6.5 floor this project
   // declares does not have - so the warning is silenced rather than the call
@@ -108,8 +124,21 @@ void PluginFilterModel::setQuery(const QString& query) {
   QT_WARNING_DISABLE_DEPRECATED
   invalidateRowsFilter();
   QT_WARNING_POP
-  emit queryChanged();
   emit countChanged();
+}
+
+void PluginFilterModel::setQuery(const QString& query) {
+  if (query_ == query) return;
+  query_ = query;
+  refilter();
+  emit queryChanged();
+}
+
+void PluginFilterModel::setKind(int kind) {
+  if (kind_ == kind) return;
+  kind_ = kind;
+  refilter();
+  emit kindChanged();
 }
 
 int PluginFilterModel::sourceRow(int proxyRow) const {
@@ -120,16 +149,25 @@ int PluginFilterModel::sourceRow(int proxyRow) const {
 
 bool PluginFilterModel::filterAcceptsRow(int source_row,
                                          const QModelIndex& source_parent) const {
-  if (query_.isEmpty()) return true;
   const QAbstractItemModel* source = sourceModel();
   if (source == nullptr) return true;
-
-  // Name, maker and format all match, so "clap" or "surge" or the vendor's name
-  // each narrow the list — a picker where only the name matched meant knowing
-  // what a plugin was called before you could find it.
   const QModelIndex index = source->index(source_row, 0, source_parent);
+
+  // The kind is a gate, not another thing to match: picking "instrument" and
+  // then typing has to search among instruments, not add synths back in.
+  if (kind_ != AnyKind &&
+      source->data(index, PluginListModel::KindRole).toInt() != kind_)
+    return false;
+
+  if (query_.isEmpty()) return true;
+
+  // Name, maker, format and the plugin's own category all match, so "clap" or
+  // "surge" or "reverb" or the vendor's name each narrow the list — a picker
+  // where only the name matched meant knowing what a plugin was called before
+  // you could find it.
   for (const int role : {PluginListModel::NameRole, PluginListModel::VendorRole,
-                         PluginListModel::FormatRole}) {
+                         PluginListModel::FormatRole,
+                         PluginListModel::CategoryRole}) {
     if (source->data(index, role).toString().contains(query_,
                                                       Qt::CaseInsensitive))
       return true;
