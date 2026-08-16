@@ -147,6 +147,8 @@ ApplicationWindow {
               action: () => Mixer.clearMidiMaps(row) },
             { label: qsTr("Duplicate"),
               action: () => Mixer.duplicateChannel(row) },
+            { label: qsTr("Save strip…"),
+              action: () => window.openStripSave(row) },
             { label: qsTr("Move left"),
               enabled: row > 0,
               action: () => Mixer.moveChannel(row, -1) },
@@ -185,7 +187,8 @@ ApplicationWindow {
         return [
             { label: qsTr("Stereo channel"), action: () => Mixer.addChannel("", 2) },
             { label: qsTr("Mono channel"), action: () => Mixer.addChannel("", 1) },
-            { label: qsTr("Mix bus"), action: () => Mixer.addBus("") }
+            { label: qsTr("Mix bus"), action: () => Mixer.addBus("") },
+            { label: qsTr("Load strip…"), action: () => stripLoadDialog.open() }
         ]
     }
 
@@ -225,6 +228,14 @@ ApplicationWindow {
         if (Mixer.openInsertEditor(row, slot)) return
         paramLoader.active = true
         paramLoader.item.openFor(row, slot)
+    }
+
+    // Which strip the save dialog is about, since a FileDialog answers later.
+    property int stripToSave: -1
+
+    function openStripSave(row) {
+        window.stripToSave = row
+        stripSaveDialog.open()
     }
 
     function openPortPicker(kind, row, item) {
@@ -567,6 +578,22 @@ ApplicationWindow {
         nameFilters: [qsTr("Nirbija sessions (*.json)")]
         defaultSuffix: "json"
         onAccepted: Mixer.saveSessionAs(selectedFile)
+    }
+
+    FileDialog {
+        id: stripSaveDialog
+        title: qsTr("Save strip as")
+        fileMode: FileDialog.SaveFile
+        nameFilters: [qsTr("Nirbija strips (*.json)")]
+        defaultSuffix: "json"
+        onAccepted: Mixer.saveChannelTo(window.stripToSave, selectedFile)
+    }
+
+    FileDialog {
+        id: stripLoadDialog
+        title: qsTr("Load strip")
+        nameFilters: [qsTr("Nirbija strips (*.json)")]
+        onAccepted: Mixer.loadChannelFrom(selectedFile)
     }
 
     FileDialog {

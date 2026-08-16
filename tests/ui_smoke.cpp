@@ -380,6 +380,107 @@ int main(int argc, char* argv[]) {
     }
   }
 
+  // --- a strip saved on its own comes back whole -----------------------------
+  //
+  // The point of the format: a chain you liked, with every plugin's state, in a
+  // file you can hand to somebody. And when they do not have one of the
+  // plugins, the strip still arrives - with a hole, and with the hole named.
+  {
+    int effect = -1;
+    for (int i = 0; i < mixer.plugins()->rowCount(); ++i) {
+      const nirbija::PluginDescriptor* descriptor = mixer.plugins()->descriptor(i);
+      if (descriptor != nullptr && descriptor->audio_inputs >= 2) { effect = i; break; }
+    }
+    // The step sequencer is the interesting half: its state is a pattern, and a
+    // preset that forgets the pattern is not a preset.
+    const int sequencer =
+        mixer.plugins()->rowFor(nirbija::PluginFormat::Internal, "nirbija.stepseq");
+
+    if (effect < 0 || sequencer < 0) {
+      std::printf("no plugin pair for the strip preset check, skipping\n");
+    } else {
+      mixer.addChannel(QStringLiteral("Goth"), 2);
+      const int source = mixer.rowCount() - 1;
+      mixer.addInsert(source, sequencer);
+      mixer.addInsert(source, effect);
+      mixer.setGain(source, 0.33);
+
+      // A pattern nobody would land on by accident.
+      mixer.setInsertParameter(source, 0, 16 + 0, 42.0);
+      mixer.setInsertParameter(source, 0, 80 + 0, 1.0);
+      mixer.setInsertParameter(source, 0, 1, 7.0);  // seven steps
+
+      const QString path = dir.path() + QStringLiteral("/goth.strip.json");
+      if (!mixer.saveChannelTo(source, QUrl::fromLocalFile(path)))
+        fail("saving a strip failed");
+
+      const int before = mixer.rowCount();
+      if (!mixer.loadChannelFrom(QUrl::fromLocalFile(path))) {
+        fail("loading a strip failed");
+      } else if (mixer.rowCount() != before + 1) {
+        fail("loading a strip did not add a row");
+      } else {
+        const int copy = mixer.rowCount() - 1;
+        const QStringList chain =
+            field(mixer, copy, nirbija::MixerModel::InsertsRole).toStringList();
+        const QStringList want =
+            field(mixer, source, nirbija::MixerModel::InsertsRole).toStringList();
+        if (chain != want) fail("the loaded strip has a different chain");
+        if (std::abs(field(mixer, copy, nirbija::MixerModel::GainRole).toReal()
+                     - 0.33) > 1e-9)
+          fail("the loaded strip did not take the gain");
+
+        // The state is the whole reason for the feature.
+        const QVariantList params = mixer.insertParameters(copy, 0);
+        double note = -1;
+        double steps = -1;
+        for (const QVariant& value : params) {
+          const QVariantMap p = value.toMap();
+          if (p.value(QStringLiteral("id")).toInt() == 16) note = p.value(QStringLiteral("value")).toDouble();
+          if (p.value(QStringLiteral("id")).toInt() == 1) steps = p.value(QStringLiteral("value")).toDouble();
+        }
+        if (std::abs(note - 42.0) > 1e-9)
+          fail("the sequencer's pattern did not survive the preset");
+        if (std::abs(steps - 7.0) > 1e-9)
+          fail("the sequencer's length did not survive the preset");
+        mixer.removeChannel(copy);
+      }
+
+      // Now the same file with a plugin nobody has: it must still load, and
+      // must say what is missing rather than failing or going quiet.
+      QFile written(path);
+      if (written.open(QIODevice::ReadOnly)) {
+        QString text = QString::fromUtf8(written.readAll());
+        written.close();
+        text.replace(QStringLiteral("nirbija.stepseq"),
+                     QStringLiteral("nobody.has.this"));
+        const QString broken = dir.path() + QStringLiteral("/missing.strip.json");
+        QFile out(broken);
+        if (out.open(QIODevice::WriteOnly)) {
+          out.write(text.toUtf8());
+          out.close();
+
+          QString reported;
+          const auto link = QObject::connect(
+              &mixer, &nirbija::MixerModel::errorOccurred,
+              [&reported](const QString& message) { reported = message; });
+
+          const int rows = mixer.rowCount();
+          const bool ok = mixer.loadChannelFrom(QUrl::fromLocalFile(broken));
+          QObject::disconnect(link);
+
+          if (!ok) fail("a strip with one missing plugin refused to load at all");
+          if (mixer.rowCount() != rows + 1)
+            fail("a strip with a missing plugin did not arrive");
+          if (!reported.contains(QStringLiteral("nobody.has.this")))
+            fail("the missing plugin was not named: \"" + reported.toStdString() + "\"");
+          if (mixer.rowCount() == rows + 1) mixer.removeChannel(mixer.rowCount() - 1);
+        }
+      }
+      mixer.removeChannel(source);
+    }
+  }
+
   // --- File -> Load session replaces the mixer, it does not add to it --------
   //
   // Loading over a mixer that already had strips left one behind, so a session

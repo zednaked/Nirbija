@@ -236,6 +236,10 @@ class MixerModel : public QAbstractListModel {
   // autosaved state, so a restart comes back to what was loaded.
   Q_INVOKABLE bool saveSessionAs(const QUrl& file);
   Q_INVOKABLE bool loadSessionFrom(const QUrl& file);
+  // One strip, saved on its own and loadable into any session. Plugins that
+  // are not installed here are named rather than passed over in silence.
+  Q_INVOKABLE bool saveChannelTo(int row, const QUrl& file);
+  Q_INVOKABLE bool loadChannelFrom(const QUrl& file);
   Q_INVOKABLE static QString recordingsUrl();
 
   // --- MIDI learn -----------------------------------------------------------
@@ -383,6 +387,11 @@ class MixerModel : public QAbstractListModel {
   std::unique_ptr<PluginListModel> plugins_;
   Engine engine_;
   std::vector<ChannelUi> channels_;
+
+  QJsonObject writeChannel(const ChannelUi& channel, size_t row,
+                           const QVector<QByteArray>& row_states) const;
+  int restoreChannel(const QJsonObject& entry, QStringList* missing);
+  void restoreChannelLinks(int row, const QJsonObject& entry);
   QTimer level_timer_;
 
   // What a controller message can drive. Bindings survive in the session.
