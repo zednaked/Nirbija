@@ -210,7 +210,13 @@ ApplicationWindow {
 
     function openEditor(row, slot) {
         // The plugin's own editor when it has one; sliders built from its
-        // parameters when it does not.
+        // parameters when it does not. The step sequencer is neither: it is
+        // ours, so it gets a grid rather than eighty-five rows.
+        if (Mixer.insertIsStepSequencer(row, slot)) {
+            stepLoader.active = true
+            stepLoader.item.openFor(row, slot)
+            return
+        }
         if (Mixer.openInsertEditor(row, slot)) return
         paramLoader.active = true
         paramLoader.item.openFor(row, slot)
@@ -484,6 +490,12 @@ ApplicationWindow {
         id: paramLoader
         active: false
         sourceComponent: ParamEditor {}
+    }
+
+    Loader {
+        id: stepLoader
+        active: false
+        sourceComponent: StepGrid {}
     }
 
     Loader {

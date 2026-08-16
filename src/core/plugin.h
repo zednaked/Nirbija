@@ -162,6 +162,11 @@ class PluginInstance {
   // Reported latency in samples, for host delay compensation. Zero if none.
   virtual uint32_t latency_samples() const { return 0; }
 
+  // Where a plugin that runs a pattern currently is, or -1 for one that runs
+  // none. Read from the UI thread on a timer to light a playhead; it is a hint
+  // for drawing, never something to make a decision from.
+  virtual int playhead() const { return -1; }
+
   // Stereo pairs beyond the strip's own width. A 16-out drum sampler on a
   // stereo strip reports 7: the first pair stays on this strip, the rest
   // can be tapped onto later channels.

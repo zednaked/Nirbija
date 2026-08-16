@@ -256,6 +256,9 @@ class MixerModel : public QAbstractListModel {
 
   // File player extras: only meaningful when the insert is one.
   Q_INVOKABLE bool insertIsFilePlayer(int row, int slot) const;
+  Q_INVOKABLE bool insertIsStepSequencer(int row, int slot) const;
+  // Which step the sequencer is on, or -1. Polled while its grid is open.
+  Q_INVOKABLE int insertPlayhead(int row, int slot) const;
   Q_INVOKABLE bool setInsertFile(int row, int slot, const QUrl& file);
   Q_INVOKABLE QString insertFilePath(int row, int slot) const;
 

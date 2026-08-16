@@ -128,7 +128,10 @@ void StepSequencerInstance::process(const float* const*, float* const*,
   if (!transport_.playing || transport_.changed) {
     stop_sounding(0);
     last_step_beat_ = -1.0;
-    if (!transport_.playing) return;
+    if (!transport_.playing) {
+      playhead_.store(-1, std::memory_order_relaxed);
+      return;
+    }
   }
 
   const double tempo = transport_.tempo_bpm > 0.0 ? transport_.tempo_bpm : 120.0;
@@ -169,6 +172,7 @@ void StepSequencerInstance::process(const float* const*, float* const*,
 
     const int step = static_cast<int>(std::fmod(index, static_cast<double>(length)));
     const uint32_t frame = frame_for(beat);
+    playhead_.store(step, std::memory_order_relaxed);
 
     // The previous note ends where this step starts, even if its gate said
     // longer: one note at a time is the whole point.

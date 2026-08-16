@@ -822,6 +822,16 @@ bool MixerModel::insertIsFilePlayer(int row, int slot) const {
   return insert != nullptr && insert->descriptor().uid == "nirbija.fileplayer";
 }
 
+bool MixerModel::insertIsStepSequencer(int row, int slot) const {
+  PluginInstance* insert = insertFor(row, slot);
+  return insert != nullptr && insert->descriptor().uid == "nirbija.stepseq";
+}
+
+int MixerModel::insertPlayhead(int row, int slot) const {
+  PluginInstance* insert = insertFor(row, slot);
+  return insert == nullptr ? -1 : insert->playhead();
+}
+
 bool MixerModel::setInsertFile(int row, int slot, const QUrl& file) {
   auto* player = dynamic_cast<FilePlayerInstance*>(insertFor(row, slot));
   if (player == nullptr) return false;

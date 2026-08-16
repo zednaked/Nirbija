@@ -52,6 +52,11 @@ class StepSequencerInstance : public PluginInstance {
 
   const PluginDescriptor& descriptor() const override { return descriptor_; }
 
+  // The step the audio thread last started, for the grid to light up.
+  int playhead() const override {
+    return playhead_.load(std::memory_order_relaxed);
+  }
+
  private:
   // A block holds few events: at most a note-off and a note-on per step
   // boundary crossed, plus whatever passed through. Sized for the worst case
@@ -82,6 +87,8 @@ class StepSequencerInstance : public PluginInstance {
   // The last step boundary already played, so a block that crosses none does
   // not replay the one it starts on.
   double last_step_beat_ = -1.0;
+
+  std::atomic<int> playhead_{-1};
 
   std::array<MidiEvent, kMaxEvents> events_{};
   size_t event_count_ = 0;
