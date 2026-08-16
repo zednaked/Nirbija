@@ -73,6 +73,10 @@ add_executable(nirbija_step_sequencer step_sequencer_test.cpp)
 target_link_libraries(nirbija_step_sequencer PRIVATE nirbija_core)
 add_test(NAME step_sequencer COMMAND nirbija_step_sequencer)
 
+add_executable(nirbija_arpeggiator arpeggiator_test.cpp)
+target_link_libraries(nirbija_arpeggiator PRIVATE nirbija_core)
+add_test(NAME arpeggiator COMMAND nirbija_arpeggiator)
+
 if(NIRBIJA_VST3)
   add_executable(nirbija_vst3_process vst3_process.cpp)
   target_link_libraries(nirbija_vst3_process PRIVATE nirbija_core)
