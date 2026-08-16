@@ -6,7 +6,7 @@
     "plugins live in the strip.",
     "press play."
   ],
-  "pages": "",
+  "pages": "https://zednaked.github.io/nirbija-site/",
   "compat": ["linux", "pipewire", "jack", "clap", "lv2", "vst3"],
   "video": {
     "youtube": "",
@@ -77,7 +77,7 @@
   "year": 2026,
   "footer": "seedless.",
   "itch": {
-    "url": "",
+    "url": "https://zedcave.itch.io/nirbija",
     "title": "Nirbija",
     "shortText": "a mixer you play. linux. clap, lv2, vst3.",
     "classification": "tools",

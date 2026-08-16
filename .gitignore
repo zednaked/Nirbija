@@ -1,4 +1,17 @@
 build/
+build-release/
 src/ui/build/
 compile_commands.json
 .cache/
+
+# Written by a running mixer, not by hand: the lock a live instance holds and
+# the snapshot it keeps beside a session. The jam-*.json demos are tracked.
+*.json.lock
+*.json.snap
+
+# Scratch sessions saved while playing. Demos live in sessions/jam-*.json.
+/vrau.json
+/sessions/mamamia.json
+
+# Release artifacts.
+/dist/

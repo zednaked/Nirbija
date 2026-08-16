@@ -48,7 +48,7 @@ a mixer. plugins sit in the strip. you play, loop, record. there is no timeline.
 coming soon — no build attached.
 
 a public build is coming.
-
+https://zedcave.itch.io/nirbija
 
 ---
 
