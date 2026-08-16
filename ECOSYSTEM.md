@@ -46,9 +46,10 @@ Começando por aqui, senão o resto vira lamento.
 O padrão é nítido: o iPad não ganha em DSP. Ganha em **coisas que produzem
 ideia** e em **coisas feitas pra dedo**.
 
-E o contraste aparece nos números acima. Dos 45 plugins MIDI instalados aqui,
-praticamente todos **processam** notas que já existem. Quase nenhum **gera**.
-É exatamente o inverso do iPad.
+E o contraste aparece nos números acima. Dos 46 plugins MIDI instalados aqui,
+praticamente todos **processam** notas que já existem. Quase nenhum **gera** —
+o Step Sequencer que fecha o Tier 1 abaixo é literalmente o quadragésimo sexto,
+e entrou nessa conta ao ser escrito.
 
 ### Tier 1 — buraco grande, encaixe direto
 
@@ -58,15 +59,22 @@ Collider. Plugin que gera, não que filtra.
 
 | iPad | Livre |
 |---|---|
-| Rozeta Bassline (303-style) | — |
-| Rozeta Rhythm / XOX | Stochas (parcial) |
+| Rozeta Bassline (303-style) | ✅ **Step Sequencer** (`nirbija.stepseq`) |
+| Rozeta Rhythm / XOX | Stochas, e o Step Sequencer empilhado |
 | Rozeta Particles (probabilístico) | — |
 | Fugue Machine (multi-playhead) | — |
 | Playbeat / Riffer (generativo) | — |
 | Atom 2 (piano roll AUv3) | — |
 
-DSP quase zero: é lógica e UI. Maior alavanca por linha de código do mapa.
-Desenho em `design/sequencer.md`.
+**Metade feita.** O Step Sequencer é interno, monofônico, com grade própria, e
+o host não precisou de uma linha: `set_transport`, `take_midi_output` e a cadeia
+em `channel_strip.cpp` já estavam ligados. Isso também mostrou que a monofonia
+não limita — `sessions/jam-goth.json` empilha quatro deles num strip antes do
+DrumGizmo e sai uma bateria de quatro vozes.
+
+O que falta do desenho é o resto da suíte: probabilidade por passo, múltiplos
+cabeçotes de leitura, geração por regra. `design/sequencer.md` cobre o que foi
+feito; o restante é escopo novo.
 
 **2. Plugin MIDI scriptável.** Mozaic (Bram Bos) e StreamByter (Audeonic)
 deixam qualquer um escrever um plugin MIDI dentro do host sem compilar nada.
@@ -80,6 +88,7 @@ um plugin e a comunidade escreve os oito. Desenho em `design/scripting.md`.
 | Buraco | Referência | Estado livre |
 |---|---|---|
 | Sampler de performance | Koala Sampler | sfizz quer arquivo SFZ, DrumGizmo quer kit. Nada de "grava e toca" |
+| Arpejador | Rozeta Arpeggio | recebe nota e gera acorde arpejado. O Step Sequencer já tem metade das peças |
 | Looper como plugin | Loopy Pro | SooperLooper (standalone, envelhecido), Luppp. Nada em LV2/CLAP |
 | Acorde e escala | Scaler 2, Chordjam | x42 força escala; nada composicional |
 
@@ -89,7 +98,9 @@ Efeito, medição, síntese subtrativa, simulação de amplificador. Saturados e
 
 ## A rota de entrega que o Nirbija tem e ninguém mais
 
-O scan mostra dois plugins de formato `internal` — File Player e Looper. Isso é
+O scan mostra três plugins de formato `internal` — File Player, Looper e agora
+o Step Sequencer, que foi por essa rota justamente pra provar a ideia antes de
+empacotar. Isso é
 um veículo que nenhum outro projeto livre de áudio tem: dá pra embarcar
 ferramenta junto com o host, sem pedir instalação e sem empacotar nada.
 
