@@ -49,6 +49,30 @@ ApplicationWindow {
         onActivated: window.openShortcuts()
     }
 
+    // Resizing the whole interface, because a size that suits one screen is
+    // wrong on the next one and NIRBIJA_UI_SCALE means restarting to find out.
+    // Both spellings of the plus key: the shifted one and the one on the pad.
+    Shortcut {
+        sequences: [StandardKey.ZoomIn, "Ctrl++", "Ctrl+="]
+        onActivated: window.zoom(() => Skin.zoomIn())
+    }
+    Shortcut {
+        sequences: [StandardKey.ZoomOut, "Ctrl+-"]
+        onActivated: window.zoom(() => Skin.zoomOut())
+    }
+    Shortcut {
+        sequence: "Ctrl+0"
+        onActivated: window.zoom(() => Skin.zoomReset())
+    }
+
+    // Says where it landed. Without this the keys feel like they did nothing
+    // when the scale is already at either end of its range.
+    function zoom(step) {
+        step()
+        statusToast.message = qsTr("interface %1%").arg(Math.round(Skin.scale * 100))
+        statusToast.show()
+    }
+
     // --- menus -----------------------------------------------------------------
     // Built here as plain functions rather than inline in the delegate. The
     // strip delegate used to carry two hundred lines of menu literal, which put

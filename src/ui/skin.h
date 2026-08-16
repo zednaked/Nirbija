@@ -86,32 +86,32 @@ class Skin : public QObject {
   // Everything is derived from `scale`, so a HiDPI screen or a touchscreen can
   // be served by one number instead of by editing every literal in the tree.
   // NIRBIJA_UI_SCALE=1.25 is a comfortable size on a 4K panel.
-  Q_PROPERTY(qreal scale READ scale CONSTANT)
+  Q_PROPERTY(qreal scale READ scale NOTIFY scaleChanged)
 
-  Q_PROPERTY(int spacingXS READ spacingXS CONSTANT)
-  Q_PROPERTY(int spacingS READ spacingS CONSTANT)
-  Q_PROPERTY(int spacing READ spacing CONSTANT)
-  Q_PROPERTY(int spacingL READ spacingL CONSTANT)
-  Q_PROPERTY(int gap READ gap CONSTANT)
+  Q_PROPERTY(int spacingXS READ spacingXS NOTIFY scaleChanged)
+  Q_PROPERTY(int spacingS READ spacingS NOTIFY scaleChanged)
+  Q_PROPERTY(int spacing READ spacing NOTIFY scaleChanged)
+  Q_PROPERTY(int spacingL READ spacingL NOTIFY scaleChanged)
+  Q_PROPERTY(int gap READ gap NOTIFY scaleChanged)
 
-  Q_PROPERTY(int radiusS READ radiusS CONSTANT)
-  Q_PROPERTY(int radius READ radius CONSTANT)
-  Q_PROPERTY(int radiusL READ radiusL CONSTANT)
+  Q_PROPERTY(int radiusS READ radiusS NOTIFY scaleChanged)
+  Q_PROPERTY(int radius READ radius NOTIFY scaleChanged)
+  Q_PROPERTY(int radiusL READ radiusL NOTIFY scaleChanged)
 
-  Q_PROPERTY(int stripWidth READ stripWidth CONSTANT)
-  Q_PROPERTY(int slotHeight READ slotHeight CONSTANT)
-  Q_PROPERTY(int barHeight READ barHeight CONSTANT)
-  Q_PROPERTY(int buttonHeight READ buttonHeight CONSTANT)
-  Q_PROPERTY(int rowHeight READ rowHeight CONSTANT)
+  Q_PROPERTY(int stripWidth READ stripWidth NOTIFY scaleChanged)
+  Q_PROPERTY(int slotHeight READ slotHeight NOTIFY scaleChanged)
+  Q_PROPERTY(int barHeight READ barHeight NOTIFY scaleChanged)
+  Q_PROPERTY(int buttonHeight READ buttonHeight NOTIFY scaleChanged)
+  Q_PROPERTY(int rowHeight READ rowHeight NOTIFY scaleChanged)
   // The smallest thing a finger can be asked to hit. Everything interactive
   // either meets this or grows an invisible margin until it does.
-  Q_PROPERTY(int touchTarget READ touchTarget CONSTANT)
+  Q_PROPERTY(int touchTarget READ touchTarget NOTIFY scaleChanged)
 
-  Q_PROPERTY(int fontXS READ fontXS CONSTANT)
-  Q_PROPERTY(int fontS READ fontS CONSTANT)
-  Q_PROPERTY(int font READ font CONSTANT)
-  Q_PROPERTY(int fontL READ fontL CONSTANT)
-  Q_PROPERTY(int fontXL READ fontXL CONSTANT)
+  Q_PROPERTY(int fontXS READ fontXS NOTIFY scaleChanged)
+  Q_PROPERTY(int fontS READ fontS NOTIFY scaleChanged)
+  Q_PROPERTY(int font READ font NOTIFY scaleChanged)
+  Q_PROPERTY(int fontL READ fontL NOTIFY scaleChanged)
+  Q_PROPERTY(int fontXL READ fontXL NOTIFY scaleChanged)
   // Numbers that change while you watch them — dB, BPM, bar.beat — in a face
   // whose digits are all one width, so the label stops twitching.
   Q_PROPERTY(QString monoFamily READ monoFamily CONSTANT)
@@ -122,14 +122,30 @@ class Skin : public QObject {
   Q_PROPERTY(int medium READ medium CONSTANT)
   Q_PROPERTY(int tipDelay READ tipDelay CONSTANT)
 
-  static qreal scale() {
-    static const qreal value = [] {
-      bool ok = false;
-      const qreal env = qEnvironmentVariable("NIRBIJA_UI_SCALE").toDouble(&ok);
-      return ok && env >= 0.75 && env <= 3.0 ? env : 1.0;
-    }();
-    return value;
-  }
+  // The one number every size here is derived from. NIRBIJA_UI_SCALE still
+  // sets it at startup; so does whatever was last chosen from the keyboard,
+  // which is remembered per machine rather than per session - how big the
+  // interface should be is a fact about the screen in front of you.
+  static qreal scale() { return scale_; }
+
+  static constexpr qreal kMinScale = 0.6;
+  static constexpr qreal kMaxScale = 3.0;
+
+  // Steps rather than a free number: a size worth having is one you can get
+  // back to, and twelve percent a press is coarse enough to feel and fine
+  // enough to land on comfortable.
+  Q_INVOKABLE void zoomIn() { setScale(scale_ * 1.12); }
+  Q_INVOKABLE void zoomOut() { setScale(scale_ / 1.12); }
+  Q_INVOKABLE void zoomReset() { setScale(startingScale()); }
+  Q_INVOKABLE void setScale(qreal value);
+
+  // What the environment asked for, or 1.0 - the size a reset goes back to.
+  static qreal startingScale();
+
+ signals:
+  void scaleChanged();
+
+ public:
 
   // For the handful of sizes that are local to one component and not worth a
   // token of their own — they still have to follow the scale.
@@ -195,6 +211,11 @@ class Skin : public QObject {
 
   // The dB marks worth drawing beside a fader, top to bottom.
   Q_INVOKABLE static QVariantList faderTicks();
+
+ private:
+  static qreal scale_;
+
+ public:
 
  private:
   // Must match MixerModel's fader range.

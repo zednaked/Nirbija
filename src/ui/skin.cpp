@@ -1,9 +1,50 @@
 #include "skin.h"
 
+#include <QSettings>
 #include <QVariantList>
 #include <QVariantMap>
 
+#include <algorithm>
+
 namespace nirbija {
+namespace {
+
+// Remembered per machine, not per session: how big the interface should be is
+// a fact about the screen in front of you, and carrying it inside a session
+// would make a jam opened on a laptop resize the desktop it came from.
+constexpr auto kScaleKey = "ui/scale";
+
+qreal clamped(qreal value) {
+  return std::clamp(value, Skin::kMinScale, Skin::kMaxScale);
+}
+
+}  // namespace
+
+qreal Skin::startingScale() {
+  bool ok = false;
+  const qreal env = qEnvironmentVariable("NIRBIJA_UI_SCALE").toDouble(&ok);
+  return ok ? clamped(env) : 1.0;
+}
+
+// The environment wins when it is set - someone who typed NIRBIJA_UI_SCALE
+// this time meant it - and otherwise the size last chosen here comes back.
+qreal Skin::scale_ = [] {
+  if (!qEnvironmentVariableIsEmpty("NIRBIJA_UI_SCALE")) return startingScale();
+  const QSettings settings;
+  return clamped(settings.value(QString::fromLatin1(kScaleKey), 1.0).toReal());
+}();
+
+void Skin::setScale(qreal value) {
+  const qreal wanted = clamped(value);
+  // Sizes are whole pixels, so two scales a hair apart draw identically and
+  // the second one would be a repaint that changes nothing.
+  if (qFuzzyCompare(wanted, scale_)) return;
+  scale_ = wanted;
+
+  QSettings settings;
+  settings.setValue(QString::fromLatin1(kScaleKey), scale_);
+  emit scaleChanged();
+}
 
 // A fader with no marks on it is a slider: you can move it, but you cannot say
 // where it is without reading the number somewhere else. These are the decibel

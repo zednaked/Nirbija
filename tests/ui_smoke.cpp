@@ -11,7 +11,10 @@
 #include <string>
 #include <utility>
 
+#include <QSettings>
+
 #include "mixer_model.h"
+#include "skin.h"
 
 namespace {
 
@@ -31,6 +34,11 @@ QVariant field(nirbija::MixerModel& mixer, int row, int role) {
 int main(int argc, char* argv[]) {
   qputenv("QT_QPA_PLATFORM", "offscreen");
   QGuiApplication app(argc, argv);
+  // QSettings writes to the user's real configuration unless it is told
+  // otherwise, and a test has no business resizing somebody's mixer.
+  QCoreApplication::setOrganizationName(QStringLiteral("nirbija-test"));
+  QCoreApplication::setApplicationName(QStringLiteral("ui-smoke"));
+  QSettings::setDefaultFormat(QSettings::IniFormat);
 
   // Point the session somewhere disposable before building a mixer: the model
   // both loads a session on construction and saves one on destruction, so a
@@ -378,6 +386,46 @@ int main(int argc, char* argv[]) {
       mixer.removeChannel(mixer.rowCount() - 1);
       mixer.removeChannel(source);
     }
+  }
+
+  // --- the interface resizes, and remembers --------------------------------
+  //
+  // NIRBIJA_UI_SCALE only works by restarting, which is no use to somebody
+  // sitting at a screen where everything is too small.
+  {
+    nirbija::Skin skin;
+    const qreal start = nirbija::Skin::scale();
+    const int strip = nirbija::Skin::stripWidth();
+
+    skin.zoomIn();
+    if (nirbija::Skin::scale() <= start) fail("zooming in did not grow the scale");
+    if (nirbija::Skin::stripWidth() <= strip)
+      fail("the scale moved but the sizes derived from it did not");
+
+    skin.zoomOut();
+    if (std::abs(nirbija::Skin::scale() - start) > 1e-6)
+      fail("in then out did not come back to where it started");
+
+    // Both ends are stops, not places to fall off.
+    for (int i = 0; i < 60; ++i) skin.zoomOut();
+    if (nirbija::Skin::scale() < nirbija::Skin::kMinScale - 1e-9)
+      fail("zooming out went below the floor");
+    for (int i = 0; i < 120; ++i) skin.zoomIn();
+    if (nirbija::Skin::scale() > nirbija::Skin::kMaxScale + 1e-9)
+      fail("zooming in went past the ceiling");
+
+    skin.zoomReset();
+    if (std::abs(nirbija::Skin::scale() - nirbija::Skin::startingScale()) > 1e-6)
+      fail("reset did not return to the starting size");
+
+    // What was chosen has to survive the program closing, which is the whole
+    // point of choosing it on a machine whose screen does not change.
+    skin.setScale(1.4);
+    QSettings settings;
+    settings.sync();
+    if (std::abs(settings.value(QStringLiteral("ui/scale")).toReal() - 1.4) > 1e-6)
+      fail("the chosen size was not written down");
+    skin.zoomReset();
   }
 
   // --- no two strips wear the same colour -------------------------------------

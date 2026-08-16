@@ -80,8 +80,13 @@ Every control answers a drag, the wheel and the keyboard: Shift makes a drag ten
 times finer, one notch of the wheel is a decibel on a fader, and Tab reaches the
 faders, pans, sends and slots in turn. `F1` lists the lot.
 
-The whole interface is sized off one number, so a 4K panel or a touchscreen
-needs no editing:
+The whole interface is sized off one number. **Ctrl+=** and **Ctrl+-** move it
+while the mixer is open, **Ctrl+0** goes back, and the size is remembered for
+that machine — a 4K panel and a laptop want different answers and neither is a
+property of the session.
+
+`NIRBIJA_UI_SCALE` still sets it at startup, and wins over the remembered one
+when it is given:
 
 ```sh
 NIRBIJA_UI_SCALE=1.25 ./build/src/ui/nirbija

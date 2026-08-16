@@ -39,6 +39,8 @@ Popup {
         { key: qsTr("Ctrl+Z / Ctrl+Shift+Z"), what: qsTr("Undo, redo") },
         { key: qsTr("Esc"), what: qsTr("Cancel a MIDI learn") },
         { key: qsTr("F1"), what: qsTr("This sheet") },
+        { key: qsTr("Ctrl+= / Ctrl+-"), what: qsTr("Bigger, smaller — the whole interface") },
+        { key: qsTr("Ctrl+0"), what: qsTr("Back to the size it started at") },
 
         { key: "", what: qsTr("Faders, pans, sends and plugin parameters") },
         { key: qsTr("Drag"), what: qsTr("Move the control") },
