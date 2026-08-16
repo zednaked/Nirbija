@@ -1,0 +1,149 @@
+{
+    "version": 1,
+    "tempo": 124,
+    "metronome": false,
+    "midiMaps": [],
+    "master": {
+        "gain": 0.8,
+        "sink": ""
+    },
+    "channels": [
+        {
+            "name": "Drums",
+            "isBus": false,
+            "width": 2,
+            "gain": 0.7,
+            "pan": 0.0,
+            "muted": false,
+            "soloed": false,
+            "armed": false,
+            "destination": -1,
+            "destinationKind": "master",
+            "inserts": [
+                {
+                    "format": "Internal",
+                    "uid": "nirbija.stepseq",
+                    "bypassed": false,
+                    "postFader": false,
+                    "state": "ZGl2aXNpb24gMgpsZW5ndGggMTYKZ2F0ZSAwLjI1MDAKdHJhbnNwb3NlIDAKY2hhbm5lbCAwCnN0ZXAgMzYgMTE4IDEKc3RlcCA2MCAxMDAgMApzdGVwIDYwIDEwMCAwCnN0ZXAgMzYgODggMQpzdGVwIDM2IDExOCAxCnN0ZXAgNjAgMTAwIDAKc3RlcCA2MCAxMDAgMApzdGVwIDYwIDEwMCAwCnN0ZXAgMzYgMTE4IDEKc3RlcCA2MCAxMDAgMApzdGVwIDYwIDEwMCAwCnN0ZXAgMzYgOTIgMQpzdGVwIDM2IDExOCAxCnN0ZXAgNjAgMTAwIDAKc3RlcCA2MCAxMDAgMApzdGVwIDYwIDEwMCAwCg=="
+                },
+                {
+                    "format": "Internal",
+                    "uid": "nirbija.stepseq",
+                    "bypassed": false,
+                    "postFader": false,
+                    "state": "ZGl2aXNpb24gMgpsZW5ndGggMTYKZ2F0ZSAwLjI1MDAKdHJhbnNwb3NlIDAKY2hhbm5lbCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCA2MCAxMDAgMApzdGVwIDYwIDEwMCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCAzOCAxMjAgMQpzdGVwIDYwIDEwMCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCAzNyA2MiAxCnN0ZXAgNjAgMTAwIDAKc3RlcCA2MCAxMDAgMApzdGVwIDYwIDEwMCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCAzOCAxMjAgMQpzdGVwIDYwIDEwMCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCAzNyA3MCAxCg=="
+                },
+                {
+                    "format": "Internal",
+                    "uid": "nirbija.stepseq",
+                    "bypassed": false,
+                    "postFader": false,
+                    "state": "ZGl2aXNpb24gMgpsZW5ndGggMTYKZ2F0ZSAwLjI1MDAKdHJhbnNwb3NlIDAKY2hhbm5lbCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCA2MCAxMDAgMApzdGVwIDQzIDk2IDEKc3RlcCA2MCAxMDAgMApzdGVwIDYwIDEwMCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCA0MSAxMDQgMQpzdGVwIDYwIDEwMCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCA2MCAxMDAgMApzdGVwIDQzIDk2IDEKc3RlcCA2MCAxMDAgMApzdGVwIDYwIDEwMCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCA0MSAxMTAgMQpzdGVwIDYwIDEwMCAwCg=="
+                },
+                {
+                    "format": "Internal",
+                    "uid": "nirbija.stepseq",
+                    "bypassed": false,
+                    "postFader": false,
+                    "state": "ZGl2aXNpb24gMgpsZW5ndGggMTYKZ2F0ZSAwLjI1MDAKdHJhbnNwb3NlIDAKY2hhbm5lbCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCA0MiA1NCAxCnN0ZXAgNjAgMTAwIDAKc3RlcCA2MCAxMDAgMApzdGVwIDYwIDEwMCAwCnN0ZXAgNDIgNTggMQpzdGVwIDYwIDEwMCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCA2MCAxMDAgMApzdGVwIDQyIDU0IDEKc3RlcCA2MCAxMDAgMApzdGVwIDYwIDEwMCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCA0MiA1OCAxCnN0ZXAgNjAgMTAwIDAKc3RlcCA0NiA3MiAxCg=="
+                },
+                {
+                    "format": "LV2",
+                    "uid": "http://drumgizmo.org/lv2"
+                }
+            ],
+            "sends": [
+                {
+                    "bus": -1,
+                    "busName": "Hall",
+                    "level": 0.45
+                }
+            ],
+            "audioSource": "",
+            "midiSources": []
+        },
+        {
+            "name": "Bass",
+            "isBus": false,
+            "width": 2,
+            "gain": 0.6,
+            "pan": 0.0,
+            "muted": false,
+            "soloed": false,
+            "armed": false,
+            "destination": -1,
+            "destinationKind": "master",
+            "inserts": [
+                {
+                    "format": "Internal",
+                    "uid": "nirbija.stepseq",
+                    "bypassed": false,
+                    "postFader": false,
+                    "state": "ZGl2aXNpb24gMgpsZW5ndGggMTYKZ2F0ZSAwLjg1MDAKdHJhbnNwb3NlIDAKY2hhbm5lbCAwCnN0ZXAgMjYgMTEwIDEKc3RlcCA2MCAxMDAgMApzdGVwIDYwIDEwMCAwCnN0ZXAgMjYgODAgMQpzdGVwIDYwIDEwMCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCAzNCAxMDAgMQpzdGVwIDYwIDEwMCAwCnN0ZXAgMjYgMTEwIDEKc3RlcCA2MCAxMDAgMApzdGVwIDYwIDEwMCAwCnN0ZXAgMjkgODQgMQpzdGVwIDYwIDEwMCAwCnN0ZXAgNjAgMTAwIDAKc3RlcCAzNiA5NiAxCnN0ZXAgNjAgMTAwIDAK"
+                },
+                {
+                    "format": "LV2",
+                    "uid": "http://padthv1.sourceforge.net/lv2"
+                }
+            ],
+            "sends": [
+                {
+                    "bus": -1,
+                    "busName": "Hall",
+                    "level": 0.25
+                }
+            ],
+            "audioSource": "",
+            "midiSources": []
+        },
+        {
+            "name": "Hall",
+            "isBus": true,
+            "width": 2,
+            "gain": 0.85,
+            "pan": 0.0,
+            "muted": false,
+            "soloed": false,
+            "armed": false,
+            "destination": -1,
+            "destinationKind": "master",
+            "inserts": [
+                {
+                    "format": "LV2",
+                    "uid": "https://github.com/michaelwillis/dragonfly-reverb"
+                }
+            ],
+            "sends": [
+                {
+                    "bus": -1,
+                    "busName": "Scope",
+                    "level": 1.0
+                }
+            ]
+        },
+        {
+            "name": "Scope",
+            "isBus": true,
+            "width": 2,
+            "gain": 0.9,
+            "pan": 0.0,
+            "muted": false,
+            "soloed": false,
+            "armed": false,
+            "destination": -1,
+            "destinationKind": "master",
+            "inserts": [
+                {
+                    "format": "LV2",
+                    "uid": "http://gareus.org/oss/lv2/meters#spectr30stereo"
+                },
+                {
+                    "format": "LV2",
+                    "uid": "http://gareus.org/oss/lv2/meters#goniometer"
+                }
+            ],
+            "sends": []
+        }
+    ]
+}
