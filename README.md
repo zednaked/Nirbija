@@ -78,6 +78,15 @@ The QML is checked separately, and is expected to stay silent:
 cmake --build build --target nirbija_ui_qmllint
 ```
 
+## Notes
+
+| | |
+|---|---|
+| `PLAN.md` | what was decided and why, phase by phase |
+| `PORTING.md` | what a Mac or Windows port would cost, measured |
+| `ECOSYSTEM.md` | what the free plugin world is missing, counted |
+| `design/` | designs for things not built yet |
+
 ## Licence
 
 GPLv3. See `LICENSE`.
