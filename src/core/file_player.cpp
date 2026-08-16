@@ -22,6 +22,8 @@ PluginDescriptor FilePlayerInstance::make_descriptor() {
   descriptor.audio_inputs = 0;
   descriptor.audio_outputs = 2;
   descriptor.has_midi_input = false;
+  descriptor.category = "Player";
+  descriptor.kind = PluginKind::Utility;
   return descriptor;
 }
 

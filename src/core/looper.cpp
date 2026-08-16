@@ -30,6 +30,8 @@ PluginDescriptor LooperInstance::make_descriptor() {
   descriptor.audio_inputs = 2;
   descriptor.audio_outputs = 2;
   descriptor.has_midi_input = false;
+  descriptor.category = "Looper";
+  descriptor.kind = PluginKind::Effect;
   return descriptor;
 }
 

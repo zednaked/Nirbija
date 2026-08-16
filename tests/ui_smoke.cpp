@@ -288,6 +288,48 @@ int main(int argc, char* argv[]) {
       fail("clearing the maps did not unbind the control");
   }
 
+  // --- the picker's kind filter --------------------------------------------
+  //
+  // Runs against whatever is installed rather than a fixture, so it asserts the
+  // shape of the answer, not a count: kinds partition the list, the filter
+  // narrows to exactly the rows carrying that kind, and search runs inside the
+  // kind rather than reaching back outside it.
+  {
+    nirbija::PluginFilterModel filter;
+    filter.setSourceModel(mixer.plugins());
+    const int all = filter.rowCount();
+    if (all != mixer.plugins()->rowCount())
+      fail("an unfiltered picker did not show every plugin");
+
+    int summed = 0;
+    for (const int kind :
+         {nirbija::PluginFilterModel::Instrument, nirbija::PluginFilterModel::Effect,
+          nirbija::PluginFilterModel::MidiEffect,
+          nirbija::PluginFilterModel::Analyzer, nirbija::PluginFilterModel::Utility,
+          nirbija::PluginFilterModel::Unknown}) {
+      filter.setKind(kind);
+      const int count = filter.rowCount();
+      summed += count;
+      for (int row = 0; row < count; ++row) {
+        const int source = filter.sourceRow(row);
+        const QVariant got = mixer.plugins()->data(
+            mixer.plugins()->index(source, 0), nirbija::PluginListModel::KindRole);
+        if (got.toInt() != kind) fail("the kind filter let another kind through");
+      }
+    }
+    if (summed != all) fail("the kinds did not add up to the whole list");
+
+    // A kind and a query together are an and, not an or.
+    filter.setKind(nirbija::PluginFilterModel::Instrument);
+    filter.setQuery(QStringLiteral("zzz-no-such-plugin"));
+    if (filter.rowCount() != 0)
+      fail("a query that matches nothing still returned rows");
+
+    filter.setQuery({});
+    filter.setKind(nirbija::PluginFilterModel::AnyKind);
+    if (filter.rowCount() != all) fail("clearing the filters did not restore it");
+  }
+
   if (failures > 0) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return 1;

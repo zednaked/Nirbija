@@ -818,6 +818,35 @@ class ClapBackend : public PluginBackend {
     return module;
   }
 
+  // CLAP declares itself as a null-terminated list of feature strings. The
+  // first few are the ones that decide the bucket; the rest are descriptive
+  // ("reverb", "granular") and go to the picker as written. Port counts cannot
+  // help here - a CLAP has to be instantiated before it will say how many it
+  // has - so an unhelpful feature list stays Unknown rather than guessing.
+  static void read_features(const clap_plugin_descriptor_t* d,
+                            PluginDescriptor& desc) {
+    if (d->features == nullptr) return;
+    std::string words;
+    for (const char* const* f = d->features; *f != nullptr; ++f) {
+      const std::string_view feature(*f);
+      if (feature == CLAP_PLUGIN_FEATURE_INSTRUMENT)
+        desc.kind = PluginKind::Instrument;
+      else if (feature == CLAP_PLUGIN_FEATURE_NOTE_EFFECT ||
+               feature == CLAP_PLUGIN_FEATURE_NOTE_DETECTOR)
+        desc.kind = PluginKind::MidiEffect;
+      else if (feature == CLAP_PLUGIN_FEATURE_ANALYZER)
+        desc.kind = PluginKind::Analyzer;
+      else if (feature == CLAP_PLUGIN_FEATURE_AUDIO_EFFECT &&
+               desc.kind == PluginKind::Unknown)
+        desc.kind = PluginKind::Effect;
+      else {
+        if (!words.empty()) words += ' ';
+        words += feature;
+      }
+    }
+    desc.category = std::move(words);
+  }
+
   void scan_module(const fs::path& path, std::vector<PluginDescriptor>& out) {
     std::shared_ptr<ClapModule> module = module_for(path.string());
     if (module == nullptr) return;
@@ -835,6 +864,7 @@ class ClapBackend : public PluginBackend {
       desc.name = d->name != nullptr ? d->name : "";
       desc.vendor = d->vendor != nullptr ? d->vendor : "";
       desc.path = path.string();
+      read_features(d, desc);
       // Port counts need a live instance, so they stay zero until the plugin is
       // actually loaded and read_port_counts fills them in.
       out.push_back(std::move(desc));
