@@ -27,8 +27,13 @@ fi
 find "$site" -mindepth 1 -maxdepth 1 \
   ! -name .git ! -name README.md -exec rm -rf {} +
 
+# Two things live here because they are written against the same words as the
+# page, and neither is the page: announce.md is the copy for the launch posts,
+# and itch/ is the artwork to upload there. Publishing either would put them
+# out before their author meant to.
 tar -C "$docs" -cf - \
-  --exclude=publish.sh --exclude=export-itch.py --exclude=README.md . |
+  --exclude=publish.sh --exclude=export-itch.py --exclude=README.md \
+  --exclude=announce.md --exclude=./itch . |
   tar -C "$site" -xf -
 
 cd "$site"
