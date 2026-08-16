@@ -59,7 +59,7 @@
                 },
                 {
                     "format": "LV2",
-                    "uid": "http://padthv1.sourceforge.net/lv2"
+                    "uid": "https://thewavewarden.com/odin2"
                 }
             ],
             "sends": [
