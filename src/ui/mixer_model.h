@@ -390,6 +390,7 @@ class MixerModel : public QAbstractListModel {
 
   QJsonObject writeChannel(const ChannelUi& channel, size_t row,
                            const QVector<QByteArray>& row_states) const;
+  QString nextAccent() const;
   int restoreChannel(const QJsonObject& entry, QStringList* missing);
   void restoreChannelLinks(int row, const QJsonObject& entry);
   QTimer level_timer_;

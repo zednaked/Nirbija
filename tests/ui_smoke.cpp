@@ -380,6 +380,49 @@ int main(int argc, char* argv[]) {
     }
   }
 
+  // --- no two strips wear the same colour -------------------------------------
+  //
+  // The accent used to come from the graph slot, and channels and buses are
+  // handed slots from separate pools - so a channel and a bus could land on
+  // the same colour with half the palette unused. Six is the palette; up to
+  // six strips must all differ, and past that the wear has to stay even.
+  {
+    while (mixer.rowCount() > 0) mixer.removeChannel(0);
+
+    // The shape a real session has when this bit: four channels, two buses,
+    // and then a strip loaded in from a file. The old formula gave the fourth
+    // channel and the first bus the same colour, and the fifth channel the
+    // same as the second bus - which is exactly what showed up on screen.
+    for (int i = 0; i < 4; ++i) mixer.addChannel({}, 2);
+    for (int i = 0; i < 2; ++i) mixer.addBus({});
+
+    QStringList seen;
+    for (int row = 0; row < mixer.rowCount(); ++row)
+      seen.append(field(mixer, row, nirbija::MixerModel::AccentRole).toString());
+
+    QStringList unique = seen;
+    unique.removeDuplicates();
+    if (unique.size() != seen.size())
+      fail("six strips share " + std::to_string(seen.size() - unique.size()) +
+           " colour(s): " + seen.join(QStringLiteral(" ")).toStdString());
+
+    // The palette holds six, so a seventh must repeat one - but only one, and
+    // not a second time while another colour sits unused. This is the strip
+    // being loaded in from a file.
+    mixer.addChannel({}, 2);
+    QStringList after;
+    for (int row = 0; row < mixer.rowCount(); ++row)
+      after.append(field(mixer, row, nirbija::MixerModel::AccentRole).toString());
+    for (const QString& accent : unique) {
+      const auto count = after.count(accent);
+      if (count > 2)
+        fail("a colour is worn " + std::to_string(count) +
+             " times while others are free");
+    }
+    while (mixer.rowCount() > 0) mixer.removeChannel(0);
+    mixer.addChannel(QStringLiteral("Guitar"), 2);
+  }
+
   // --- a strip saved on its own comes back whole -----------------------------
   //
   // The point of the format: a chain you liked, with every plugin's state, in a

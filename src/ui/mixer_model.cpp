@@ -19,8 +19,8 @@
 namespace nirbija {
 namespace {
 
-// Channel accents, cycled as channels are added. AUM colours strips so a busy
-// session stays readable at a glance.
+// Strip accents. AUM colours strips so a busy session stays readable at a
+// glance, which only works while two strips do not wear the same colour.
 const QStringList kAccents = {
     QStringLiteral("#4a9eda"), QStringLiteral("#5cb85c"), QStringLiteral("#d9a441"),
     QStringLiteral("#c85f8f"), QStringLiteral("#7b68c4"), QStringLiteral("#4fb3a8"),
@@ -152,6 +152,23 @@ QHash<int, QByteArray> MixerModel::roleNames() const {
   };
 }
 
+// The accent no strip is wearing, or the least worn once the palette runs out.
+//
+// It used to be kAccents[slot % size], and slots are handed out separately to
+// channels and to buses - so a channel and a bus could pick the same colour
+// while half the palette went unused, which is what happened the first time a
+// strip was loaded into a full session. Counting what is on screen cannot do
+// that.
+QString MixerModel::nextAccent() const {
+  std::vector<int> used(static_cast<size_t>(kAccents.size()), 0);
+  for (const ChannelUi& channel : channels_) {
+    const qsizetype index = kAccents.indexOf(channel.accent);
+    if (index >= 0) ++used[static_cast<size_t>(index)];
+  }
+  const auto least = std::min_element(used.begin(), used.end());
+  return kAccents[static_cast<qsizetype>(std::distance(used.begin(), least))];
+}
+
 void MixerModel::addChannel(const QString& name, int channels) {
   // Mono or stereo, whatever the caller or the session file said.
   channels = std::clamp(channels, 1, kMaxStripChannels);
@@ -175,7 +192,7 @@ void MixerModel::addChannel(const QString& name, int channels) {
   channel.input_label = tr("no input");
   channel.midi_label = tr("no MIDI");
   channel.output_label = tr("Master");
-  channel.accent = kAccents[static_cast<int>(index) % kAccents.size()];
+  channel.accent = nextAccent();
   channels_.push_back(std::move(channel));
   endInsertRows();
   markDirty();
@@ -273,7 +290,7 @@ void MixerModel::addBus(const QString& name) {
   bus.input_label = tr("bus input");
   bus.midi_label = tr("no MIDI");
   bus.output_label = tr("Master");
-  bus.accent = kAccents[(static_cast<int>(index) + 3) % kAccents.size()];
+  bus.accent = nextAccent();
   channels_.push_back(std::move(bus));
   endInsertRows();
   markDirty();
