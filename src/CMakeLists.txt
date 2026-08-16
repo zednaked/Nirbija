@@ -18,7 +18,9 @@ endif()
 
 if(NIRBIJA_CLAP)
   target_sources(nirbija_core PRIVATE hosting/clap_backend.cpp)
-  target_link_libraries(nirbija_core PRIVATE clap)
+  # Headers only - clap's CMake is deliberately not configured, so there is no
+  # imported target to link against.
+  target_include_directories(nirbija_core PRIVATE ${clap_SOURCE_DIR}/include)
   target_compile_definitions(nirbija_core PUBLIC NIRBIJA_HAVE_CLAP=1)
 endif()
 
