@@ -8,7 +8,7 @@ Qt6 QML UI, LV2 + CLAP + VST3.
 ## Build
 
 Needs C++20, CMake ≥ 3.28, JACK (`pipewire-jack` is fine), libsndfile, lilv,
-Qt6 Quick, and X11.
+Lua 5.4, Qt6 Quick and Widgets, and X11.
 
 ```sh
 cmake -S . -B build -DNIRBIJA_UI=ON

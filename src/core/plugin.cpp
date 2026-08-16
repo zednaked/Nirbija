@@ -13,6 +13,7 @@
 #include "core/file_player.h"
 #include "core/looper.h"
 #include "core/arpeggiator.h"
+#include "core/script_plugin.h"
 #include "core/step_sequencer.h"
 
 #include <charconv>
@@ -56,7 +57,8 @@ class InternalBackend : public PluginBackend {
   std::vector<PluginDescriptor> scan() override {
     return {FilePlayerInstance::make_descriptor(), LooperInstance::make_descriptor(),
             StepSequencerInstance::make_descriptor(),
-            ArpeggiatorInstance::make_descriptor()};
+            ArpeggiatorInstance::make_descriptor(),
+            ScriptInstance::make_descriptor()};
   }
 
   std::unique_ptr<PluginInstance> instantiate(
@@ -68,6 +70,8 @@ class InternalBackend : public PluginBackend {
       return std::make_unique<StepSequencerInstance>();
     if (desc.uid == "nirbija.arp")
       return std::make_unique<ArpeggiatorInstance>();
+    if (desc.uid == "nirbija.script")
+      return std::make_unique<ScriptInstance>();
     return nullptr;
   }
 };

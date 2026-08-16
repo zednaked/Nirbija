@@ -40,6 +40,7 @@ set(nirbija_qml
   qml/PortPicker.qml
   qml/SendRow.qml
   qml/SlotMenu.qml
+  qml/ScriptEditor.qml
   qml/StepGrid.qml
   qml/RenameDialog.qml
   qml/PanControl.qml

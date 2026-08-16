@@ -18,6 +18,12 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(JACK REQUIRED IMPORTED_TARGET jack)
 # Declared here rather than in src/ so the tests can link it too.
 pkg_check_modules(SNDFILE REQUIRED IMPORTED_TARGET sndfile)
+# The scriptable MIDI plugin embeds Lua. Named 'lua5.4' on some distributions
+# and 'lua' on others, so both are tried before giving up.
+pkg_check_modules(LUA IMPORTED_TARGET lua5.4)
+if(NOT LUA_FOUND)
+  pkg_check_modules(LUA REQUIRED IMPORTED_TARGET lua)
+endif()
 
 if(NIRBIJA_LV2)
   pkg_check_modules(LILV REQUIRED IMPORTED_TARGET lilv-0)

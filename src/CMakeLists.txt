@@ -8,9 +8,11 @@ add_library(nirbija_core
   core/looper.cpp
   core/step_sequencer.cpp
   core/arpeggiator.cpp
+  core/script_plugin.cpp
 )
 target_include_directories(nirbija_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(nirbija_core PUBLIC PkgConfig::JACK PRIVATE PkgConfig::SNDFILE)
+target_link_libraries(nirbija_core PUBLIC PkgConfig::JACK
+  PRIVATE PkgConfig::SNDFILE PkgConfig::LUA)
 
 if(NIRBIJA_LV2)
   target_sources(nirbija_core PRIVATE hosting/lv2_backend.cpp)

@@ -76,12 +76,19 @@ O que falta do desenho é o resto da suíte: probabilidade por passo, múltiplos
 cabeçotes de leitura, geração por regra. `design/sequencer.md` cobre o que foi
 feito; o restante é escopo novo.
 
-**2. Plugin MIDI scriptável.** Mozaic (Bram Bos) e StreamByter (Audeonic)
-deixam qualquer um escrever um plugin MIDI dentro do host sem compilar nada.
-Metade da criatividade da cena iOS sai daí. Equivalente livre: **nenhum**.
+**2. Plugin MIDI scriptável.** ✅ **Feito** — `nirbija.script`, Lua embutido.
 
-Alavanca de segunda ordem — em vez de escrever oito sequenciadores, escreve-se
-um plugin e a comunidade escreve os oito. Desenho em `design/scripting.md`.
+O desenho de `design/scripting.md` foi seguido na variante C: o script **não
+roda no caminho do áudio**. Ele compila tabelas na thread da UI, e a thread de
+áudio só indexa. Cobre escala, acorde, curva de velocity e roteamento de canal;
+**não** cobre script que reage à nota que acabou de chegar, e isso está dito no
+próprio plugin.
+
+Sandbox por lista de permissão (sem `io`, `os`, `package`, `load`, `require`) e
+orçamento de instruções, porque sessão se troca entre pessoas e script vem
+junto.
+
+**Tier 1 fechado.**
 
 ### Tier 2 — buraco real, mais trabalho
 

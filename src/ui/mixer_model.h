@@ -260,6 +260,13 @@ class MixerModel : public QAbstractListModel {
   // File player extras: only meaningful when the insert is one.
   Q_INVOKABLE bool insertIsFilePlayer(int row, int slot) const;
   Q_INVOKABLE bool insertIsStepSequencer(int row, int slot) const;
+  Q_INVOKABLE bool insertIsScript(int row, int slot) const;
+  // The Lua a Script insert is running, what it said when it last failed, and
+  // the way to hand it a new one. Compiling happens here, on the UI thread,
+  // which is the whole point of how that plugin is built.
+  Q_INVOKABLE QString insertScript(int row, int slot) const;
+  Q_INVOKABLE QString insertScriptError(int row, int slot) const;
+  Q_INVOKABLE bool setInsertScript(int row, int slot, const QString& source);
   // Which step the sequencer is on, or -1. Polled while its grid is open.
   Q_INVOKABLE int insertPlayhead(int row, int slot) const;
   Q_INVOKABLE bool setInsertFile(int row, int slot, const QUrl& file);

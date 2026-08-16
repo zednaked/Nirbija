@@ -217,6 +217,11 @@ ApplicationWindow {
             stepLoader.item.openFor(row, slot)
             return
         }
+        if (Mixer.insertIsScript(row, slot)) {
+            scriptLoader.active = true
+            scriptLoader.item.openFor(row, slot)
+            return
+        }
         if (Mixer.openInsertEditor(row, slot)) return
         paramLoader.active = true
         paramLoader.item.openFor(row, slot)
@@ -496,6 +501,12 @@ ApplicationWindow {
         id: stepLoader
         active: false
         sourceComponent: StepGrid {}
+    }
+
+    Loader {
+        id: scriptLoader
+        active: false
+        sourceComponent: ScriptEditor {}
     }
 
     Loader {

@@ -1,5 +1,7 @@
 #include "mixer_model.h"
 
+#include "core/script_plugin.h"
+
 #include "core/file_player.h"
 
 #include <unistd.h>
@@ -825,6 +827,31 @@ bool MixerModel::insertIsFilePlayer(int row, int slot) const {
 bool MixerModel::insertIsStepSequencer(int row, int slot) const {
   PluginInstance* insert = insertFor(row, slot);
   return insert != nullptr && insert->descriptor().uid == "nirbija.stepseq";
+}
+
+bool MixerModel::insertIsScript(int row, int slot) const {
+  PluginInstance* insert = insertFor(row, slot);
+  return insert != nullptr && insert->descriptor().uid == "nirbija.script";
+}
+
+QString MixerModel::insertScript(int row, int slot) const {
+  auto* script = dynamic_cast<ScriptInstance*>(insertFor(row, slot));
+  return script == nullptr ? QString()
+                           : QString::fromStdString(script->script());
+}
+
+QString MixerModel::insertScriptError(int row, int slot) const {
+  auto* script = dynamic_cast<ScriptInstance*>(insertFor(row, slot));
+  return script == nullptr ? QString()
+                           : QString::fromStdString(script->error());
+}
+
+bool MixerModel::setInsertScript(int row, int slot, const QString& source) {
+  auto* script = dynamic_cast<ScriptInstance*>(insertFor(row, slot));
+  if (script == nullptr) return false;
+  const bool ok = script->set_script(source.toStdString());
+  markDirty();
+  return ok;
 }
 
 int MixerModel::insertPlayhead(int row, int slot) const {

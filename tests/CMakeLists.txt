@@ -82,6 +82,10 @@ add_executable(nirbija_arpeggiator arpeggiator_test.cpp)
 target_link_libraries(nirbija_arpeggiator PRIVATE nirbija_core)
 add_test(NAME arpeggiator COMMAND nirbija_arpeggiator)
 
+add_executable(nirbija_script_plugin script_plugin_test.cpp)
+target_link_libraries(nirbija_script_plugin PRIVATE nirbija_core)
+add_test(NAME script_plugin COMMAND nirbija_script_plugin)
+
 if(NIRBIJA_VST3)
   add_executable(nirbija_vst3_process vst3_process.cpp)
   target_link_libraries(nirbija_vst3_process PRIVATE nirbija_core)
