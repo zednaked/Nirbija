@@ -3,6 +3,8 @@
 A Linux plugin host and mixer in the spirit of AUM. JACK/PipeWire audio,
 Qt6 QML UI, LV2 + CLAP + VST3.
 
+<https://zednaked.github.io/nirbija-site/>
+
 ## Build
 
 Needs C++20, CMake ≥ 3.28, JACK (`pipewire-jack` is fine), libsndfile, lilv,
@@ -22,6 +24,30 @@ __GLX_VENDOR_LIBRARY_NAME=mesa ./build/src/ui/nirbija
 ```
 
 A Hyprland window rule for class `nirbija-plugin` should float editor windows.
+
+`nirbija --version` reports the version and which backends the binary carries;
+`nirbija --help` lists the environment variables it reads.
+
+## Install
+
+```sh
+cmake --install build --prefix ~/.local
+```
+
+Lays down the binary, the launcher and the icon — four files, nothing else.
+See `packaging/README.md` for the desktop and Hyprland side of it.
+
+## Packaging
+
+```sh
+packaging/dist.sh src        # source tarball, from what git has committed
+packaging/dist.sh bin        # binary tree, for a machine with the same Qt
+packaging/dist.sh appimage   # self-contained, Qt bundled in
+```
+
+Everything lands in `dist/`. The binary tree links against the Qt and JACK of
+the machine that built it, so it travels only to an identical distro; anything
+else wants the AppImage or the source.
 
 ## Using it
 

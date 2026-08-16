@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>Nirbija</title>
+  <!-- The mark from the landing page: three faders at rest, different heights.
+       Same paper and ink as the site (paper #ebe4d4, ink #161410). The
+       proportions are the favicon's, scaled 8x and centred on the 256 grid. -->
+  <rect width="256" height="256" rx="56" fill="#ebe4d4"/>
+  <g fill="#161410">
+    <rect x="44" y="120" width="24" height="80"/>
+    <rect x="116" y="56" width="24" height="144"/>
+    <rect x="188" y="88" width="24" height="112"/>
+  </g>
+</svg>

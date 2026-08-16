@@ -3,9 +3,13 @@ Type=Application
 Name=Nirbija
 GenericName=Audio Mixer
 Comment=Plugin host and mixer for CLAP, LV2 and VST3
-# Mesa GLX vendor lets OpenGL plugin editors create a context on XWayland.
-Exec=env __GLX_VENDOR_LIBRARY_NAME=mesa nirbija
-Icon=audio-card
+# Plain, on purpose. Some machines need the Mesa GLX vendor forced before an
+# OpenGL plugin editor will create a context under XWayland - but forcing it
+# everywhere would take the hardware driver away from a machine that is fine.
+# If editors open black, make this line read:
+#   Exec=env __GLX_VENDOR_LIBRARY_NAME=mesa nirbija
+Exec=nirbija
+Icon=nirbija
 Terminal=false
 Categories=AudioVideo;Audio;Midi;
 Keywords=mixer;plugin;lv2;clap;vst3;jack;synth;

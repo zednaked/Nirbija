@@ -100,7 +100,14 @@ PluginFilterModel::PluginFilterModel(QObject* parent)
 void PluginFilterModel::setQuery(const QString& query) {
   if (query_ == query) return;
   query_ = query;
+  // Only the rows are filtered here, so this is the right call. Qt deprecates
+  // it in favour of begin/endFilterChange(), which the 6.5 floor this project
+  // declares does not have - so the warning is silenced rather than the call
+  // changed. Drop the pragmas once the minimum Qt is new enough.
+  QT_WARNING_PUSH
+  QT_WARNING_DISABLE_DEPRECATED
   invalidateRowsFilter();
+  QT_WARNING_POP
   emit queryChanged();
   emit countChanged();
 }

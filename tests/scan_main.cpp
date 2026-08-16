@@ -13,6 +13,7 @@ int main() {
       case nirbija::PluginFormat::Lv2: label = "LV2"; break;
       case nirbija::PluginFormat::Clap: label = "CLAP"; break;
       case nirbija::PluginFormat::Vst3: label = "VST3"; break;
+      case nirbija::PluginFormat::Internal: label = "internal"; break;
     }
     const auto found = backend->scan();
     std::printf("%s: %zu plugin(s)\n", label, found.size());

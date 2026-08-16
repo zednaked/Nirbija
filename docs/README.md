@@ -8,24 +8,30 @@ Three places, three jobs:
 | where | what |
 |---|---|
 | this repo (private) | source, working tree |
-| a public git repo | **only** this page (GitHub Pages) |
+| `zednaked/nirbija-site` (public) | **only** this page (GitHub Pages) |
 | itch.io | the download — binary + source tarball |
+
+Live at <https://zednaked.github.io/nirbija-site/>.
 
 Do not publish binaries from git. Do not point this page at the
 private repository.
 
 ## publish the page
 
-Copy `docs/` to the public pages repo (or make it that repo's root).
-Enable Pages there.
+```sh
+docs/publish.sh            # defaults to ../../nirbija-site
+```
+
+It copies one way — **here to there** — and refuses if the public repo
+has uncommitted work, then prints what changed for you to commit and
+push. Edit the page here, never over there: the two drifted apart once
+because a copy was made by hand and then edited on the far side.
 
 ## when the itch page exists
 
-```json
-"itch": { "url": "https://<you>.itch.io/nirbija" }
-```
+Page is up as a draft: <https://zedcave.itch.io/nirbija>
 
-Nav and the CTA light up. Until then they stay off.
+`content.json` already has the URL. Flip the project to **Public** on itch, then `docs/publish.sh` so the landing CTA lights up. Until the page is public, do not publish the site — visitors would hit a 404.
 
 The itch upload is the AppImage (or tarball) **and** the corresponding
 source archive. GPLv3.

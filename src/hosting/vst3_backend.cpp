@@ -89,6 +89,9 @@ std::string utf16_to_utf8(const Vst::TChar* text) {
     return left > 0 ? static_cast<uint32>(left) : 0;                          \
   }
 
+// For the two the plugin may hold past our frame. `delete this` is only safe
+// because both are `final`: FUnknown's destructor is not virtual, so a further
+// derived type would leak its own members here.
 #define NIRBIJA_REFCOUNT_HEAP()                                               \
   std::atomic<int32> refs_{1};                                                \
   uint32 PLUGIN_API addRef() override { return ++refs_; }                     \
@@ -183,7 +186,7 @@ struct HostApplication : Vst::IHostApplication {
 
 // Attribute lists and messages exist so a component and its controller can talk
 // to each other; several plugins refuse to run without them.
-struct HostAttributes : Vst::IAttributeList {
+struct HostAttributes final : Vst::IAttributeList {
   struct Value {
     int64 integer = 0;
     double real = 0.0;
@@ -256,7 +259,7 @@ struct HostAttributes : Vst::IAttributeList {
   }
 };
 
-struct HostMessage : Vst::IMessage {
+struct HostMessage final : Vst::IMessage {
   std::string id;
   HostAttributes* attributes = new HostAttributes();
 

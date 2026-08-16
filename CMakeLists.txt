@@ -39,15 +39,17 @@ if(NIRBIJA_VST3)
 endif()
 
 if(NIRBIJA_CLAP)
+  # CLAP is header-only, so its CMake project is not wanted here at all: pointed
+  # at a subdirectory that holds no CMakeLists.txt, FetchContent fetches the
+  # sources and skips add_subdirectory(). Without this its own install() rules
+  # run on `cmake --install` and dump the whole SDK - headers, .pc, cmake
+  # config - into the prefix alongside the one binary that belongs there.
   FetchContent_Declare(clap
     GIT_REPOSITORY https://github.com/free-audio/clap.git
     GIT_TAG 1.2.6
-    GIT_SHALLOW TRUE)
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR do-not-configure-clap)
   FetchContent_MakeAvailable(clap)
-  # clap's own CMake would otherwise install its headers on `cmake --install`.
-  if(TARGET clap)
-    set_target_properties(clap PROPERTIES EXCLUDE_FROM_ALL TRUE)
-  endif()
 endif()
 
 add_subdirectory(src)
