@@ -69,6 +69,10 @@ add_executable(nirbija_looper looper_test.cpp)
 target_link_libraries(nirbija_looper PRIVATE nirbija_core)
 add_test(NAME looper COMMAND nirbija_looper)
 
+add_executable(nirbija_step_sequencer step_sequencer_test.cpp)
+target_link_libraries(nirbija_step_sequencer PRIVATE nirbija_core)
+add_test(NAME step_sequencer COMMAND nirbija_step_sequencer)
+
 if(NIRBIJA_VST3)
   add_executable(nirbija_vst3_process vst3_process.cpp)
   target_link_libraries(nirbija_vst3_process PRIVATE nirbija_core)

@@ -12,6 +12,7 @@
 
 #include "core/file_player.h"
 #include "core/looper.h"
+#include "core/step_sequencer.h"
 
 #include <charconv>
 
@@ -52,7 +53,8 @@ class InternalBackend : public PluginBackend {
   PluginFormat format() const override { return PluginFormat::Internal; }
 
   std::vector<PluginDescriptor> scan() override {
-    return {FilePlayerInstance::make_descriptor(), LooperInstance::make_descriptor()};
+    return {FilePlayerInstance::make_descriptor(), LooperInstance::make_descriptor(),
+            StepSequencerInstance::make_descriptor()};
   }
 
   std::unique_ptr<PluginInstance> instantiate(
@@ -60,6 +62,8 @@ class InternalBackend : public PluginBackend {
     if (desc.uid == "nirbija.fileplayer")
       return std::make_unique<FilePlayerInstance>();
     if (desc.uid == "nirbija.looper") return std::make_unique<LooperInstance>();
+    if (desc.uid == "nirbija.stepseq")
+      return std::make_unique<StepSequencerInstance>();
     return nullptr;
   }
 };

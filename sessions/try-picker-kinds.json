@@ -22,11 +22,21 @@
             "audioSource": "",
             "midiSources": [],
             "inserts": [
-                { "format": "LV2", "uid": "http://gareus.org/oss/lv2/midifilter#midichord" },
-                { "format": "LV2", "uid": "https://thewavewarden.com/odin2" }
+                {
+                    "format": "LV2",
+                    "uid": "http://gareus.org/oss/lv2/midifilter#midichord"
+                },
+                {
+                    "format": "LV2",
+                    "uid": "https://thewavewarden.com/odin2"
+                }
             ],
             "sends": [
-                { "bus": -1, "busName": "Hall", "level": 0.35 }
+                {
+                    "bus": -1,
+                    "busName": "Hall",
+                    "level": 0.35
+                }
             ]
         },
         {
@@ -43,11 +53,52 @@
             "audioSource": "",
             "midiSources": [],
             "inserts": [
-                { "format": "LV2", "uid": "http://gareus.org/oss/lv2/midifilter#enforcescale" },
-                { "format": "LV2", "uid": "http://padthv1.sourceforge.net/lv2" }
+                {
+                    "format": "LV2",
+                    "uid": "http://gareus.org/oss/lv2/midifilter#enforcescale"
+                },
+                {
+                    "format": "LV2",
+                    "uid": "http://padthv1.sourceforge.net/lv2"
+                }
             ],
             "sends": [
-                { "bus": -1, "busName": "Hall", "level": 0.25 }
+                {
+                    "bus": -1,
+                    "busName": "Hall",
+                    "level": 0.25
+                }
+            ]
+        },
+        {
+            "name": "Seq",
+            "isBus": false,
+            "width": 2,
+            "gain": 0.6,
+            "pan": 0.0,
+            "muted": false,
+            "soloed": false,
+            "armed": false,
+            "destination": -1,
+            "destinationKind": "master",
+            "audioSource": "",
+            "midiSources": [],
+            "inserts": [
+                {
+                    "format": "Internal",
+                    "uid": "nirbija.stepseq"
+                },
+                {
+                    "format": "LV2",
+                    "uid": "https://thewavewarden.com/odin2"
+                }
+            ],
+            "sends": [
+                {
+                    "bus": -1,
+                    "busName": "Hall",
+                    "level": 0.3
+                }
             ]
         },
         {
@@ -78,10 +129,17 @@
             "destination": -1,
             "destinationKind": "master",
             "inserts": [
-                { "format": "LV2", "uid": "https://github.com/michaelwillis/dragonfly-reverb" }
+                {
+                    "format": "LV2",
+                    "uid": "https://github.com/michaelwillis/dragonfly-reverb"
+                }
             ],
             "sends": [
-                { "bus": -1, "busName": "Scope", "level": 1.0 }
+                {
+                    "bus": -1,
+                    "busName": "Scope",
+                    "level": 1.0
+                }
             ]
         },
         {
@@ -96,8 +154,14 @@
             "destination": -1,
             "destinationKind": "master",
             "inserts": [
-                { "format": "LV2", "uid": "http://gareus.org/oss/lv2/meters#spectr30stereo" },
-                { "format": "LV2", "uid": "http://gareus.org/oss/lv2/meters#goniometer" }
+                {
+                    "format": "LV2",
+                    "uid": "http://gareus.org/oss/lv2/meters#spectr30stereo"
+                },
+                {
+                    "format": "LV2",
+                    "uid": "http://gareus.org/oss/lv2/meters#goniometer"
+                }
             ],
             "sends": []
         }
