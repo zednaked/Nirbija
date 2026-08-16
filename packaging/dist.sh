@@ -119,11 +119,16 @@ do_appimage() {
   build_release
   say "AppImage"
   local base=https://github.com/linuxdeploy/linuxdeploy
-  local ld ldqt
+  local ld ldqt runtime
   ld=$(fetch_tool "linuxdeploy-$arch.AppImage" \
        "$base/releases/download/continuous/linuxdeploy-$arch.AppImage")
   ldqt=$(fetch_tool "linuxdeploy-plugin-qt-$arch.AppImage" \
        "$base-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-$arch.AppImage")
+  # Cached like the tools rather than left to the appimage plugin, which
+  # fetches it on every run and fails the whole build when that download does
+  # not come back. Once it is here the build works offline too.
+  runtime=$(fetch_tool "runtime-$arch" \
+       "https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-$arch")
 
   local root=$out/AppDir
   rm -rf "$root"
@@ -150,6 +155,7 @@ do_appimage() {
   NO_STRIP=1 \
   QML_SOURCES_PATHS=$repo/src/ui/qml \
   QML_MODULES_PATHS=$repo/build-release/qml \
+  LDAI_RUNTIME_FILE=$runtime \
   OUTPUT="nirbija-$version-$arch.AppImage" \
     "$ld" --appdir "$root" --plugin qt \
       -d "$root/usr/share/applications/Nirbija.desktop" \
