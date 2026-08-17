@@ -9,9 +9,12 @@
 
 namespace nirbija {
 
-// A performance pad: sixteen effects, held like keys. HOLD latches whatever
-// is down so both hands can leave the glass. Tempo-synced pads (stutter,
-// gate, cutter, delays) read the same grid the looper does.
+// A performance pad: sixteen effects, held like keys. Each pad is an amount,
+// not a switch — the character of the effect tracks how far it is pushed.
+// Pitch, Filter, Comb and Ring are bipolar (centre off, up and down go
+// opposite ways). HOLD latches whatever is down so both hands can leave the
+// glass. Tempo-synced pads (stutter, gate, cutter, delays) read the same grid
+// the looper does.
 class FxPadInstance : public PluginInstance {
  public:
   static constexpr int kPads = 16;
@@ -39,6 +42,7 @@ class FxPadInstance : public PluginInstance {
 
   static PluginDescriptor make_descriptor();
   static const char* pad_name(int pad);
+  static bool pad_bipolar(int pad);
 
   void set_channel_layout(int channels) override { channels_ = channels; }
   bool activate(double sample_rate, uint32_t max_block_frames) override;
@@ -61,6 +65,8 @@ class FxPadInstance : public PluginInstance {
 
   bool pad_on(int pad) const;
   void set_pad(int pad, bool on);
+  float pad_amount(int pad) const;
+  void set_pad_amount(int pad, float amount);
   bool hold() const { return hold_.load(std::memory_order_relaxed); }
   void set_hold(bool on);
 
@@ -84,20 +90,23 @@ class FxPadInstance : public PluginInstance {
   double sample_rate_ = 48000.0;
   TransportInfo transport_;
 
-  std::array<std::atomic<bool>, kPads> pad_{};
+  std::array<std::atomic<float>, kPads> amount_{};
   std::atomic<bool> hold_{false};
 
-  // Smoothed wet, audio thread. A pad that slams in clicks.
+  // Smoothed amount, audio thread. Signed for the bipolar pads. A pad that
+  // slams in clicks, so this is what process_sample reads, not the atomic.
   std::array<float, kPads> mix_{};
   std::array<bool, kPads> was_on_{};
 
   Delay hist_[2];
   Delay delay_[2];
+  Delay echo_[2];
   Delay reverse_[2];
   Delay stutter_[2];
   Delay reverb_comb_[4][2];
   Delay reverb_ap_[2][2];
   Delay flange_[2];
+  Delay comb_[2];
 
   float crush_hold_[2] = {};
   uint32_t crush_count_ = 0;
@@ -112,6 +121,7 @@ class FxPadInstance : public PluginInstance {
   float talk_phase_ = 0.0f;
   double gate_phase_ = 0.0;
   uint32_t stutter_len_ = 0;
+  uint32_t stutter_cap_ = 0;
   uint32_t stutter_pos_ = 0;
   size_t reverse_play_ = 0;
 };

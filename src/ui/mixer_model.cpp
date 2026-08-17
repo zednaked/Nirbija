@@ -1430,6 +1430,22 @@ bool MixerModel::fxPadOn(int row, int slot, int pad) const {
   return fx != nullptr && fx->pad_on(pad);
 }
 
+void MixerModel::setFxPadAmount(int row, int slot, int pad, qreal amount) {
+  auto* fx = dynamic_cast<FxPadInstance*>(insertFor(row, slot));
+  if (fx == nullptr) return;
+  fx->set_pad_amount(pad, static_cast<float>(amount));
+  markDirty(false);
+}
+
+qreal MixerModel::fxPadAmount(int row, int slot, int pad) const {
+  auto* fx = dynamic_cast<FxPadInstance*>(insertFor(row, slot));
+  return fx != nullptr ? static_cast<qreal>(fx->pad_amount(pad)) : 0.0;
+}
+
+bool MixerModel::fxPadBipolar(int pad) const {
+  return FxPadInstance::pad_bipolar(pad);
+}
+
 void MixerModel::setFxPadHold(int row, int slot, bool on) {
   auto* fx = dynamic_cast<FxPadInstance*>(insertFor(row, slot));
   if (fx == nullptr) return;

@@ -60,6 +60,18 @@ const char* FxPadInstance::pad_name(int pad) {
   return kNames[pad];
 }
 
+bool FxPadInstance::pad_bipolar(int pad) {
+  switch (pad) {
+    case Pitch:
+    case Comb:
+    case Ring:
+    case Filter:
+      return true;
+    default:
+      return false;
+  }
+}
+
 PluginDescriptor FxPadInstance::make_descriptor() {
   PluginDescriptor descriptor;
   descriptor.format = PluginFormat::Internal;
@@ -83,11 +95,13 @@ bool FxPadInstance::activate(double sample_rate, uint32_t) {
   for (int ch = 0; ch < 2; ++ch) {
     hist_[ch].setup(two_sec);
     delay_[ch].setup(two_sec);
+    echo_[ch].setup(two_sec);
     // Two seconds: tap() is a distance behind a write head that also
     // advances, so covering one second of reverse needs twice the tape.
     reverse_[ch].setup(two_sec);
     stutter_[ch].setup(one_sec);
     flange_[ch].setup(static_cast<size_t>(sample_rate_ * 0.02) + 8);
+    comb_[ch].setup(static_cast<size_t>(sample_rate_ * 0.04) + 8);
     static constexpr float kCombMs[4] = {29.7f, 37.1f, 41.1f, 43.7f};
     for (int c = 0; c < 4; ++c)
       reverb_comb_[c][ch].setup(
@@ -100,7 +114,7 @@ bool FxPadInstance::activate(double sample_rate, uint32_t) {
   crush_hold_[0] = crush_hold_[1] = 0.0f;
   crush_count_ = 0;
   ring_phase_ = 0.0f;
-  pitch_pos_[0] = pitch_pos_[1] = 0.0f;
+  pitch_pos_[0] = pitch_pos_[1] = 8.0f;
   filter_lp_[0] = filter_lp_[1] = 0.0f;
   filter_bp_[0] = filter_bp_[1] = 0.0f;
   std::memset(talk_lp_, 0, sizeof(talk_lp_));
@@ -110,25 +124,38 @@ bool FxPadInstance::activate(double sample_rate, uint32_t) {
   talk_phase_ = 0.0f;
   gate_phase_ = 0.0;
   stutter_len_ = 0;
+  stutter_cap_ = 0;
   stutter_pos_ = 0;
   reverse_play_ = 0;
   return true;
 }
 
 bool FxPadInstance::pad_on(int pad) const {
-  if (pad < 0 || pad >= kPads) return false;
-  return pad_[static_cast<size_t>(pad)].load(std::memory_order_relaxed);
+  return std::fabs(pad_amount(pad)) > 1e-3f;
+}
+
+float FxPadInstance::pad_amount(int pad) const {
+  if (pad < 0 || pad >= kPads) return 0.0f;
+  return amount_[static_cast<size_t>(pad)].load(std::memory_order_relaxed);
 }
 
 void FxPadInstance::set_pad(int pad, bool on) {
+  set_pad_amount(pad, on ? 1.0f : 0.0f);
+}
+
+void FxPadInstance::set_pad_amount(int pad, float amount) {
   if (pad < 0 || pad >= kPads) return;
-  pad_[static_cast<size_t>(pad)].store(on, std::memory_order_relaxed);
+  if (pad_bipolar(pad))
+    amount = std::clamp(amount, -1.0f, 1.0f);
+  else
+    amount = std::clamp(amount, 0.0f, 1.0f);
+  amount_[static_cast<size_t>(pad)].store(amount, std::memory_order_relaxed);
 }
 
 void FxPadInstance::set_hold(bool on) {
   hold_.store(on, std::memory_order_relaxed);
   if (!on) {
-    for (auto& p : pad_) p.store(false, std::memory_order_relaxed);
+    for (auto& a : amount_) a.store(0.0f, std::memory_order_relaxed);
   }
 }
 
@@ -136,12 +163,16 @@ void FxPadInstance::attack(int pad) {
   const float fpb = frames_per_beat(transport_, sample_rate_);
   switch (pad) {
     case Stutter: {
-      stutter_len_ = std::max(32u, static_cast<uint32_t>(fpb * 0.25f));
+      // Capture the longest slice the pad can ask for. Playback length
+      // then follows the amount, so dragging after the press shortens
+      // the loop instead of recapturing and clicking.
+      stutter_cap_ = std::max(32u, static_cast<uint32_t>(fpb * 0.5f));
+      stutter_len_ = stutter_cap_;
       stutter_pos_ = 0;
       const size_t n = stutter_[0].data.size();
       for (int ch = 0; ch < 2; ++ch) {
-        for (uint32_t i = 0; i < stutter_len_ && i < n; ++i)
-          stutter_[ch].data[i] = hist_[ch].tap(stutter_len_ - i);
+        for (uint32_t i = 0; i < stutter_cap_ && i < n; ++i)
+          stutter_[ch].data[i] = hist_[ch].tap(stutter_cap_ - i);
       }
       break;
     }
@@ -164,61 +195,83 @@ void FxPadInstance::process_sample(float* left, float* right) {
   const float fpb = frames_per_beat(transport_, sample_rate_);
   const float sr = static_cast<float>(sample_rate_);
 
+  // Wet is |amount|: bipolar pads use the sign for character, not for
+  // whether they are in the path.
   auto wet = [&](int pad, float dry, float processed) {
-    return dry + mix_[static_cast<size_t>(pad)] * (processed - dry);
+    const float w = std::fabs(mix_[static_cast<size_t>(pad)]);
+    return dry + w * (processed - dry);
   };
 
-  // Crush: hold a sample and fold the word length.
+  // Crush: more amount holds longer and folds the word shorter.
   if (mix_[Crush] > 1e-4f) {
+    const float a = mix_[Crush];
+    const uint32_t period =
+        2u + static_cast<uint32_t>(a * 22.0f);  // 2..24 samples
+    const float steps = 48.0f - a * 44.0f;      // 48..4
     if (crush_count_ == 0) {
       crush_hold_[0] = s[0];
       crush_hold_[1] = s[1];
     }
-    crush_count_ = (crush_count_ + 1) % 12;
-    const float steps = 8.0f;
+    ++crush_count_;
+    if (crush_count_ >= period) crush_count_ = 0;
     for (int ch = 0; ch < 2; ++ch) {
       float q = std::round(crush_hold_[ch] * steps) / steps;
       s[ch] = wet(Crush, s[ch], q);
     }
   }
 
-  // Pitch: read the history slower, two grains crossfading.
-  if (mix_[Pitch] > 1e-4f) {
+  // Pitch: grain-read of history. Amount is octaves, so -1 is half speed
+  // and +1 is double. The increment is 1-rate: growing delay plays slower,
+  // shrinking delay plays faster against a write head that only goes forward.
+  if (std::fabs(mix_[Pitch]) > 1e-4f) {
+    const float rate = std::exp2(mix_[Pitch]);
+    const float grain = std::max(64.0f, fpb * 0.35f);
     for (int ch = 0; ch < 2; ++ch) {
-      pitch_pos_[ch] += 0.72f;
-      const float grain = fpb * 0.35f;
-      if (pitch_pos_[ch] >= grain) pitch_pos_[ch] -= grain;
-      const float a = hist_[ch].tap_lerp(pitch_pos_[ch] + 8.0f);
-      const float b = hist_[ch].tap_lerp(pitch_pos_[ch] + grain * 0.5f + 8.0f);
-      const float x = pitch_pos_[ch] / std::max(1.0f, grain);
+      pitch_pos_[ch] += 1.0f - rate;
+      if (pitch_pos_[ch] < 8.0f) pitch_pos_[ch] += grain;
+      if (pitch_pos_[ch] >= grain + 8.0f) pitch_pos_[ch] -= grain;
+      const float a = hist_[ch].tap_lerp(pitch_pos_[ch]);
+      const float b = hist_[ch].tap_lerp(pitch_pos_[ch] + grain * 0.5f);
+      const float x =
+          std::clamp((pitch_pos_[ch] - 8.0f) / grain, 0.0f, 1.0f);
       const float g = (x < 0.5f) ? x * 2.0f : (1.0f - x) * 2.0f;
       s[ch] = wet(Pitch, s[ch], a * (1.0f - g) + b * g);
     }
   }
 
-  // Comb.
-  if (mix_[Comb] > 1e-4f) {
-    const float d = sr * 0.0065f;
+  // Comb: own feedback line. Down lengthens (hollow), up shortens (metallic).
+  if (std::fabs(mix_[Comb]) > 1e-4f) {
+    const float amt = mix_[Comb];
+    const float ms = 4.4f * std::exp2(-amt * 1.8f);  // ~15 ms .. ~1.3 ms
+    const float d = std::max(2.0f, sr * ms * 0.001f);
+    const float fb = 0.5f + 0.4f * std::fabs(amt);
     for (int ch = 0; ch < 2; ++ch) {
-      const float c = s[ch] + hist_[ch].tap_lerp(d) * 0.7f;
-      s[ch] = wet(Comb, s[ch], c);
+      const float z = comb_[ch].tap_lerp(d);
+      const float y = s[ch] + z * fb;
+      comb_[ch].push(y);
+      s[ch] = wet(Comb, s[ch], y);
     }
+  } else {
+    for (int ch = 0; ch < 2; ++ch) comb_[ch].push(s[ch] * 0.4f);
   }
 
-  // Ring mod.
-  if (mix_[Ring] > 1e-4f) {
-    ring_phase_ = wrap01(ring_phase_ + 92.0f / sr);
+  // Ring: amount sets the modulator frequency, both sides of ~90 Hz.
+  if (std::fabs(mix_[Ring]) > 1e-4f) {
+    const float hz = 28.0f * std::exp2((mix_[Ring] + 1.0f) * 2.25f);
+    ring_phase_ = wrap01(ring_phase_ + hz / sr);
     const float m = std::sin(2.0f * kPi * ring_phase_);
     for (int ch = 0; ch < 2; ++ch) s[ch] = wet(Ring, s[ch], s[ch] * m);
   }
 
-  // Reverb: four combs and two allpasses, cheap and dense enough.
+  // Reverb: four combs and two allpasses. Amount is wet and decay together,
+  // so a light press is a room and a slam is a hall, not the same hall quieter.
   if (mix_[Reverb] > 1e-4f) {
+    const float decay = 0.52f + 0.4f * mix_[Reverb];
     for (int ch = 0; ch < 2; ++ch) {
       float acc = 0.0f;
       for (int c = 0; c < 4; ++c) {
         float z = reverb_comb_[c][ch].tap(reverb_comb_[c][ch].data.size() - 1);
-        z = s[ch] + z * 0.82f;
+        z = s[ch] + z * decay;
         reverb_comb_[c][ch].push(z);
         acc += z;
       }
@@ -233,40 +286,53 @@ void FxPadInstance::process_sample(float* left, float* right) {
     }
   }
 
-  // Stutter: loop the captured slice.
-  if (mix_[Stutter] > 1e-4f && stutter_len_ > 0) {
+  // Stutter: loop a captured slice. Amount shortens it, 1/2 beat down to 1/32.
+  if (mix_[Stutter] > 1e-4f && stutter_cap_ > 0) {
+    const float beats = 0.5f * std::exp2(-3.0f * mix_[Stutter]);
+    const uint32_t play = std::clamp(
+        static_cast<uint32_t>(fpb * beats), 32u, stutter_cap_);
+    stutter_len_ = play;
     const uint32_t i = stutter_pos_ % stutter_len_;
     stutter_pos_ = (stutter_pos_ + 1) % stutter_len_;
     for (int ch = 0; ch < 2; ++ch)
       s[ch] = wet(Stutter, s[ch], stutter_[ch].data[i]);
   }
 
-  // Gate: half an eighth-note open.
+  // Gate: more amount is a faster, narrower chop.
   if (mix_[Gate] > 1e-4f) {
-    const double step = 1.0 / std::max(1.0f, fpb * 0.5f);
+    const float beats = 0.5f * std::exp2(-2.0f * mix_[Gate]);
+    const float duty = 0.58f - 0.36f * mix_[Gate];
+    const double step = 1.0 / std::max(1.0f, fpb * beats);
     gate_phase_ = std::fmod(gate_phase_ + step, 1.0);
-    const float g = gate_phase_ < 0.5 ? 1.0f : 0.0f;
+    const float g = gate_phase_ < duty ? 1.0f : 0.0f;
     for (int ch = 0; ch < 2; ++ch) s[ch] = wet(Gate, s[ch], s[ch] * g);
   }
 
-  // Filter: resonant lowpass, parked low so it reads as a pad not an EQ.
-  if (mix_[Filter] > 1e-4f) {
-    const float f = 700.0f / sr;
-    const float q = 0.35f;
+  // Filter: down is a closing lowpass, up is an opening highpass. Near zero
+  // the cutoff sits where the filter barely colours, so the wet fade is
+  // enough; parked at a fixed 700 Hz it only ever sounded like one EQ.
+  if (std::fabs(mix_[Filter]) > 1e-4f) {
+    const float amt = mix_[Filter];
+    const float hz = amt < 0.0f ? 8000.0f * std::exp2(amt * 5.5f)
+                                : 80.0f * std::exp2(amt * 5.5f);
+    const float f = std::clamp(hz / sr, 0.001f, 0.35f);
+    const float q = 0.18f + 0.5f * std::fabs(amt);
     for (int ch = 0; ch < 2; ++ch) {
       filter_lp_[ch] += f * filter_bp_[ch];
       const float hp = s[ch] - filter_lp_[ch] - q * filter_bp_[ch];
       filter_bp_[ch] += f * hp;
-      s[ch] = wet(Filter, s[ch], filter_lp_[ch]);
+      const float y = amt < 0.0f ? filter_lp_[ch] : hp;
+      s[ch] = wet(Filter, s[ch], y);
     }
   }
 
-  // Cutter: 1/16 on-off, opposite of a gate so it chops rather than breathes.
+  // Cutter: 1/8 to 1/32 on-off, opposite of a gate so it chops rather than
+  // breathes. Amount is how often, and how little stays open.
   if (mix_[Cutter] > 1e-4f) {
-    const double step = 1.0 / std::max(1.0f, fpb * 0.25f);
-    const double phase = std::fmod(transport_.beats * 4.0, 1.0);
-    const float g = (phase < 0.5 || step <= 0.0) ? 1.0f : 0.0f;
-    (void)step;
+    const double rate = 2.0 + 6.0 * static_cast<double>(mix_[Cutter]);
+    const double phase = std::fmod(std::fabs(transport_.beats) * rate, 1.0);
+    const float duty = 0.55f - 0.25f * mix_[Cutter];
+    const float g = phase < duty ? 1.0f : 0.0f;
     for (int ch = 0; ch < 2; ++ch) s[ch] = wet(Cutter, s[ch], s[ch] * g);
   }
 
@@ -284,38 +350,44 @@ void FxPadInstance::process_sample(float* left, float* right) {
     for (int ch = 0; ch < 2; ++ch) reverse_[ch].push(s[ch]);
   }
 
-  // Dub: long feedback delay with a dark loop.
+  // Dub: long feedback delay with a dark loop. Amount is the feedback.
   if (mix_[Dub] > 1e-4f) {
     const float d = fpb * 0.75f;
+    const float fb = 0.35f + 0.52f * mix_[Dub];
     for (int ch = 0; ch < 2; ++ch) {
       float z = delay_[ch].tap_lerp(d);
-      z = z * 0.72f + s[ch];
+      z = z * fb + s[ch];
       z += (delay_[ch].tap_lerp(d * 0.5f) - z) * 0.35f;
       delay_[ch].push(z);
       s[ch] = wet(Dub, s[ch], z);
     }
+  } else {
+    for (int ch = 0; ch < 2; ++ch) delay_[ch].push(s[ch]);
   }
 
-  // Tempo delay: a clean eighth.
+  // Tempo delay: a clean eighth. Own tape so it does not fight Dub.
   if (mix_[TempoDelay] > 1e-4f) {
     const float d = fpb * 0.5f;
+    const float fb = 0.18f + 0.55f * mix_[TempoDelay];
     for (int ch = 0; ch < 2; ++ch) {
-      const float z = s[ch] + delay_[ch].tap_lerp(d) * 0.45f;
-      if (mix_[Dub] <= 1e-4f) delay_[ch].push(z);
+      const float z = s[ch] + echo_[ch].tap_lerp(d) * fb;
+      echo_[ch].push(z);
       s[ch] = wet(TempoDelay, s[ch], z);
     }
-  } else if (mix_[Dub] <= 1e-4f && mix_[Comb] <= 1e-4f) {
-    for (int ch = 0; ch < 2; ++ch) delay_[ch].push(s[ch]);
+  } else {
+    for (int ch = 0; ch < 2; ++ch) echo_[ch].push(s[ch]);
   }
 
   // Talkbox: three formants, vowel swept slowly. Its own accumulator, not a
   // scaled read of the flanger's: that one is only advanced inside the
   // Vibroflange branch below, so the vowel sat frozen unless both pads
   // happened to be down, and the 0.15 scaling made it jump rather than turn
-  // over every time the flanger's phase wrapped.
+  // over every time the flanger's phase wrapped. Amount is wet and how far
+  // the vowel travels.
   talk_phase_ = wrap01(talk_phase_ + 0.0825f / sr);
   if (mix_[Talkbox] > 1e-4f) {
-    const float vowel = 0.5f + 0.5f * std::sin(2.0f * kPi * talk_phase_);
+    const float vowel =
+        0.5f + 0.5f * mix_[Talkbox] * std::sin(2.0f * kPi * talk_phase_);
     const float f1 = (400.0f + 400.0f * vowel) / sr;
     const float f2 = (800.0f + 1400.0f * vowel) / sr;
     const float f3 = 2400.0f / sr;
@@ -331,36 +403,41 @@ void FxPadInstance::process_sample(float* left, float* right) {
     }
   }
 
-  // Vibroflange: short modulated delay.
+  // Vibroflange: short modulated delay. Amount is depth and rate together.
   if (mix_[Vibroflange] > 1e-4f) {
-    vib_phase_ = wrap01(vib_phase_ + 0.55f / sr);
+    const float rate = 0.18f + 0.85f * mix_[Vibroflange];
+    vib_phase_ = wrap01(vib_phase_ + rate / sr);
     const float lfo = std::sin(2.0f * kPi * vib_phase_);
+    const float depth = 6.0f + 22.0f * mix_[Vibroflange];
     for (int ch = 0; ch < 2; ++ch) {
       flange_[ch].push(s[ch]);
-      const float d = 24.0f + lfo * 18.0f + static_cast<float>(ch) * 3.0f;
+      const float d = 16.0f + lfo * depth + static_cast<float>(ch) * 3.0f;
       s[ch] = wet(Vibroflange, s[ch], s[ch] + flange_[ch].tap_lerp(d));
     }
   } else {
     for (int ch = 0; ch < 2; ++ch) flange_[ch].push(s[ch]);
   }
 
-  // Dirty.
+  // Dirty: more amount is more drive, not just more of the same fold.
   if (mix_[Dirty] > 1e-4f) {
+    const float drive = 1.4f + 10.0f * mix_[Dirty];
     for (int ch = 0; ch < 2; ++ch) {
-      const float d = std::tanh(s[ch] * 6.0f);
+      const float d = std::tanh(s[ch] * drive);
       s[ch] = wet(Dirty, s[ch], d);
     }
   }
 
   // Compressor: flatten peaks so a pad after Dirty still has somewhere to go.
+  // Amount lowers the threshold and raises the makeup.
   if (mix_[Compressor] > 1e-4f) {
     const float peak = std::max(std::fabs(s[0]), std::fabs(s[1]));
     env_peak_ = peak > env_peak_ ? peak : env_peak_ * 0.9995f;
-    const float thresh = 0.25f;
+    const float thresh = 0.55f - 0.42f * mix_[Compressor];
     const float want = env_peak_ > thresh ? thresh / env_peak_ : 1.0f;
     comp_gain_ += (want - comp_gain_) * 0.01f;
+    const float makeup = 1.05f + 0.7f * mix_[Compressor];
     for (int ch = 0; ch < 2; ++ch)
-      s[ch] = wet(Compressor, s[ch], s[ch] * comp_gain_ * 1.4f);
+      s[ch] = wet(Compressor, s[ch], s[ch] * comp_gain_ * makeup);
   }
 
   *left = s[0];
@@ -375,12 +452,13 @@ void FxPadInstance::process(const float* const* inputs, float* const* outputs,
                       (0.008f * static_cast<float>(sample_rate_)));
 
   for (int p = 0; p < kPads; ++p) {
-    const float target = pad_[static_cast<size_t>(p)].load(std::memory_order_relaxed)
-                             ? 1.0f
-                             : 0.0f;
+    const float target =
+        amount_[static_cast<size_t>(p)].load(std::memory_order_relaxed);
     mix_[static_cast<size_t>(p)] +=
         coeff * (target - mix_[static_cast<size_t>(p)]);
-    const bool on = mix_[static_cast<size_t>(p)] > 0.5f;
+    // Attack used to wait for mix > 0.5, which meant a light press never
+    // armed stutter, gate or reverse at all.
+    const bool on = std::fabs(mix_[static_cast<size_t>(p)]) > 0.02f;
     if (on && !was_on_[static_cast<size_t>(p)]) attack(p);
     was_on_[static_cast<size_t>(p)] = on;
   }
@@ -397,15 +475,18 @@ void FxPadInstance::process(const float* const* inputs, float* const* outputs,
 std::vector<ParameterInfo> FxPadInstance::parameters() const {
   std::vector<ParameterInfo> info;
   info.reserve(kPads + 1);
-  for (int p = 0; p < kPads; ++p)
-    info.push_back({static_cast<uint32_t>(p), pad_name(p), 0.0, 1.0, 0.0});
+  for (int p = 0; p < kPads; ++p) {
+    const bool bi = pad_bipolar(p);
+    info.push_back({static_cast<uint32_t>(p), pad_name(p),
+                    bi ? -1.0 : 0.0, 1.0, 0.0});
+  }
   info.push_back({kHoldId, "Hold", 0.0, 1.0, 0.0});
   return info;
 }
 
 double FxPadInstance::parameter_value(uint32_t id) const {
   if (id == kHoldId) return hold() ? 1.0 : 0.0;
-  if (id < kPads) return pad_on(static_cast<int>(id)) ? 1.0 : 0.0;
+  if (id < kPads) return pad_amount(static_cast<int>(id));
   return 0.0;
 }
 
@@ -414,13 +495,13 @@ void FxPadInstance::set_parameter(uint32_t id, double value) {
     set_hold(value >= 0.5);
     return;
   }
-  if (id < kPads) set_pad(static_cast<int>(id), value >= 0.5);
+  if (id < kPads) set_pad_amount(static_cast<int>(id), static_cast<float>(value));
 }
 
 std::vector<uint8_t> FxPadInstance::save_state() const {
   std::string text = hold() ? "1\n" : "0\n";
   for (int p = 0; p < kPads; ++p) {
-    text += pad_on(p) ? '1' : '0';
+    text += std::to_string(pad_amount(p));
     text += '\n';
   }
   return {text.begin(), text.end()};
@@ -439,7 +520,8 @@ bool FxPadInstance::load_state(const std::vector<uint8_t>& blob) {
     double value = 0.0;
     if (parse_number(line, &value)) {
       if (field == 0) set_hold(value >= 0.5);
-      else if (field - 1 < kPads) set_pad(field - 1, value >= 0.5);
+      else if (field - 1 < kPads)
+        set_pad_amount(field - 1, static_cast<float>(value));
     }
     ++field;
     if (split == std::string::npos) break;

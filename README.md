@@ -68,7 +68,7 @@ the host and need nothing installed at all:
 | **Arpeggiator** | up, down, up-down, as played, random, chord; octaves and latch |
 | **Script** | a MIDI plugin you write in Lua, in the mixer |
 | **Looper** | quantised launch, reverse, half/double, multiply, replace, once |
-| **FX Pad** | sixteen held effects and a Hold latch |
+| **FX Pad** | sixteen graduated effects; pitch, filter, comb and ring go both ways |
 | **File Player** | a file into a strip |
 
 They sit in the picker's **midi** bucket alongside everything else. A

@@ -15,6 +15,16 @@ is a fact about the screen in front of you, and a jam opened on a laptop has
 no business resizing the desktop it came from. `NIRBIJA_UI_SCALE` still sets
 it at startup and wins when it is given.
 
+### FX pads have an amount
+
+Each pad is a depth, not a switch. Drag it for how much of the effect — crush
+holds longer and folds shorter, dirty drives harder, stutter slices smaller —
+instead of the same preset quieter. Pitch, Filter, Comb and Ring are bipolar:
+the middle is off, up and down go opposite ways.
+
+A session that only stored 0 or 1 still loads; those values were already the
+ends of the same range.
+
 ### Also
 
 - The landing page says what the mixer does now: eight entries rather than

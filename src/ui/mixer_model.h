@@ -228,6 +228,9 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE bool insertIsFxPad(int row, int slot) const;
   Q_INVOKABLE void setFxPad(int row, int slot, int pad, bool on);
   Q_INVOKABLE bool fxPadOn(int row, int slot, int pad) const;
+  Q_INVOKABLE void setFxPadAmount(int row, int slot, int pad, qreal amount);
+  Q_INVOKABLE qreal fxPadAmount(int row, int slot, int pad) const;
+  Q_INVOKABLE bool fxPadBipolar(int pad) const;
   Q_INVOKABLE void setFxPadHold(int row, int slot, bool on);
   Q_INVOKABLE bool fxPadHold(int row, int slot) const;
   Q_INVOKABLE void setLooperRecord(int row, int slot, bool on);

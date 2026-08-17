@@ -109,6 +109,78 @@ Measured sweep(int pad, int windows, int blocks_per_window) {
   return out;
 }
 
+struct Tone {
+  double rms = 0.0;
+  double zc_per_sec = 0.0;
+  double flat_fraction = 0.0;
+  double hf_ratio = 0.0;
+};
+
+// A held amount through a sine, after the wet mix has finished ramping.
+// Frequency and the two-tone mix are chosen per call so pitch can count
+// zero-crossings and the filter can compare high-band energy.
+Tone held(int pad, float amount, double freq, bool two_tone, int measure_blocks) {
+  constexpr uint32_t kBlock = 256;
+  constexpr int kWarm = 250;
+  nirbija::FxPadInstance fx;
+  fx.set_channel_layout(2);
+  fx.activate(48000.0, kBlock);
+
+  std::vector<float> in_l(kBlock), in_r(kBlock), out_l(kBlock), out_r(kBlock);
+  const float* ins[2] = {in_l.data(), in_r.data()};
+  float* outs[2] = {out_l.data(), out_r.data()};
+
+  nirbija::TransportInfo transport;
+  transport.playing = true;
+  transport.rolling = true;
+  transport.tempo_bpm = 120.0;
+  transport.numerator = 4;
+  transport.denominator = 4;
+
+  fx.set_pad_amount(pad, amount);
+
+  double phase = 0.0;
+  double phase_hi = 0.0;
+  float previous = 0.0f;
+  long flat = 0, counted = 0, zc = 0;
+  double energy = 0.0, hf_energy = 0.0;
+  float lp = 0.0f;
+
+  const int total = kWarm + measure_blocks;
+  for (int b = 0; b < total; ++b) {
+    for (uint32_t i = 0; i < kBlock; ++i) {
+      const float lo = 0.45f * static_cast<float>(std::sin(phase));
+      const float hi = 0.45f * static_cast<float>(std::sin(phase_hi));
+      in_l[i] = in_r[i] = two_tone ? lo + hi : lo;
+      phase += 2.0 * 3.14159265358979 * freq / 48000.0;
+      phase_hi += 2.0 * 3.14159265358979 * 3000.0 / 48000.0;
+    }
+    transport.seconds = b * static_cast<double>(kBlock) / 48000.0;
+    transport.beats = transport.seconds * transport.tempo_bpm / 60.0;
+    fx.set_transport(transport);
+    fx.process(ins, outs, kBlock);
+    if (b < kWarm) continue;
+    for (uint32_t i = 0; i < kBlock; ++i) {
+      const float s = out_l[i];
+      energy += s * s;
+      lp += 0.08f * (s - lp);
+      const float hf = s - lp;
+      hf_energy += hf * hf;
+      if (previous <= 0.0f && s > 0.0f) ++zc;
+      if (std::fabs(s - previous) < 1e-7f) ++flat;
+      previous = s;
+      ++counted;
+    }
+  }
+
+  Tone out;
+  out.rms = std::sqrt(energy / counted);
+  out.zc_per_sec = zc * (48000.0 / counted);
+  out.flat_fraction = static_cast<double>(flat) / counted;
+  out.hf_ratio = energy > 1e-12 ? hf_energy / energy : 0.0;
+  return out;
+}
+
 }  // namespace
 
 int main() {
@@ -229,6 +301,133 @@ int main() {
   if (talkbox.window_swing < 1.1)
     fail("the talkbox vowel is not moving (swing " +
          std::to_string(talkbox.window_swing) + ")");
+
+  // Amounts, not switches. A pad stored as 0.37 has to come back as 0.37,
+  // and a bipolar pad has to keep its sign — the old 0/1 blob is still the
+  // ends of the same range, so a session from before this still loads.
+  {
+    nirbija::FxPadInstance fx;
+    fx.activate(48000.0, 256);
+    fx.set_hold(true);
+    fx.set_pad_amount(nirbija::FxPadInstance::Crush, 0.37f);
+    fx.set_pad_amount(nirbija::FxPadInstance::Pitch, -0.55f);
+    fx.set_pad_amount(nirbija::FxPadInstance::Filter, 0.8f);
+    const auto kept = fx.save_state();
+    nirbija::FxPadInstance restored;
+    restored.activate(48000.0, 256);
+    if (!restored.load_state(kept)) fail("load_state refused a blob with amounts");
+    if (std::fabs(restored.pad_amount(nirbija::FxPadInstance::Crush) - 0.37f) > 1e-4f)
+      fail("crush amount did not survive the session");
+    if (std::fabs(restored.pad_amount(nirbija::FxPadInstance::Pitch) + 0.55f) > 1e-4f)
+      fail("pitch amount lost its sign");
+    if (std::fabs(restored.pad_amount(nirbija::FxPadInstance::Filter) - 0.8f) > 1e-4f)
+      fail("filter amount did not survive the session");
+    if (!restored.hold()) fail("hold did not survive a blob with amounts");
+  }
+
+  {
+    const std::string legacy = "1\n0\n1\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n";
+    nirbija::FxPadInstance fx;
+    fx.activate(48000.0, 256);
+    if (!fx.load_state(std::vector<uint8_t>(legacy.begin(), legacy.end())))
+      fail("a 0/1 blob from before amounts was refused");
+    if (!fx.hold()) fail("legacy hold did not load");
+    if (fx.pad_amount(nirbija::FxPadInstance::Crush) != 0.0f)
+      fail("legacy crush-off did not stay off");
+    if (std::fabs(fx.pad_amount(nirbija::FxPadInstance::Pitch) - 1.0f) > 1e-4f)
+      fail("legacy pitch-on did not become full up");
+  }
+
+  {
+    const auto params = nirbija::FxPadInstance().parameters();
+    if (params.size() < 16) fail("parameters() dropped pads");
+    if (params[nirbija::FxPadInstance::Pitch].min_value >= 0.0)
+      fail("pitch is not exposed as bipolar");
+    if (params[nirbija::FxPadInstance::Filter].min_value >= 0.0)
+      fail("filter is not exposed as bipolar");
+    if (params[nirbija::FxPadInstance::Crush].min_value < 0.0)
+      fail("crush was marked bipolar");
+  }
+
+  fx.set_pad_amount(nirbija::FxPadInstance::Crush, -0.4f);
+  if (fx.pad_amount(nirbija::FxPadInstance::Crush) < 0.0f)
+    fail("a unipolar pad accepted a negative amount");
+  fx.set_pad_amount(nirbija::FxPadInstance::Pitch, 2.0f);
+  if (fx.pad_amount(nirbija::FxPadInstance::Pitch) > 1.0f)
+    fail("a bipolar pad was not clamped to 1");
+
+  // Crush at full hold must flatten more of the wave than a light press.
+  // If amount only faded the same 12-sample hold in, both would look alike
+  // after the wet mix ramped, and the pad would still be two states.
+  {
+    const Tone light = held(nirbija::FxPadInstance::Crush, 0.2f, 220.0, false, 80);
+    const Tone heavy = held(nirbija::FxPadInstance::Crush, 1.0f, 220.0, false, 80);
+    if (heavy.flat_fraction <= light.flat_fraction + 0.02)
+      fail("crush amount did not change how hard it folds (light " +
+           std::to_string(light.flat_fraction) + " heavy " +
+           std::to_string(heavy.flat_fraction) + ")");
+  }
+
+  // Pitch down must lower the tone, pitch up must raise it. Wet-only would
+  // leave the zero-crossing rate of a 220 Hz sine alone.
+  {
+    const Tone down = held(nirbija::FxPadInstance::Pitch, -1.0f, 220.0, false, 120);
+    const Tone up = held(nirbija::FxPadInstance::Pitch, 1.0f, 220.0, false, 120);
+    if (down.zc_per_sec > 180.0)
+      fail("pitch down did not drop the tone (zc " +
+           std::to_string(down.zc_per_sec) + ")");
+    if (up.zc_per_sec < 300.0)
+      fail("pitch up did not raise the tone (zc " +
+           std::to_string(up.zc_per_sec) + ")");
+    if (up.zc_per_sec <= down.zc_per_sec)
+      fail("pitch up and down landed on the same tone");
+  }
+
+  // A 110 + 3000 Hz pair: closing the lowpass has to kill the high tone,
+  // opening the highpass has to kill the low one.
+  {
+    const Tone lp = held(nirbija::FxPadInstance::Filter, -1.0f, 110.0, true, 80);
+    const Tone hp = held(nirbija::FxPadInstance::Filter, 1.0f, 110.0, true, 80);
+    if (lp.hf_ratio >= hp.hf_ratio)
+      fail("filter down kept as much high band as filter up (lp " +
+           std::to_string(lp.hf_ratio) + " hp " + std::to_string(hp.hf_ratio) +
+           ")");
+    if (lp.hf_ratio > 0.35)
+      fail("filter down did not close (hf " + std::to_string(lp.hf_ratio) + ")");
+    if (hp.hf_ratio < 0.55)
+      fail("filter up did not open (hf " + std::to_string(hp.hf_ratio) + ")");
+  }
+
+  // A light press used to never cross the old mix > 0.5 attack line, so
+  // reverse sat on a write-head tap and put out nothing from the past.
+  {
+    constexpr uint32_t kBlock = 256;
+    constexpr double kRate = 48000.0;
+    nirbija::FxPadInstance fx;
+    fx.set_channel_layout(2);
+    fx.activate(kRate, kBlock);
+    std::vector<float> in_l(kBlock, 0.0f), in_r(kBlock, 0.0f);
+    std::vector<float> out_l(kBlock), out_r(kBlock);
+    const float* ins[2] = {in_l.data(), in_r.data()};
+    float* outs[2] = {out_l.data(), out_r.data()};
+    const int fill = static_cast<int>(kRate / kBlock) + 4;
+    for (int b = 0; b < fill; ++b) fx.process(ins, outs, kBlock);
+    in_l[0] = in_r[0] = 1.0f;
+    fx.process(ins, outs, kBlock);
+    in_l[0] = in_r[0] = 0.0f;
+    const int behind = static_cast<int>(0.4 * kRate / kBlock);
+    for (int b = 0; b < behind; ++b) fx.process(ins, outs, kBlock);
+    fx.set_pad_amount(nirbija::FxPadInstance::Reverse, 0.25f);
+    float peak = 0.0f;
+    const int listen = static_cast<int>(0.8 * kRate / kBlock);
+    for (int b = 0; b < listen; ++b) {
+      fx.process(ins, outs, kBlock);
+      for (float s : out_l) peak = std::max(peak, std::fabs(s));
+    }
+    if (peak < 0.05f)
+      fail("a light reverse press never attacked (peak " +
+           std::to_string(peak) + ")");
+  }
 
   if (failures > 0) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
