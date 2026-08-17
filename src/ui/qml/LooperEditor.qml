@@ -46,8 +46,14 @@ Popup {
     property bool replace: false
     property real speed: 1
     property real feedback: 1
+    property bool countIn: false
+    property int countBeats: 0
+    property bool mapping: false
+    property int waitingParam: -1
+    property var mapped: ({})
     readonly property string stageLabel:
-        root.recording
+        root.countBeats > 0 ? qsTr("%1").arg(root.countBeats)
+        : root.recording
             ? (root.hasLoop
                    ? (root.replace ? qsTr("replacing…") : qsTr("overdubbing…"))
                    : qsTr("recording…"))
@@ -58,12 +64,14 @@ Popup {
             : root.once ? qsTr("once")
             : qsTr("playing")
 
-    width: Px.px(560)
+    width: Px.px(620)
     height: Px.px(518)
     modal: true
     anchors.centerIn: Overlay.overlay
     padding: Skin.spacingL
-    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+    closePolicy: (root.mapping || Mixer.learning)
+                 ? Popup.NoAutoClose
+                 : Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
     // The default modal dimmer is a MouseArea. Pointer handlers on the
     // mixer (faders, strip hover, the sideways flick) do not care about
@@ -76,6 +84,7 @@ Popup {
         HoverHandler {}
         TapHandler {
             onTapped: {
+                if (root.mapping || Mixer.learning) return
                 if (root.closePolicy & Popup.CloseOnPressOutside)
                     root.close()
             }
@@ -136,6 +145,58 @@ Popup {
     onClosed: {
         positionTimer.stop()
         waveformTimer.stop()
+        root.stopMapping()
+    }
+
+    function isMapped(id) {
+        return root.mapped[id] === true
+    }
+
+    function refreshMapped() {
+        const next = {}
+        for (let id = 0; id <= 12; ++id)
+            next[id] = Mixer.insertParamMapped(root.targetRow, root.targetSlot, id)
+        root.mapped = next
+    }
+
+    function armParam(id, min, max) {
+        Mixer.learnInsertParam(root.targetRow, root.targetSlot, id, min, max)
+        root.waitingParam = id
+    }
+
+    function stopMapping() {
+        Mixer.cancelLearn()
+        root.mapping = false
+        root.waitingParam = -1
+    }
+
+    Connections {
+        target: Mixer
+        function onLearnChanged() {
+            if (!Mixer.learning) {
+                root.waitingParam = -1
+                root.refreshMapped()
+            }
+        }
+    }
+
+    Shortcut {
+        sequence: "Escape"
+        enabled: root.mapping || Mixer.learning
+        onActivated: root.stopMapping()
+    }
+
+    component MapDot: Rectangle {
+        required property int param
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.margins: 3
+        width: Px.px(6)
+        height: Px.px(6)
+        radius: width / 2
+        z: 2
+        visible: root.isMapped(param)
+        color: root.waitingParam === param ? Skin.solo : Skin.focus
     }
 
     function refreshAll() {
@@ -153,6 +214,8 @@ Popup {
         root.canRedo = Mixer.looperCanRedo(root.targetRow, root.targetSlot)
         root.canMultiply = Mixer.looperCanMultiply(root.targetRow, root.targetSlot)
         root.loopBeats = Mixer.looperBeats(root.targetRow, root.targetSlot)
+        root.countIn = Mixer.looperCountIn(root.targetRow, root.targetSlot)
+        root.refreshMapped()
         for (const p of Mixer.insertParameters(root.targetRow, root.targetSlot)) {
             if (p.id === 3) root.quantize = p.value
             else if (p.id === 4) root.gain = p.value
@@ -163,6 +226,7 @@ Popup {
             else if (p.id === 9) root.replace = p.value >= 0.5
             else if (p.id === 10) root.once = p.value >= 0.5
             else if (p.id === 11) root.speed = p.value
+            else if (p.id === 12) root.countIn = p.value >= 0.5
         }
     }
 
@@ -176,6 +240,7 @@ Popup {
 
     function refreshPosition() {
         root.playPosition = Mixer.looperPosition(root.targetRow, root.targetSlot)
+        root.countBeats = Mixer.looperCountBeats(root.targetRow, root.targetSlot)
     }
 
     // The playhead moves every block; the waveform only changes while
@@ -213,48 +278,101 @@ Popup {
             }
 
             Text {
-                text: root.stageLabel
-                color: root.recording ? Skin.arm : Skin.textDim
+                text: root.waitingParam >= 0
+                      ? qsTr("turn a knob…")
+                      : root.mapping
+                        ? qsTr("tap a control")
+                        : root.stageLabel
+                color: root.mapping || Mixer.learning ? Skin.solo
+                     : root.countBeats > 0 ? Skin.solo
+                     : root.recording ? Skin.arm : Skin.textDim
                 font.pixelSize: Skin.fontS
+                font.bold: root.countBeats > 0 || root.mapping
             }
 
             Item { Layout.fillWidth: true }
 
             StripButton {
-                Layout.preferredWidth: Px.px(76)
+                Layout.preferredWidth: Px.px(48)
+                label: qsTr("MAP")
+                active: root.mapping || Mixer.learning
+                activeColor: Skin.solo
+                tip: qsTr("Bind a looper control to a knob or pad. Press MAP, tap Rec, Play, Feedback… then turn the control. MAP stays on so the next one can follow.")
+                onClicked: {
+                    if (root.mapping || Mixer.learning) root.stopMapping()
+                    else {
+                        root.mapping = true
+                        root.waitingParam = -1
+                    }
+                }
+            }
+            StripButton {
+                Layout.preferredWidth: Px.px(56)
+                label: qsTr("Count")
+                active: root.countIn
+                activeColor: Skin.solo
+                tip: root.mapping
+                     ? qsTr("Tap to bind Count to the next control.")
+                     : qsTr("Latch: Rec waits one bar of clicks. Off, Rec starts at once. Turn it off during the count to cancel.")
+                onClicked: {
+                    if (root.mapping) { root.armParam(12, 0, 1); return }
+                    root.countIn = !root.countIn
+                    Mixer.setLooperCountIn(root.targetRow, root.targetSlot, root.countIn)
+                    if (!root.countIn) {
+                        root.countBeats = 0
+                        root.recording = Mixer.looperRecording(
+                            root.targetRow, root.targetSlot)
+                    }
+                }
+                MapDot { param: 12 }
+            }
+            StripButton {
+                Layout.preferredWidth: Px.px(56)
                 label: qsTr("Rec")
                 activeColor: Skin.arm
                 active: root.recording
-                tip: qsTr("Start recording, at the next cycle if quantised. The take closes at Length and keeps looping; press again to stop recording.")
+                tip: root.mapping
+                     ? qsTr("Tap to bind Rec to the next control.")
+                     : qsTr("Start recording, at the next cycle if quantised. The take closes at Length and keeps looping; press again to stop recording.")
                 onClicked: {
+                    if (root.mapping) { root.armParam(0, 0, 1); return }
                     root.recording = !root.recording
                     Mixer.setLooperRecord(root.targetRow, root.targetSlot, root.recording)
                     root.refreshTransport()
                 }
+                MapDot { param: 0 }
             }
             StripButton {
-                Layout.preferredWidth: Px.px(76)
+                Layout.preferredWidth: Px.px(56)
                 label: qsTr("Play")
                 activeColor: Skin.meterLow
                 active: root.playing
-                tip: qsTr("Play the recorded loop; press again to mute it without losing it.")
+                tip: root.mapping
+                     ? qsTr("Tap to bind Play to the next control.")
+                     : qsTr("Play the recorded loop; press again to mute it without losing it.")
                 onClicked: {
+                    if (root.mapping) { root.armParam(1, 0, 1); return }
                     root.playing = !root.playing
                     Mixer.setLooperPlay(root.targetRow, root.targetSlot, root.playing)
                 }
+                MapDot { param: 1 }
             }
             StripButton {
-                Layout.preferredWidth: Px.px(76)
+                Layout.preferredWidth: Px.px(56)
                 label: qsTr("Clear")
                 danger: true
-                tip: qsTr("Throw the loop away and drop Rec.")
+                tip: root.mapping
+                     ? qsTr("Tap to bind Clear to the next control.")
+                     : qsTr("Throw the loop away and drop Rec.")
                 onClicked: {
+                    if (root.mapping) { root.armParam(2, 0, 1); return }
                     Mixer.clearLooper(root.targetRow, root.targetSlot)
                     root.recording = false
                     root.hasAudio = false
                     root.hasLoop = false
                     root.refreshAll()
                 }
+                MapDot { param: 2 }
             }
             StripButton {
                 Layout.preferredWidth: Px.px(76)
@@ -584,6 +702,7 @@ Popup {
                 Layout.preferredWidth: Px.px(44)
                 active: root.quantize === forValue
                 onClicked: {
+                    if (root.mapping) { root.armParam(3, 0, 5); return }
                     root.quantize = forValue
                     Mixer.setInsertParameter(root.targetRow, root.targetSlot,
                                              3, forValue)
@@ -616,34 +735,46 @@ Popup {
                 label: qsTr("Rev")
                 active: root.reverse
                 activeColor: Skin.solo
-                tip: qsTr("Play the loop backwards. Rec on top writes in that direction too.")
+                tip: root.mapping
+                     ? qsTr("Tap to bind Reverse to the next control.")
+                     : qsTr("Play the loop backwards. Rec on top writes in that direction too.")
                 onClicked: {
+                    if (root.mapping) { root.armParam(7, 0, 1); return }
                     root.reverse = !root.reverse
                     Mixer.setInsertParameter(root.targetRow, root.targetSlot,
                                              7, root.reverse ? 1 : 0)
                 }
+                MapDot { param: 7 }
             }
             StripButton {
                 Layout.preferredWidth: Px.px(56)
                 label: qsTr("Once")
                 active: root.once
-                tip: qsTr("Stop after this pass. Reverse once walks back to the start and rests.")
+                tip: root.mapping
+                     ? qsTr("Tap to bind Once to the next control.")
+                     : qsTr("Stop after this pass. Reverse once walks back to the start and rests.")
                 onClicked: {
+                    if (root.mapping) { root.armParam(10, 0, 1); return }
                     root.once = !root.once
                     Mixer.setInsertParameter(root.targetRow, root.targetSlot,
                                              10, root.once ? 1 : 0)
                 }
+                MapDot { param: 10 }
             }
             StripButton {
                 Layout.preferredWidth: Px.px(64)
                 label: qsTr("Replace")
                 active: root.replace
-                tip: qsTr("Next Rec overwrites the tape instead of stacking a layer.")
+                tip: root.mapping
+                     ? qsTr("Tap to bind Replace to the next control.")
+                     : qsTr("Next Rec overwrites the tape instead of stacking a layer.")
                 onClicked: {
+                    if (root.mapping) { root.armParam(9, 0, 1); return }
                     root.replace = !root.replace
                     Mixer.setInsertParameter(root.targetRow, root.targetSlot,
                                              9, root.replace ? 1 : 0)
                 }
+                MapDot { param: 9 }
             }
             StripButton {
                 Layout.preferredWidth: Px.px(56)
@@ -663,6 +794,7 @@ Popup {
                 Layout.preferredWidth: Px.px(44)
                 active: Math.abs(root.speed - forValue) < 0.01
                 onClicked: {
+                    if (root.mapping) { root.armParam(11, 0.25, 4); return }
                     root.speed = forValue
                     Mixer.setInsertParameter(root.targetRow, root.targetSlot,
                                              11, forValue)
@@ -695,11 +827,15 @@ Popup {
                 valueText: Math.round(root.feedback * 100) + "%"
                 value: root.feedback
                 absolute: false
-                tip: qsTr("How much of the old layer survives an overdub. 100% stacks forever; drag down only if you want the take to fade. A tap on the word is not a jump.")
+                pickOnly: root.mapping
+                fillColor: root.waitingParam === 8 ? Skin.solo : Skin.accent
+                tip: qsTr("How much of the old layer survives an overdub. 100% stacks forever; drag down only if you want the take to fade. A tap on the word is not a jump. Right-click to bind.")
                 onMoved: v => {
                     root.feedback = v
                     Mixer.setInsertParameter(root.targetRow, root.targetSlot, 8, v)
                 }
+                onPicked: root.armParam(8, 0, 1)
+                onMenuRequested: root.armParam(8, 0, 1)
             }
 
             ValueTrack {
@@ -707,12 +843,16 @@ Popup {
                 label: qsTr("Pitch")
                 valueText: (root.pitch >= 0 ? "+" : "") + root.pitch.toFixed(1)
                 value: (root.pitch + 12) / 24
-                tip: qsTr("Loop pitch in semitones, −12 to +12. Does not change the live input.")
+                pickOnly: root.mapping
+                fillColor: root.waitingParam === 5 ? Skin.solo : Skin.accent
+                tip: qsTr("Loop pitch in semitones, −12 to +12. Does not change the live input. Right-click to bind.")
                 onMoved: v => {
                     root.pitch = v * 24 - 12
                     Mixer.setInsertParameter(root.targetRow, root.targetSlot,
                                              5, root.pitch)
                 }
+                onPicked: root.armParam(5, -12, 12)
+                onMenuRequested: root.armParam(5, -12, 12)
             }
 
             ValueTrack {
@@ -720,11 +860,15 @@ Popup {
                 label: qsTr("Tone")
                 valueText: Math.round(root.tone * 100) + "%"
                 value: root.tone
-                tip: qsTr("Darker cuts the highs on the loop; 100% leaves it open.")
+                pickOnly: root.mapping
+                fillColor: root.waitingParam === 6 ? Skin.solo : Skin.accent
+                tip: qsTr("Darker cuts the highs on the loop; 100% leaves it open. Right-click to bind.")
                 onMoved: v => {
                     root.tone = v
                     Mixer.setInsertParameter(root.targetRow, root.targetSlot, 6, v)
                 }
+                onPicked: root.armParam(6, 0, 1)
+                onMenuRequested: root.armParam(6, 0, 1)
             }
 
             ValueTrack {
@@ -732,11 +876,15 @@ Popup {
                 label: qsTr("Gain")
                 valueText: root.gain.toFixed(2)
                 value: root.gain / 2.0
-                tip: qsTr("Loop gain, 0 to 200%.")
+                pickOnly: root.mapping
+                fillColor: root.waitingParam === 4 ? Skin.solo : Skin.accent
+                tip: qsTr("Loop gain, 0 to 200%. Right-click to bind.")
                 onMoved: v => {
                     root.gain = v * 2.0
                     Mixer.setInsertParameter(root.targetRow, root.targetSlot, 4, root.gain)
                 }
+                onPicked: root.armParam(4, 0, 2)
+                onMenuRequested: root.armParam(4, 0, 2)
             }
         }
     }

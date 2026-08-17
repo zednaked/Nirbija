@@ -16,8 +16,13 @@ Popup {
     property int targetRow: -1
     property int targetSlot: -1
     property bool hold: false
+    property bool mapping: false
+    property int waitingPad: -1
     property var amounts: [0, 0, 0, 0, 0, 0, 0, 0,
                            0, 0, 0, 0, 0, 0, 0, 0]
+    property var mapped: [false, false, false, false, false, false, false, false,
+                          false, false, false, false, false, false, false, false]
+    property bool holdMapped: false
 
     readonly property var names: [
         "CRUSH", "PITCH", "COMB", "RING",
@@ -50,13 +55,20 @@ Popup {
     modal: true
     anchors.centerIn: Overlay.overlay
     padding: Skin.spacingL
-    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+    // While MAP is armed a tap on a pad must not count as "outside". The
+    // pads are pointer handlers, not MouseAreas, and CloseOnPressOutside
+    // treats those presses as misses — which closed the editor the moment
+    // you picked what to bind.
+    closePolicy: (root.mapping || Mixer.learning)
+                 ? Popup.NoAutoClose
+                 : Popup.CloseOnEscape | Popup.CloseOnPressOutside
 
     Overlay.modal: Rectangle {
         color: Qt.rgba(0, 0, 0, 0.45)
         HoverHandler {}
         TapHandler {
             onTapped: {
+                if (root.mapping || Mixer.learning) return
                 if (root.closePolicy & Popup.CloseOnPressOutside)
                     root.close()
             }
@@ -84,14 +96,51 @@ Popup {
     }
 
     onOpened: poll.start()
-    onClosed: poll.stop()
+    onClosed: {
+        poll.stop()
+        root.stopMapping()
+    }
 
     function refresh() {
         root.hold = Mixer.fxPadHold(root.targetRow, root.targetSlot)
         const next = []
-        for (let i = 0; i < 16; ++i)
+        const mappedNext = []
+        for (let i = 0; i < 16; ++i) {
             next.push(Mixer.fxPadAmount(root.targetRow, root.targetSlot, i))
+            mappedNext.push(Mixer.insertParamMapped(root.targetRow, root.targetSlot, i))
+        }
         root.amounts = next
+        root.mapped = mappedNext
+        root.holdMapped = Mixer.insertParamMapped(root.targetRow, root.targetSlot, 16)
+    }
+
+    function armPad(index) {
+        const bi = Mixer.fxPadBipolar(index)
+        Mixer.learnInsertParam(root.targetRow, root.targetSlot, index,
+                               bi ? -1 : 0, 1)
+        root.waitingPad = index
+    }
+
+    function stopMapping() {
+        Mixer.cancelLearn()
+        root.mapping = false
+        root.waitingPad = -1
+    }
+
+    Connections {
+        target: Mixer
+        function onLearnChanged() {
+            if (!Mixer.learning) {
+                root.waitingPad = -1
+                root.refresh()
+            }
+        }
+    }
+
+    Shortcut {
+        sequence: "Escape"
+        enabled: root.mapping || Mixer.learning
+        onActivated: root.stopMapping()
     }
 
     function applyAmount(index, value) {
@@ -134,15 +183,19 @@ Popup {
                         }
                         readonly property bool bipolar: Mixer.fxPadBipolar(pad.padIndex)
                         readonly property bool on: Math.abs(pad.amount) > 0.02
+                        readonly property bool isMapped: root.mapped[pad.padIndex] === true
+                        readonly property bool waiting: root.waitingPad === pad.padIndex
 
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         radius: Skin.radiusL
                         color: Skin.slotEmpty
                         border.width: 2
-                        border.color: pad.on ? Qt.lighter(Skin.accent, 1.25)
-                                             : pad.activeFocus ? Skin.focus
-                                             : Skin.border
+                        border.color: pad.waiting ? Skin.solo
+                                     : pad.on ? Qt.lighter(Skin.accent, 1.25)
+                                     : root.mapping ? Skin.focus
+                                     : pad.activeFocus ? Skin.focus
+                                     : Skin.border
                         clip: true
 
                         // Where the finger is on the pad is the amount. Relative
@@ -208,6 +261,17 @@ Popup {
                             font.bold: true
                         }
 
+                        Rectangle {
+                            visible: pad.isMapped
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            anchors.margins: Skin.spacingXS
+                            width: Px.px(7)
+                            height: Px.px(7)
+                            radius: width / 2
+                            color: pad.waiting ? Skin.solo : Skin.focus
+                        }
+
                         Text {
                             anchors.horizontalCenter: parent.horizontalCenter
                             anchors.bottom: parent.bottom
@@ -236,8 +300,15 @@ Popup {
                         Accessible.name: root.names[pad.padIndex]
                         Accessible.description: root.tips[pad.padIndex]
 
+                        TapHandler {
+                            enabled: root.mapping
+                            acceptedButtons: Qt.LeftButton
+                            onTapped: root.armPad(pad.padIndex)
+                        }
+
                         DragHandler {
                             id: drag
+                            enabled: !root.mapping
                             target: null
                             dragThreshold: 0
                             grabPermissions: PointerHandler.CanTakeOverFromAnything
@@ -306,35 +377,79 @@ Popup {
 
         Item {
             Layout.fillWidth: true
-            Layout.preferredHeight: Px.px(52)
+            Layout.preferredHeight: Px.px(58)
 
             Column {
                 anchors.centerIn: parent
                 spacing: Skin.spacingXS
 
-                StripButton {
+                Row {
                     anchors.horizontalCenter: parent.horizontalCenter
-                    width: Px.px(120)
-                    height: Px.px(36)
-                    label: qsTr("HOLD")
-                    active: root.hold
-                    activeColor: Skin.focus
-                    tip: qsTr("Latch the depths that are down so you can take your hands off. Turning Hold off drops them all. Tap a latched pad to clear it.")
-                    onClicked: {
-                        root.hold = !root.hold
-                        Mixer.setFxPadHold(root.targetRow, root.targetSlot, root.hold)
-                        if (!root.hold) {
-                            const next = []
-                            for (let i = 0; i < 16; ++i) next.push(0)
-                            root.amounts = next
+                    spacing: Skin.spacingS
+
+                    StripButton {
+                        width: Px.px(88)
+                        height: Px.px(36)
+                        label: qsTr("MAP")
+                        active: root.mapping || Mixer.learning
+                        activeColor: Skin.solo
+                        tip: qsTr("Bind a pad to a knob on the MIDI input of this strip. Press MAP, tap a pad, then turn the control. MAP stays on so the next pad can follow.")
+                        onClicked: {
+                            if (root.mapping || Mixer.learning) {
+                                root.stopMapping()
+                            } else {
+                                root.mapping = true
+                                root.waitingPad = -1
+                            }
+                        }
+                    }
+
+                    StripButton {
+                        width: Px.px(120)
+                        height: Px.px(36)
+                        label: qsTr("HOLD")
+                        active: root.hold
+                        activeColor: Skin.focus
+                        tip: root.mapping
+                             ? qsTr("Tap to bind Hold to the next control.")
+                             : qsTr("Latch the depths that are down so you can take your hands off. Turning Hold off drops them all. Tap a latched pad to clear it.")
+                        onClicked: {
+                            if (root.mapping) {
+                                Mixer.learnInsertParam(root.targetRow, root.targetSlot,
+                                                       16, 0, 1)
+                                root.waitingPad = 16
+                                return
+                            }
+                            root.hold = !root.hold
+                            Mixer.setFxPadHold(root.targetRow, root.targetSlot, root.hold)
+                            if (!root.hold) {
+                                const next = []
+                                for (let i = 0; i < 16; ++i) next.push(0)
+                                root.amounts = next
+                            }
+                        }
+
+                        Rectangle {
+                            visible: root.holdMapped
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            anchors.margins: 4
+                            width: Px.px(7)
+                            height: Px.px(7)
+                            radius: width / 2
+                            color: root.waitingPad === 16 ? Skin.solo : Skin.focus
                         }
                     }
                 }
 
                 Text {
                     anchors.horizontalCenter: parent.horizontalCenter
-                    text: qsTr("Top is full. Pitch, Filter, Comb and Ring go both ways from the middle.")
-                    color: Skin.textDim
+                    text: root.waitingPad >= 0
+                          ? qsTr("Turn a knob on this strip's MIDI input… Esc cancels.")
+                          : root.mapping
+                            ? qsTr("Tap the pad you want, then turn a knob.")
+                            : qsTr("Top is full. Pitch, Filter, Comb and Ring go both ways from the middle.")
+                    color: root.mapping || Mixer.learning ? Skin.solo : Skin.textDim
                     font.pixelSize: Skin.fontXS
                 }
             }

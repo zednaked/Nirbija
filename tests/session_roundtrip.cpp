@@ -162,6 +162,57 @@ int main(int argc, char* argv[]) {
     qputenv("NIRBIJA_SESSION", (dir.path() + "/session.json").toLocal8Bit());
   }
 
+  // MIDI maps used to keep the graph slot from the run that learned them.
+  // That number is new every launch, so a pad bound to CC 21 came back
+  // unbound. They travel on the channel now, and a strip file takes them too.
+  {
+    qputenv("NIRBIJA_SESSION", (dir.path() + "/maps.json").toLocal8Bit());
+    const int fx = restored.plugins()->rowFor(nirbija::PluginFormat::Internal,
+                                              "nirbija.fxpad");
+    if (fx < 0) {
+      fail("the built-in FX pad is not in the plugin list");
+    } else {
+      nirbija::MixerModel mapped;
+      if (!mapped.running()) {
+        fail("audio server went away before the map round trip");
+      } else {
+        mapped.addChannel(QStringLiteral("Pads"), 2);
+        if (!mapped.addInsert(0, fx)) {
+          fail("could not add an FX pad");
+        } else {
+          mapped.learnInsertParam(0, 0, 0, 0.0, 1.0);
+          mapped.injectControl(21, 0, 64);
+          if (!mapped.insertParamMapped(0, 0, 0))
+            fail("learning Crush did not stick before save");
+          mapped.saveSession();
+
+          const QString strip = dir.path() + "/pads-strip.json";
+          if (!mapped.saveChannelTo(0, QUrl::fromLocalFile(strip)))
+            fail("could not write a strip with a MIDI map");
+        }
+      }
+
+      nirbija::MixerModel again;
+      if (!again.insertParamMapped(0, 0, 0))
+        fail("the Crush map did not survive a restart");
+      else {
+        again.injectControl(21, 0, 127);
+        if (again.fxPadAmount(0, 0, 0) < 0.9)
+          fail("the restored Crush map did not drive the pad");
+      }
+
+      nirbija::MixerModel strip;
+      if (strip.running()) {
+        if (!strip.loadChannelFrom(QUrl::fromLocalFile(dir.path() +
+                                                       "/pads-strip.json")))
+          fail("could not load a strip that carried a MIDI map");
+        else if (!strip.insertParamMapped(strip.rowCount() - 1, 0, 0))
+          fail("the strip file arrived without the Crush map");
+      }
+    }
+    qputenv("NIRBIJA_SESSION", (dir.path() + "/session.json").toLocal8Bit());
+  }
+
   // Loading a file into a mixer that already has channels walks the removal
   // path first; restoring a bus insert's state through the channel list used
   // to dereference the removed channel's null strip right here.

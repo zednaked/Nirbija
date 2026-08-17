@@ -6,6 +6,7 @@
 #include <QQmlEngine>
 #include <QUrl>
 #include <QVariantList>
+#include <QJsonArray>
 #include <QTimer>
 #include <QVector>
 #include <qqmlintegration.h>
@@ -257,6 +258,9 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE qreal looperPosition(int row, int slot) const;
   Q_INVOKABLE bool looperRecording(int row, int slot) const;
   Q_INVOKABLE bool looperPlaying(int row, int slot) const;
+  Q_INVOKABLE bool looperCountIn(int row, int slot) const;
+  Q_INVOKABLE void setLooperCountIn(int row, int slot, bool on);
+  Q_INVOKABLE int looperCountBeats(int row, int slot) const;
   Q_INVOKABLE bool looperHasAudio(int row, int slot) const;
   Q_INVOKABLE bool looperLoopClosed(int row, int slot) const;
   Q_INVOKABLE qreal looperBeats(int row, int slot) const;
@@ -298,6 +302,7 @@ class MixerModel : public QAbstractListModel {
                                     qreal min, qreal max);
   Q_INVOKABLE void cancelLearn();
   Q_INVOKABLE void clearMidiMaps(int row);
+  Q_INVOKABLE bool insertParamMapped(int row, int slot, int param) const;
   bool learning() const { return pending_learn_.armed; }
 
   // Test hook: feeds one controller message through the same path a real one
@@ -445,6 +450,11 @@ class MixerModel : public QAbstractListModel {
   QString nextAccent() const;
   int restoreChannel(const QJsonObject& entry, QStringList* missing);
   void restoreChannelLinks(int row, const QJsonObject& entry);
+  // Bindings are stored on the channel, not by graph slot: those numbers
+  // are issued fresh every time the mixer starts, and a map that kept one
+  // would land on the wrong strip — or on none.
+  QJsonArray mapsJsonForRow(int row) const;
+  void applyMapsJson(int row, const QJsonArray& maps);
   QTimer level_timer_;
 
   // What a controller message can drive. Bindings survive in the session.
@@ -459,6 +469,11 @@ class MixerModel : public QAbstractListModel {
     uint32_t param = 0;
     double min = 0.0;
     double max = 1.0;
+    // A button that only knows on/off. Learned from a 0 or 127 (or a note):
+    // each press flips Rec/Play instead of following the 0 that a toggle
+    // pad sends when it latches off — which used to punch Rec in and
+    // immediately out.
+    bool toggle = false;
   };
   std::vector<MidiMapping> midi_maps_;
 

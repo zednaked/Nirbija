@@ -20,7 +20,10 @@ enum Params : uint32_t {
   kReplace = 9,
   kOnce = 10,
   kSpeed = 11,
+  kCountIn = 12,
 };
+
+constexpr float kPi = 3.14159265358979f;
 
 // The longest loop kept: a minute of stereo. Sized once, up front, because the
 // audio thread must never allocate mid-take.
@@ -75,6 +78,7 @@ bool LooperInstance::activate(double sample_rate, uint32_t) {
   play_pos_ = 0.0;
   tone_lpf_[0] = tone_lpf_[1] = 0.0f;
   undo_ = {};
+  stop_count_in();
 
   if (kept.empty()) {
     length_.store(0, std::memory_order_relaxed);
@@ -189,6 +193,63 @@ void LooperInstance::close_loop(uint64_t frames, Stage next) {
   stage_ = next;
 }
 
+void LooperInstance::set_count_in(bool on) {
+  count_in_.store(on, std::memory_order_relaxed);
+  // Drop Rec from this thread so the button goes dark without waiting
+  // for the audio thread to notice. process() still stops the click.
+  if (!on && count_beats_left_.load(std::memory_order_relaxed) > 0)
+    record_request_.store(false, std::memory_order_release);
+}
+
+void LooperInstance::start_count_in() {
+  counting_ = true;
+  count_phase_ = 0.0;
+  count_total_ = std::max(1, transport_.numerator);
+  count_beats_left_.store(count_total_, std::memory_order_relaxed);
+  fire_count_click(true);
+}
+
+void LooperInstance::stop_count_in() {
+  counting_ = false;
+  count_phase_ = 0.0;
+  count_total_ = 0;
+  count_beats_left_.store(0, std::memory_order_relaxed);
+}
+
+void LooperInstance::begin_record() {
+  // A new Rec pass starts a new set of phrases. Leaving Rec down through
+  // the auto-close does not come through here, so the first take and the
+  // overdubs after it stay one list of islands.
+  clear_recorded();
+  if (stage_ == Stage::Empty) {
+    written_.store(0, std::memory_order_relaxed);
+    stage_ = Stage::Defining;
+  } else {
+    // Overdub from the start of the audible window, not the raw buffer:
+    // a trimmed loop's "top" is the trim start.
+    const uint64_t length = length_.load(std::memory_order_relaxed);
+    uint64_t start = trim_start_frames(length);
+    uint64_t end = trim_end_frames(length, start);
+    if (end <= start || start >= length) {
+      start = 0;
+      end = length;
+    }
+    const bool reverse = reverse_.load(std::memory_order_relaxed);
+    play_pos_ = reverse && end > start
+                    ? static_cast<double>(end) - 1.0
+                    : static_cast<double>(start);
+    stage_ = Stage::Overdubbing;
+  }
+}
+
+void LooperInstance::fire_count_click(bool downbeat) {
+  if (sample_rate_ <= 0.0) return;
+  click_length_ = static_cast<uint32_t>(sample_rate_ * 0.03);
+  click_remaining_ = click_length_;
+  click_phase_ = 0.0;
+  click_step_ = 2.0 * kPi * (downbeat ? 1568.0 : 1046.5) / sample_rate_;
+}
+
 float LooperInstance::tone_sample(int channel, float sample) {
   const float tone =
       std::clamp(tone_.load(std::memory_order_relaxed), 0.0f, 1.0f);
@@ -245,38 +306,37 @@ void LooperInstance::apply_requests(uint32_t frames) {
     // tape began filling again.
     record_active_ = false;
     record_request_.store(false, std::memory_order_relaxed);
+    stop_count_in();
     return;
   }
 
   const bool record = record_request_.load(std::memory_order_acquire);
+  if (counting_) {
+    // Count is a latch: turning it off mid-bar drops the count and Rec,
+    // the same as pressing Rec again. Leaving it on and dropping Rec is
+    // the other way out.
+    if (!record || !count_in_.load(std::memory_order_relaxed)) {
+      stop_count_in();
+      record_active_ = false;
+      record_request_.store(false, std::memory_order_relaxed);
+    }
+    return;
+  }
   if (record == record_active_) return;
+
+  if (record && count_in_.load(std::memory_order_relaxed)) {
+    // The count is the wait: one bar of clicks, then punch in. Skipping
+    // at_boundary so we do not wait a bar for the count and another for
+    // the grid.
+    start_count_in();
+    return;
+  }
+
   if (!at_boundary(frames)) return;
 
   record_active_ = record;
   if (record) {
-    // A new Rec pass starts a new set of phrases. Leaving Rec down through
-    // the auto-close does not come through here, so the first take and the
-    // overdubs after it stay one list of islands.
-    clear_recorded();
-    if (stage_ == Stage::Empty) {
-      written_.store(0, std::memory_order_relaxed);
-      stage_ = Stage::Defining;
-    } else {
-      // Overdub from the start of the audible window, not the raw buffer:
-      // a trimmed loop's "top" is the trim start.
-      const uint64_t length = length_.load(std::memory_order_relaxed);
-      uint64_t start = trim_start_frames(length);
-      uint64_t end = trim_end_frames(length, start);
-      if (end <= start || start >= length) {
-        start = 0;
-        end = length;
-      }
-      const bool reverse = reverse_.load(std::memory_order_relaxed);
-      play_pos_ = reverse && end > start
-                      ? static_cast<double>(end) - 1.0
-                      : static_cast<double>(start);
-      stage_ = Stage::Overdubbing;
-    }
+    begin_record();
   } else {
     const uint64_t written = written_.load(std::memory_order_relaxed);
     if (stage_ == Stage::Defining && written > 0) {
@@ -335,6 +395,35 @@ void LooperInstance::process(const float* const* inputs, float* const* outputs,
     // The live signal always passes through: a looper that silences the
     // instrument while recording is unplayable.
     float out[2] = {in[0], in[1]};
+
+    if (counting_ && !count_in_.load(std::memory_order_relaxed)) {
+      stop_count_in();
+      record_active_ = false;
+      record_request_.store(false, std::memory_order_relaxed);
+    }
+
+    if (counting_) {
+      const double tempo =
+          transport_.tempo_bpm > 0.0 ? transport_.tempo_bpm : 120.0;
+      const double beats_per_frame =
+          tempo / 60.0 / std::max(sample_rate_, 1.0);
+      const double before = count_phase_;
+      count_phase_ += beats_per_frame;
+      if (count_phase_ >= static_cast<double>(count_total_)) {
+        stop_count_in();
+        record_active_ = true;
+        begin_record();
+      } else {
+        if (std::floor(before) != std::floor(count_phase_)) {
+          const int beat = static_cast<int>(std::floor(count_phase_));
+          const int bar = std::max(1, transport_.numerator);
+          fire_count_click(beat % bar == 0);
+        }
+        const int left = static_cast<int>(
+            std::ceil(static_cast<double>(count_total_) - count_phase_));
+        count_beats_left_.store(std::max(left, 1), std::memory_order_relaxed);
+      }
+    }
 
     switch (stage_) {
       case Stage::Defining: {
@@ -425,6 +514,17 @@ void LooperInstance::process(const float* const* inputs, float* const* outputs,
       case Stage::Empty:
       case Stage::Stopped:
         break;
+    }
+
+    if (click_remaining_ > 0 && click_length_ > 0) {
+      const float envelope = static_cast<float>(click_remaining_) /
+                             static_cast<float>(click_length_);
+      const float tick =
+          static_cast<float>(std::sin(click_phase_)) * envelope * envelope * 0.4f;
+      click_phase_ += click_step_;
+      --click_remaining_;
+      out[0] += tick;
+      out[1] += tick;
     }
 
     for (int ch = 0; ch < width; ++ch) outputs[ch][i] = out[ch];
@@ -542,6 +642,7 @@ std::vector<ParameterInfo> LooperInstance::parameters() const {
       {kReplace, "Replace", 0.0, 1.0, 0.0},
       {kOnce, "Play once", 0.0, 1.0, 0.0},
       {kSpeed, "Speed", 0.25, 4.0, 1.0},
+      {kCountIn, "Count in", 0.0, 1.0, 0.0},
   };
 }
 
@@ -559,6 +660,7 @@ double LooperInstance::parameter_value(uint32_t id) const {
     case kReplace: return replace_.load(std::memory_order_relaxed) ? 1.0 : 0.0;
     case kOnce: return once_.load(std::memory_order_relaxed) ? 1.0 : 0.0;
     case kSpeed: return speed_.load(std::memory_order_relaxed);
+    case kCountIn: return count_in_.load(std::memory_order_relaxed) ? 1.0 : 0.0;
     default: return 0.0;
   }
 }
@@ -606,6 +708,9 @@ void LooperInstance::set_parameter(uint32_t id, double value) {
     case kSpeed:
       speed_.store(static_cast<float>(std::clamp(value, 0.25, 4.0)),
                    std::memory_order_relaxed);
+      break;
+    case kCountIn:
+      set_count_in(value >= 0.5);
       break;
     default:
       break;
@@ -688,6 +793,9 @@ std::vector<uint8_t> LooperInstance::save_state() const {
       out.insert(out.end(), pad.begin(), pad.end());
     }
   }
+  // Trailer: older blobs stop at the tape. A missing int keeps Count off.
+  const int count_in = count_in_.load(std::memory_order_relaxed) ? 1 : 0;
+  append_pod(out, count_in);
   return out;
 }
 
@@ -747,6 +855,8 @@ bool LooperInstance::load_state(const std::vector<uint8_t>& blob) {
       written_.store(0, std::memory_order_relaxed);
       stage_ = Stage::Empty;
       loop_beats_.store(0.0, std::memory_order_relaxed);
+      int count_in = 0;
+      if (read_pod(cursor, end, &count_in)) set_count_in(count_in != 0);
       return true;
     }
 
@@ -762,6 +872,13 @@ bool LooperInstance::load_state(const std::vector<uint8_t>& blob) {
     peels_.clear();
     clear_recorded();
     undo_ = {};
+    stop_count_in();
+    const uint8_t* after_audio =
+        cursor + saved_frames * 2 * sizeof(float);
+    int count_in = 0;
+    if (after_audio + sizeof(int) <= end &&
+        read_pod(after_audio, end, &count_in))
+      set_count_in(count_in != 0);
     return true;
   }
 

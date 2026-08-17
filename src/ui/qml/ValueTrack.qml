@@ -30,9 +30,12 @@ Item {
     // label would slam the value to nearly zero — overdub feedback is one,
     // and a held Rec then eats the take.
     property bool absolute: true
+    // MAP mode: a press picks this control for MIDI learn instead of moving it.
+    property bool pickOnly: false
 
     signal moved(real value)
     signal menuRequested
+    signal picked
 
     implicitHeight: Px.px(20)
     activeFocusOnTab: true
@@ -112,6 +115,10 @@ Item {
         acceptedButtons: Qt.LeftButton
         onSingleTapped: eventPoint => {
             root.forceActiveFocus(Qt.MouseFocusReason)
+            if (root.pickOnly) {
+                root.picked()
+                return
+            }
             if (root.absolute) root.applyAt(eventPoint.position.x)
         }
         onLongPressed: root.menuRequested()
@@ -131,11 +138,15 @@ Item {
         property real startValue: 0
         onActiveChanged: {
             if (!active) return
+            if (root.pickOnly) {
+                root.picked()
+                return
+            }
             startValue = root.value
             root.forceActiveFocus(Qt.MouseFocusReason)
         }
         onCentroidChanged: {
-            if (!active) return
+            if (!active || root.pickOnly) return
             if (root.absolute) {
                 root.applyAt(centroid.position.x)
                 return
@@ -150,12 +161,17 @@ Item {
     // finer still.
     WheelHandler {
         acceptedModifiers: Qt.NoModifier
-        onWheel: event => root.nudge(event.angleDelta.y > 0 ? root.step : -root.step)
+        onWheel: event => {
+            if (root.pickOnly) return
+            root.nudge(event.angleDelta.y > 0 ? root.step : -root.step)
+        }
     }
     WheelHandler {
         acceptedModifiers: Qt.ShiftModifier
-        onWheel: event => root.nudge(event.angleDelta.y > 0 ? root.fineStep
-                                                            : -root.fineStep)
+        onWheel: event => {
+            if (root.pickOnly) return
+            root.nudge(event.angleDelta.y > 0 ? root.fineStep : -root.fineStep)
+        }
     }
 
     Keys.onPressed: event => {

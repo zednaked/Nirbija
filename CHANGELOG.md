@@ -45,6 +45,19 @@ is what then ate the take on every pass.
   pass, so a held take with two licks in it keeps the first one.
 - Clear on the looper drops Rec, so it does not start a new take on the
   empty tape.
+- The looper has a Count button: one bar of clicks, then Rec starts. The
+  count runs with Play off. The button is a latch — turn it off to Rec at
+  once, or to cancel a count already running.
+- The FX pad has MAP: tap a pad, turn a knob on the strip's MIDI input,
+  and that pad is bound. MAP stays on so the next pad can follow. The
+  binds travel with the session and with a saved strip — they used to
+  keep a graph slot that was new every launch, so a restart forgot them.
+- The looper has the same MAP: Rec, Play, Clear, Count, Reverse, Once,
+  Replace, Length, Speed, Feedback, Pitch, Tone and Gain. A footswitch
+  can punch Rec; a knob can ride feedback. The binds stay with the strip.
+- A toggle pad (127 then 0, or a note) learned onto Rec/Play flips on
+  the press and ignores the off, so a latching button does not punch
+  in and straight back out. Knobs stay continuous.
 
 ## 0.3.0 — 2026-08-16
 

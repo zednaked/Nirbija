@@ -21,14 +21,17 @@ void fail(const std::string& what) {
 }
 
 // Runs one block. `level` is the input fed in; the return is the output peak.
-float run_block(nirbija::LooperInstance& looper, float level) {
+float run_block(nirbija::LooperInstance& looper, float level,
+                double tempo = 120.0, bool playing = true) {
   std::vector<float> in_l(kBlock, level), in_r(kBlock, level);
   std::vector<float> out_l(kBlock), out_r(kBlock);
   const float* ins[2] = {in_l.data(), in_r.data()};
   float* outs[2] = {out_l.data(), out_r.data()};
 
   nirbija::TransportInfo transport;
-  transport.playing = true;
+  transport.playing = playing;
+  transport.tempo_bpm = tempo;
+  transport.numerator = 4;
   looper.set_transport(transport);
   looper.process(ins, outs, kBlock);
 
@@ -580,6 +583,7 @@ int main() {
     original.set_parameter(7, 1.0);
     original.set_parameter(8, 0.7);
     original.set_parameter(11, 0.5);
+    original.set_parameter(12, 1.0);
     const auto blob = original.save_state();
 
     nirbija::LooperInstance restored;
@@ -591,7 +595,72 @@ int main() {
       fail("feedback did not survive save");
     if (std::fabs(restored.parameter_value(11) - 0.5) > 1e-4)
       fail("speed did not survive save");
+    if (restored.parameter_value(12) < 0.5) fail("count-in did not survive save");
     if (!restored.loop_closed()) fail("NLOOP2 came back without a loop");
+  }
+
+  // Count-in: one bar of clicks, no tape, then Rec. Play can be off.
+  {
+    nirbija::LooperInstance count;
+    count.set_channel_layout(2);
+    count.activate(kRate, kBlock);
+    count.set_parameter(3, 0.0);
+    count.set_parameter(12, 1.0);
+    count.set_parameter(0, 1.0);
+
+    constexpr double kTempo = 480.0;  // 4 beats = 0.5 s
+    float click = 0.0f;
+    for (int i = 0; i < 16; ++i) {
+      click = std::max(click, run_block(count, 0.0f, kTempo, false));
+      if (count.has_audio()) fail("count-in wrote the tape before the bar");
+    }
+    if (click < 0.05f) fail("count-in made no click with Play off");
+    if (count.count_in_beats() <= 0) fail("count-in finished before a bar");
+
+    int guard = 0;
+    while (count.count_in_beats() > 0 && guard++ < 400)
+      run_block(count, 0.0f, kTempo, false);
+    if (count.count_in_beats() > 0) fail("count-in never reached Rec");
+
+    for (int i = 0; i < 8; ++i) run_block(count, 0.6f, kTempo, false);
+    count.set_parameter(0, 0.0);
+    run_block(count, 0.0f, kTempo, false);
+    if (!count.loop_closed()) fail("rec after count-in did not close a take");
+    float heard = 0.0f;
+    for (int i = 0; i < 16; ++i)
+      heard = std::max(heard, run_block(count, 0.0f, kTempo, false));
+    if (heard < 0.4f) fail("the take after count-in was silent");
+  }
+
+  {
+    nirbija::LooperInstance cancel;
+    cancel.set_channel_layout(2);
+    cancel.activate(kRate, kBlock);
+    cancel.set_parameter(12, 1.0);
+    cancel.set_parameter(0, 1.0);
+    run_block(cancel, 0.0f, 480.0, false);
+    if (cancel.count_in_beats() <= 0) fail("count-in did not start");
+    cancel.set_parameter(0, 0.0);
+    run_block(cancel, 0.0f, 480.0, false);
+    if (cancel.count_in_beats() > 0) fail("rec off did not cancel the count");
+    if (cancel.recording()) fail("cancelled count left rec armed");
+    if (cancel.has_audio()) fail("cancelled count wrote the tape");
+  }
+
+  {
+    nirbija::LooperInstance latch;
+    latch.set_channel_layout(2);
+    latch.activate(kRate, kBlock);
+    latch.set_parameter(12, 1.0);
+    latch.set_parameter(0, 1.0);
+    run_block(latch, 0.0f, 480.0, false);
+    if (latch.count_in_beats() <= 0) fail("count-in did not start");
+    latch.set_count_in(false);
+    run_block(latch, 0.0f, 480.0, false);
+    if (latch.count_in()) fail("count-in latch did not turn off");
+    if (latch.count_in_beats() > 0) fail("turning Count off left the count running");
+    if (latch.recording()) fail("turning Count off left rec armed");
+    if (latch.has_audio()) fail("turning Count off punched Rec in");
   }
 
   // Length is 1 bar. Rec left down has to close on that bar and keep the

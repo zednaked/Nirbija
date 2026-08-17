@@ -969,6 +969,19 @@ void MixerModel::cancelLearn() {
   emit learnChanged();
 }
 
+bool MixerModel::insertParamMapped(int row, int slot, int param) const {
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return false;
+  const int graph = static_cast<int>(channels_[row].slot);
+  const bool bus = channels_[row].is_bus;
+  for (const MidiMapping& map : midi_maps_) {
+    if (map.kind == MidiMapping::Kind::Param && map.graph_slot == graph &&
+        map.is_bus == bus && map.slot == slot &&
+        map.param == static_cast<uint32_t>(param) && map.cc >= 0)
+      return true;
+  }
+  return false;
+}
+
 void MixerModel::clearMidiMaps(int row) {
   if (row < 0 || row >= static_cast<int>(channels_.size())) return;
   const int slot = static_cast<int>(channels_[row].slot);
@@ -983,8 +996,12 @@ void MixerModel::handleControl(int cc, int channel, int value) {
   // Learning takes the message rather than acting on it, so arming a fader and
   // sweeping the knob does not also drag whatever it was bound to before.
   if (pending_learn_.armed) {
+    // Notes and hard 0/127 are buttons. A knob's first value almost never
+    // sits on the rail, so Rec/Play learned from a toggle pad flip on
+    // press instead of tracking the 0 it sends when it latches off.
     pending_learn_.target.cc = cc;
     pending_learn_.target.midi_channel = channel;
+    pending_learn_.target.toggle = (cc >= 128 || value <= 1 || value >= 126);
     // One binding per control per target: relearning replaces.
     std::erase_if(midi_maps_, [this](const MidiMapping& map) {
       return map.kind == pending_learn_.target.kind &&
@@ -1012,6 +1029,11 @@ void MixerModel::handleControl(int cc, int channel, int value) {
           break;
         }
       }
+      // A map from before the session reload still names the old slot.
+      // The row it was learned on is the next best thing.
+      if (row < 0 && map.row >= 0 &&
+          map.row < static_cast<int>(channels_.size()))
+        row = map.row;
     }
     if (row < 0 || row >= static_cast<int>(channels_.size())) continue;
 
@@ -1029,8 +1051,21 @@ void MixerModel::handleControl(int cc, int channel, int value) {
         if (channels_[row].muted != (value >= 64)) toggleMute(row);
         break;
       case MidiMapping::Kind::Param:
-        setInsertParameter(row, map.slot, static_cast<int>(map.param),
-                           map.min + (map.max - map.min) * normal);
+        if (map.toggle) {
+          // Releases and the off half of a toggle pad are noise. The press
+          // flips whatever Rec or Play is doing now.
+          if (value < 64) break;
+          PluginInstance* insert = insertFor(row, map.slot);
+          if (insert == nullptr) break;
+          const double current =
+              insert->parameter_value(static_cast<uint32_t>(map.param));
+          const double mid = (map.min + map.max) * 0.5;
+          setInsertParameter(row, map.slot, static_cast<int>(map.param),
+                             current >= mid ? map.min : map.max);
+        } else {
+          setInsertParameter(row, map.slot, static_cast<int>(map.param),
+                             map.min + (map.max - map.min) * normal);
+        }
         break;
     }
   }
@@ -1078,9 +1113,17 @@ void MixerModel::pollLevels() {
   const size_t count = engine_.poll_control(control, 64);
   for (size_t i = 0; i < count; ++i) {
     const uint8_t status = control[i].data[0] & 0xf0;
-    if (status != 0xb0 || control[i].size < 3) continue;  // CCs only
-    handleControl(control[i].data[1], control[i].data[0] & 0x0f,
-                  control[i].data[2]);
+    const uint8_t channel = control[i].data[0] & 0x0f;
+    if (control[i].size < 3) continue;
+    if (status == 0xb0) {
+      handleControl(control[i].data[1], channel, control[i].data[2]);
+    } else if (status == 0x90) {
+      // Pads often send notes, not CCs. Note-on with velocity 0 is off.
+      const int number = 128 + static_cast<int>(control[i].data[1]);
+      handleControl(number, channel, control[i].data[2]);
+    } else if (status == 0x80) {
+      handleControl(128 + static_cast<int>(control[i].data[1]), channel, 0);
+    }
   }
 
   // Reading the peaks is what clears them on the audio side, so it happens
@@ -1583,6 +1626,23 @@ qreal MixerModel::looperPosition(int row, int slot) const {
 bool MixerModel::looperRecording(int row, int slot) const {
   auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
   return looper != nullptr && looper->recording();
+}
+
+bool MixerModel::looperCountIn(int row, int slot) const {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  return looper != nullptr && looper->count_in();
+}
+
+void MixerModel::setLooperCountIn(int row, int slot, bool on) {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  if (looper == nullptr) return;
+  looper->set_count_in(on);
+  markDirty(false);
+}
+
+int MixerModel::looperCountBeats(int row, int slot) const {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  return looper != nullptr ? looper->count_in_beats() : 0;
 }
 
 bool MixerModel::looperPlaying(int row, int slot) const {

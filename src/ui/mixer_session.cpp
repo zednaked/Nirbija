@@ -206,7 +206,51 @@ QJsonObject MixerModel::writeChannel(const ChannelUi& channel, size_t row,
     sends.append(saved);
   }
   entry[QStringLiteral("sends")] = sends;
+  entry[QStringLiteral("midiMaps")] = mapsJsonForRow(static_cast<int>(row));
   return entry;
+}
+
+QJsonArray MixerModel::mapsJsonForRow(int row) const {
+  QJsonArray out;
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return out;
+  const int graph = static_cast<int>(channels_[row].slot);
+  const bool bus = channels_[row].is_bus;
+  for (const MidiMapping& map : midi_maps_) {
+    if (map.graph_slot != graph || map.is_bus != bus) continue;
+    QJsonObject saved;
+    saved[QStringLiteral("cc")] = map.cc;
+    saved[QStringLiteral("ch")] = map.midi_channel;
+    saved[QStringLiteral("kind")] = static_cast<int>(map.kind);
+    saved[QStringLiteral("slot")] = map.slot;
+    saved[QStringLiteral("param")] = static_cast<int>(map.param);
+    saved[QStringLiteral("min")] = map.min;
+    saved[QStringLiteral("max")] = map.max;
+    saved[QStringLiteral("toggle")] = map.toggle;
+    out.append(saved);
+  }
+  return out;
+}
+
+void MixerModel::applyMapsJson(int row, const QJsonArray& maps) {
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return;
+  const int graph = static_cast<int>(channels_[row].slot);
+  const bool bus = channels_[row].is_bus;
+  for (const QJsonValue& value : maps) {
+    const QJsonObject saved = value.toObject();
+    MidiMapping map;
+    map.cc = saved[QStringLiteral("cc")].toInt(-1);
+    map.midi_channel = saved[QStringLiteral("ch")].toInt(-1);
+    map.kind = static_cast<MidiMapping::Kind>(saved[QStringLiteral("kind")].toInt(0));
+    map.row = row;
+    map.graph_slot = graph;
+    map.is_bus = bus;
+    map.slot = saved[QStringLiteral("slot")].toInt(-1);
+    map.param = static_cast<uint32_t>(saved[QStringLiteral("param")].toInt(0));
+    map.min = saved[QStringLiteral("min")].toDouble(0.0);
+    map.max = saved[QStringLiteral("max")].toDouble(1.0);
+    map.toggle = saved[QStringLiteral("toggle")].toBool(false);
+    if (map.cc >= 0) midi_maps_.push_back(map);
+  }
 }
 
 void MixerModel::writeSession(const QString& target) const {
@@ -253,6 +297,7 @@ void MixerModel::writeSession(const QString& target) const {
     saved[QStringLiteral("param")] = static_cast<int>(map.param);
     saved[QStringLiteral("min")] = map.min;
     saved[QStringLiteral("max")] = map.max;
+    saved[QStringLiteral("toggle")] = map.toggle;
     maps.append(saved);
   }
   root[QStringLiteral("midiMaps")] = maps;
@@ -549,6 +594,8 @@ bool MixerModel::loadChannelFrom(const QUrl& file) {
   // Whatever matches by name in this session is wired up; the rest is left
   // alone rather than pointing somewhere arbitrary.
   restoreChannelLinks(row, entry);
+  applyMapsJson(row, entry[QStringLiteral("midiMaps")].toArray());
+  if (!midi_maps_.empty()) engine_.connect_all_midi_to_control();
   markDirty();
 
   // A plugin the sender had and the receiver does not is the ordinary case for
@@ -614,20 +661,41 @@ bool MixerModel::readSession(const QString& target) {
                    root[QStringLiteral("timeDenominator")].toInt(4));
 
   midi_maps_.clear();
-  for (const QJsonValue& value : root[QStringLiteral("midiMaps")].toArray()) {
-    const QJsonObject saved = value.toObject();
-    MidiMapping map;
-    map.cc = saved[QStringLiteral("cc")].toInt(-1);
-    map.midi_channel = saved[QStringLiteral("ch")].toInt(-1);
-    map.kind = static_cast<MidiMapping::Kind>(saved[QStringLiteral("kind")].toInt(0));
-    map.row = saved[QStringLiteral("row")].toInt(-1);
-    map.graph_slot = saved[QStringLiteral("graphSlot")].toInt(-1);
-    map.is_bus = saved[QStringLiteral("bus")].toBool();
-    map.slot = saved[QStringLiteral("slot")].toInt(-1);
-    map.param = static_cast<uint32_t>(saved[QStringLiteral("param")].toInt(0));
-    map.min = saved[QStringLiteral("min")].toDouble(0.0);
-    map.max = saved[QStringLiteral("max")].toDouble(1.0);
-    if (map.cc >= 0) midi_maps_.push_back(map);
+  bool from_channels = false;
+  int map_row = 0;
+  for (const QJsonValue& value : channels) {
+    const QJsonObject entry = value.toObject();
+    if (entry.contains(QStringLiteral("midiMaps"))) {
+      from_channels = true;
+      applyMapsJson(map_row, entry[QStringLiteral("midiMaps")].toArray());
+    }
+    ++map_row;
+  }
+  // Older sessions kept maps at the root, keyed by a graph slot that is
+  // issued fresh on every launch. Rebind them to the row they named.
+  if (!from_channels) {
+    for (const QJsonValue& value : root[QStringLiteral("midiMaps")].toArray()) {
+      const QJsonObject saved = value.toObject();
+      MidiMapping map;
+      map.cc = saved[QStringLiteral("cc")].toInt(-1);
+      map.midi_channel = saved[QStringLiteral("ch")].toInt(-1);
+      map.kind =
+          static_cast<MidiMapping::Kind>(saved[QStringLiteral("kind")].toInt(0));
+      map.row = saved[QStringLiteral("row")].toInt(-1);
+      map.slot = saved[QStringLiteral("slot")].toInt(-1);
+      map.param = static_cast<uint32_t>(saved[QStringLiteral("param")].toInt(0));
+      map.min = saved[QStringLiteral("min")].toDouble(0.0);
+      map.max = saved[QStringLiteral("max")].toDouble(1.0);
+      map.toggle = saved[QStringLiteral("toggle")].toBool(false);
+      if (map.row >= 0 && map.row < static_cast<int>(channels_.size())) {
+        map.graph_slot = static_cast<int>(channels_[map.row].slot);
+        map.is_bus = channels_[map.row].is_bus;
+      } else {
+        map.graph_slot = saved[QStringLiteral("graphSlot")].toInt(-1);
+        map.is_bus = saved[QStringLiteral("bus")].toBool();
+      }
+      if (map.cc >= 0) midi_maps_.push_back(map);
+    }
   }
   if (!midi_maps_.empty()) engine_.connect_all_midi_to_control();
 

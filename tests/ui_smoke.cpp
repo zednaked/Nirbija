@@ -299,6 +299,27 @@ int main(int argc, char* argv[]) {
       fail("clearing the maps did not unbind the control");
   }
 
+  // A toggle pad sends 127 then 0. Rec/Play have to flip on the press and
+  // ignore the off, or mapping a latching button punches in and straight
+  // back out.
+  {
+    const int fx = mixer.plugins()->rowFor(nirbija::PluginFormat::Internal,
+                                           "nirbija.fxpad");
+    if (fx >= 0 && mixer.addInsert(0, fx)) {
+      mixer.learnInsertParam(0, 0, 16, 0.0, 1.0);  // Hold
+      mixer.injectControl(40, 0, 127);
+      mixer.injectControl(40, 0, 0);  // latch off: must not undo the press
+      mixer.injectControl(40, 0, 127);
+      if (!mixer.fxPadHold(0, 0))
+        fail("a toggle pad did not latch Hold on");
+      mixer.injectControl(40, 0, 0);
+      mixer.injectControl(40, 0, 127);
+      if (mixer.fxPadHold(0, 0))
+        fail("a second press did not release Hold");
+      mixer.removeInsert(0, 0);
+    }
+  }
+
   // --- the picker's kind filter --------------------------------------------
   //
   // Runs against whatever is installed rather than a fixture, so it asserts the

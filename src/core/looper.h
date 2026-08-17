@@ -57,6 +57,13 @@ class LooperInstance : public PluginInstance {
     return record_request_.load(std::memory_order_relaxed);
   }
   bool playing() const { return play_request_.load(std::memory_order_relaxed); }
+  bool count_in() const { return count_in_.load(std::memory_order_relaxed); }
+  void set_count_in(bool on);
+  // Beats still to go before Rec starts, 0 if we are not counting.
+  int count_in_beats() const {
+    return count_beats_left_.load(std::memory_order_relaxed);
+  }
+  bool counting_in() const { return count_in_beats() > 0; }
   // True once anything has been written this pass, or a loop is already closed.
   // A silent take still counts: the editor has to show the empty waveform
   // rather than "nothing recorded".
@@ -123,6 +130,10 @@ class LooperInstance : public PluginInstance {
   // the end of the phrase — and then keep playing that growing tape.
   uint64_t grid_frames() const;
   void close_loop(uint64_t frames, Stage next);
+  void start_count_in();
+  void stop_count_in();
+  void begin_record();
+  void fire_count_click(bool downbeat);
   float tone_sample(int channel, float sample);
   // Walks play_pos_ around [start, end) after a step; true if it wrapped.
   bool wrap_play_pos(double start, double end, bool reverse);
@@ -168,6 +179,17 @@ class LooperInstance : public PluginInstance {
   std::atomic<bool> replace_{false};
   std::atomic<float> speed_{1.0f};      // 0.25..4, stacked on pitch
   std::atomic<float> feedback_{1.0f};   // 0..1, applied on overdub
+  std::atomic<bool> count_in_{false};
+  std::atomic<int> count_beats_left_{0};
+
+  // Count-in, audio thread only. Own clock so Rec can count with Play off.
+  bool counting_ = false;
+  double count_phase_ = 0.0;
+  int count_total_ = 0;
+  uint32_t click_remaining_ = 0;
+  uint32_t click_length_ = 0;
+  double click_phase_ = 0.0;
+  double click_step_ = 0.0;
 
   // One-pole lowpass on the wet loop, audio thread only.
   float tone_lpf_[2] = {0.0f, 0.0f};
