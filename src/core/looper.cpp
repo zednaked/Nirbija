@@ -532,6 +532,15 @@ std::vector<uint8_t> LooperInstance::save_state() const {
   }
 
   std::vector<uint8_t> out;
+  // Sized once. The caller collects these with the graph parked, so the master
+  // is silent for as long as this runs: a minute of stereo tape is 23 MB, and
+  // growing into it a doubling at a time would copy most of that several times
+  // over before the audio comes back.
+  // magic, quantize, three floats (gain, pitch, tone), six doubles (trim and
+  // fade either side, the rate, the beat count), then the frame count.
+  static constexpr size_t kHeaderBytes = 7 + sizeof(int) + 3 * sizeof(float) +
+                                         6 * sizeof(double) + sizeof(uint64_t);
+  out.reserve(kHeaderBytes + static_cast<size_t>(frames) * 2 * sizeof(float));
   out.insert(out.end(), kLoopMagic, kLoopMagic + 7);
   append_pod(out, quantize_.load(std::memory_order_relaxed));
   append_pod(out, gain_.load(std::memory_order_relaxed));

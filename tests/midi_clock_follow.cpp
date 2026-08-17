@@ -39,9 +39,19 @@ class ClockSender {
     port_ = jack_port_register(client_, "out", JACK_DEFAULT_MIDI_TYPE,
                                JackPortIsOutput, 0);
     if (port_ == nullptr) return false;
-    rate_ = jack_get_sample_rate(client_);
+    rate_.store(jack_get_sample_rate(client_), std::memory_order_relaxed);
+    jack_set_sample_rate_callback(client_, &ClockSender::rate_trampoline, this);
     jack_set_process_callback(client_, &ClockSender::trampoline, this);
-    return jack_activate(client_) == 0;
+    if (jack_activate(client_) != 0) return false;
+    // PipeWire's JACK layer publishes one rate before a client activates and
+    // can settle on another the moment it joins: with clock.allowed-rates
+    // spanning 44100 and 48000, this client saw 44100 at open and the graph
+    // was at 48000 by the time it was running. Reading the rate once, up
+    // front, then spaced the ticks by the old number while the engine had
+    // already followed the new one - which came back as a tempo out by
+    // exactly the ratio between the two.
+    rate_.store(jack_get_sample_rate(client_), std::memory_order_relaxed);
+    return true;
   }
 
   void stop() {
@@ -62,6 +72,11 @@ class ClockSender {
     return static_cast<ClockSender*>(arg)->process(frames);
   }
 
+  static int rate_trampoline(jack_nframes_t rate, void* arg) {
+    static_cast<ClockSender*>(arg)->rate_.store(rate, std::memory_order_relaxed);
+    return 0;
+  }
+
   int process(jack_nframes_t frames) {
     void* buffer = jack_port_get_buffer(port_, frames);
     jack_midi_clear_buffer(buffer);
@@ -74,7 +89,8 @@ class ClockSender {
     if (!ticking_.load(std::memory_order_acquire)) return 0;
 
     // Twenty-four ticks to the quarter note, placed on the frame they fall on.
-    const double frames_per_tick = rate_ / (kTempo / 60.0 * 24.0);
+    const double frames_per_tick =
+        rate_.load(std::memory_order_relaxed) / (kTempo / 60.0 * 24.0);
     for (jack_nframes_t i = 0; i < frames; ++i) {
       phase_ += 1.0;
       if (phase_ < frames_per_tick) continue;
@@ -87,7 +103,7 @@ class ClockSender {
 
   jack_client_t* client_ = nullptr;
   jack_port_t* port_ = nullptr;
-  double rate_ = 48000.0;
+  std::atomic<double> rate_{48000.0};
   double phase_ = 0.0;
   std::atomic<uint8_t> command_{0};
   std::atomic<bool> ticking_{false};

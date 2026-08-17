@@ -109,6 +109,7 @@ class FxPadInstance : public PluginInstance {
   float env_peak_ = 0.0f;
   float comp_gain_ = 1.0f;
   float vib_phase_ = 0.0f;
+  float talk_phase_ = 0.0f;
   double gate_phase_ = 0.0;
   uint32_t stutter_len_ = 0;
   uint32_t stutter_pos_ = 0;

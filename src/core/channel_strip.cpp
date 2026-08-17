@@ -75,23 +75,31 @@ void ChannelStrip::run_insert(PluginInstance* insert, float* const* buffers,
 void ChannelStrip::run_bypassed(PluginInstance* insert, float* const* buffers,
                                 uint32_t frames,
                                 const TransportInfo* transport) {
-  const bool can_stash =
-      static_cast<int>(output_cache_.size()) >= channel_count_ &&
-      !output_cache_.empty() && frames <= output_cache_[0].size();
-  if (can_stash) {
-    for (int ch = 0; ch < channel_count_; ++ch)
-      std::copy_n(buffers[ch], frames, output_cache_[ch].data());
-  }
   if (transport != nullptr) insert->set_transport(*transport);
   for (size_t e = 0; e < midi_chain_count_; ++e)
     insert->queue_midi(midi_chain_[e]);
-  insert->process(buffers, buffers, frames);
-  MidiEvent dump[32];
-  while (insert->take_midi_output(dump, 32) == 32) {
-  }
+
+  // Running the insert is only safe if the dry can be put back over whatever
+  // it writes. Without room to stash it - a block wider than the cache was
+  // sized for - the insert does not get to run at all, because processing and
+  // then failing to restore is exactly the audio leak a bypass is meant to
+  // stop.
+  const bool can_stash =
+      !output_cache_.empty() &&
+      static_cast<int>(output_cache_.size()) >= channel_count_ &&
+      frames <= output_cache_[0].size();
   if (can_stash) {
     for (int ch = 0; ch < channel_count_; ++ch)
+      std::copy_n(buffers[ch], frames, output_cache_[ch].data());
+    insert->process(buffers, buffers, frames);
+    for (int ch = 0; ch < channel_count_; ++ch)
       std::copy_n(output_cache_[ch].data(), frames, buffers[ch]);
+  }
+
+  // Either way the queued events have to come back out, or a bypassed plugin
+  // sits on a note until it is switched back in.
+  MidiEvent dump[32];
+  while (insert->take_midi_output(dump, 32) == 32) {
   }
 }
 

@@ -644,13 +644,13 @@ bool MixerModel::readSession(const QString& target) {
   return true;
 }
 
-void MixerModel::markDirty() {
+void MixerModel::markDirty(bool schedule_save) {
   if (restoring_) return;
   if (!dirty_flag_) {
     dirty_flag_ = true;
     emit dirtyChanged();
   }
-  autosave_timer_.start();
+  if (schedule_save) autosave_timer_.start();
 }
 
 }  // namespace nirbija

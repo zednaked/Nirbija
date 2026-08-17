@@ -420,7 +420,12 @@ class MixerModel : public QAbstractListModel {
   void refreshRouting(int row);
 
   // Coalesces the writes: a fader drag would otherwise save on every frame.
-  void markDirty();
+  // `schedule_save` false marks the session modified without arming the
+  // autosave - for changes that have to survive the session but are not worth
+  // a write of their own, because collecting the plugin states parks the graph
+  // and the master goes quiet for the two blocks that takes. The destructor
+  // saves unconditionally, so nothing marked this way is lost.
+  void markDirty(bool schedule_save = true);
   void claimSession();
   void post(EngineCommand::Kind kind, int row, float value);
 

@@ -105,6 +105,7 @@ bool FxPadInstance::activate(double sample_rate, uint32_t) {
   env_peak_ = 0.0f;
   comp_gain_ = 1.0f;
   vib_phase_ = 0.0f;
+  talk_phase_ = 0.0f;
   gate_phase_ = 0.0;
   stutter_len_ = 0;
   stutter_pos_ = 0;
@@ -267,14 +268,22 @@ void FxPadInstance::process_sample(float* left, float* right) {
     for (int ch = 0; ch < 2; ++ch) s[ch] = wet(Cutter, s[ch], s[ch] * g);
   }
 
-  // Reverse: play the last second backwards.
+  // Reverse: play the last second backwards. The tap is a distance behind the
+  // write head, and that head moves forward a sample per sample - so the
+  // distance has to grow by two for the point actually read to walk back by
+  // one. Growing it by one held the read index still and froze the pad on a
+  // single sample.
   if (mix_[Reverse] > 1e-4f) {
     const size_t n = reverse_[0].data.size();
-    reverse_play_ = (reverse_play_ + 1) % n;
     for (int ch = 0; ch < 2; ++ch) {
       reverse_[ch].push(s[ch]);
       s[ch] = wet(Reverse, s[ch], reverse_[ch].tap(reverse_play_));
     }
+    reverse_play_ += 2;
+    // The far end of the buffer is the oldest sample there is; past it the
+    // sweep would read what this pass has already overwritten. Drop back to
+    // the head and run the second again, the way a reverse pedal loops.
+    if (reverse_play_ + 1 >= n) reverse_play_ = 1;
   } else {
     for (int ch = 0; ch < 2; ++ch) reverse_[ch].push(s[ch]);
   }
@@ -303,9 +312,14 @@ void FxPadInstance::process_sample(float* left, float* right) {
     for (int ch = 0; ch < 2; ++ch) delay_[ch].push(s[ch]);
   }
 
-  // Talkbox: three formants, vowel swept slowly.
+  // Talkbox: three formants, vowel swept slowly. Its own accumulator, not a
+  // scaled read of the flanger's: that one is only advanced inside the
+  // Vibroflange branch below, so the vowel sat frozen unless both pads
+  // happened to be down, and the 0.15 scaling made it jump rather than turn
+  // over every time the flanger's phase wrapped.
+  talk_phase_ = wrap01(talk_phase_ + 0.0825f / sr);
   if (mix_[Talkbox] > 1e-4f) {
-    const float vowel = 0.5f + 0.5f * std::sin(2.0f * kPi * vib_phase_ * 0.15f);
+    const float vowel = 0.5f + 0.5f * std::sin(2.0f * kPi * talk_phase_);
     const float f1 = (400.0f + 400.0f * vowel) / sr;
     const float f2 = (800.0f + 1400.0f * vowel) / sr;
     const float f3 = 2400.0f / sr;

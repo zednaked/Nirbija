@@ -1419,7 +1419,10 @@ void MixerModel::setFxPad(int row, int slot, int pad, bool on) {
   auto* fx = dynamic_cast<FxPadInstance*>(insertFor(row, slot));
   if (fx == nullptr) return;
   fx->set_pad(pad, on);
-  markDirty();
+  // Which pads are down still belongs to the session, but a pad is pressed
+  // mid-take: arming the autosave here would park the graph a second later
+  // and drop a hole in the very performance the pad was hit for.
+  markDirty(false);
 }
 
 bool MixerModel::fxPadOn(int row, int slot, int pad) const {
@@ -1431,7 +1434,7 @@ void MixerModel::setFxPadHold(int row, int slot, bool on) {
   auto* fx = dynamic_cast<FxPadInstance*>(insertFor(row, slot));
   if (fx == nullptr) return;
   fx->set_hold(on);
-  markDirty();
+  markDirty(false);
 }
 
 bool MixerModel::fxPadHold(int row, int slot) const {
