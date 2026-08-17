@@ -1502,6 +1502,21 @@ void MixerModel::redoLooper(int row, int slot) {
   markDirty();
 }
 
+void MixerModel::multiplyLooper(int row, int slot) {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  if (looper == nullptr || !looper->can_multiply()) return;
+  engine_.park_graph();
+  looper->capture_undo();
+  looper->multiply();
+  engine_.unpark_graph();
+  markDirty();
+}
+
+bool MixerModel::looperCanMultiply(int row, int slot) const {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  return looper != nullptr && looper->can_multiply();
+}
+
 QVariantList MixerModel::looperWaveform(int row, int slot, int buckets) const {
   QVariantList out;
   auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));

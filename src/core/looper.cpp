@@ -15,6 +15,11 @@ enum Params : uint32_t {
   kGain = 4,
   kPitch = 5,
   kTone = 6,
+  kReverse = 7,
+  kFeedback = 8,
+  kReplace = 9,
+  kOnce = 10,
+  kSpeed = 11,
 };
 
 // The longest loop kept: a minute of stereo. Sized once, up front, because the
@@ -224,7 +229,10 @@ void LooperInstance::apply_requests(uint32_t frames) {
         start = 0;
         end = length;
       }
-      play_pos_ = static_cast<double>(start);
+      const bool reverse = reverse_.load(std::memory_order_relaxed);
+      play_pos_ = reverse && end > start
+                      ? static_cast<double>(end) - 1.0
+                      : static_cast<double>(start);
       stage_ = Stage::Overdubbing;
     }
   } else {
@@ -254,12 +262,37 @@ void LooperInstance::apply_requests(uint32_t frames) {
   }
 }
 
+bool LooperInstance::wrap_play_pos(double start, double end, bool reverse) {
+  const double span = end - start;
+  if (span <= 0.0) {
+    play_pos_ = start;
+    return false;
+  }
+  if (!reverse) {
+    if (play_pos_ < end) return false;
+    play_pos_ = start + std::fmod(play_pos_ - start, span);
+    return true;
+  }
+  if (play_pos_ >= start) return false;
+  play_pos_ = end - std::fmod(start - play_pos_, span);
+  if (play_pos_ >= end) play_pos_ = end - 1.0 / std::max(sample_rate_, 1.0);
+  if (play_pos_ < start) play_pos_ = start;
+  return true;
+}
+
 void LooperInstance::process(const float* const* inputs, float* const* outputs,
                              uint32_t frames) {
   apply_requests(frames);
 
   const bool play = play_request_.load(std::memory_order_relaxed);
   const float gain = gain_.load(std::memory_order_relaxed);
+  const bool reverse = reverse_.load(std::memory_order_relaxed);
+  const bool replace = replace_.load(std::memory_order_relaxed);
+  const bool once = once_.load(std::memory_order_relaxed);
+  const float feedback =
+      std::clamp(feedback_.load(std::memory_order_relaxed), 0.0f, 1.0f);
+  const float speed =
+      std::clamp(speed_.load(std::memory_order_relaxed), 0.25f, 4.0f);
   const int width = std::min(channels_, 2);
 
   for (uint32_t i = 0; i < frames; ++i) {
@@ -295,18 +328,25 @@ void LooperInstance::process(const float* const* inputs, float* const* outputs,
             start = 0;
             end = length;
           }
-          if (play_pos_ < static_cast<double>(start) ||
-              play_pos_ >= static_cast<double>(end))
-            play_pos_ = static_cast<double>(start);
-          if (play_pos_ >= static_cast<double>(length)) break;
+          const double start_d = static_cast<double>(start);
+          const double end_d = static_cast<double>(end);
+          if (play_pos_ < start_d || play_pos_ >= end_d)
+            play_pos_ = reverse && end > start ? end_d - 1.0 : start_d;
+          if (play_pos_ >= static_cast<double>(length) || play_pos_ < 0.0)
+            break;
 
           const uint64_t i0 = static_cast<uint64_t>(play_pos_);
           const uint64_t i1 = (i0 + 1 >= end) ? start : i0 + 1;
           const float frac = static_cast<float>(play_pos_ - static_cast<double>(i0));
 
           if (stage_ == Stage::Overdubbing) {
-            buffer_[i0 * 2] += in[0];
-            buffer_[i0 * 2 + 1] += in[1];
+            if (replace) {
+              buffer_[i0 * 2] = in[0];
+              buffer_[i0 * 2 + 1] = in[1];
+            } else {
+              buffer_[i0 * 2] = buffer_[i0 * 2] * feedback + in[0];
+              buffer_[i0 * 2 + 1] = buffer_[i0 * 2 + 1] * feedback + in[1];
+            }
           }
           if (play) {
             const float env = envelope_at(i0, start, end);
@@ -319,15 +359,13 @@ void LooperInstance::process(const float* const* inputs, float* const* outputs,
           }
           const float pitch = std::clamp(
               pitch_.load(std::memory_order_relaxed), -12.0f, 12.0f);
-          const double rate = std::pow(2.0, static_cast<double>(pitch) / 12.0);
-          play_pos_ += rate;
-          if (play_pos_ >= static_cast<double>(end)) {
-            const double span = static_cast<double>(end - start);
-            if (span > 0.0)
-              play_pos_ = static_cast<double>(start) +
-                          std::fmod(play_pos_ - static_cast<double>(start), span);
-            else
-              play_pos_ = static_cast<double>(start);
+          const double rate =
+              std::pow(2.0, static_cast<double>(pitch) / 12.0) *
+              static_cast<double>(speed);
+          play_pos_ += reverse ? -rate : rate;
+          if (wrap_play_pos(start_d, end_d, reverse) && once) {
+            play_request_.store(false, std::memory_order_relaxed);
+            play_pos_ = reverse && end > start ? end_d - 1.0 : start_d;
           }
         }
         break;
@@ -448,6 +486,11 @@ std::vector<ParameterInfo> LooperInstance::parameters() const {
       {kGain, "Loop gain", 0.0, 2.0, 1.0},
       {kPitch, "Pitch (semitones)", -12.0, 12.0, 0.0},
       {kTone, "Tone", 0.0, 1.0, 1.0},
+      {kReverse, "Reverse", 0.0, 1.0, 0.0},
+      {kFeedback, "Overdub feedback", 0.0, 1.0, 1.0},
+      {kReplace, "Replace", 0.0, 1.0, 0.0},
+      {kOnce, "Play once", 0.0, 1.0, 0.0},
+      {kSpeed, "Speed", 0.25, 4.0, 1.0},
   };
 }
 
@@ -460,6 +503,11 @@ double LooperInstance::parameter_value(uint32_t id) const {
     case kGain: return gain_.load(std::memory_order_relaxed);
     case kPitch: return pitch_.load(std::memory_order_relaxed);
     case kTone: return tone_.load(std::memory_order_relaxed);
+    case kReverse: return reverse_.load(std::memory_order_relaxed) ? 1.0 : 0.0;
+    case kFeedback: return feedback_.load(std::memory_order_relaxed);
+    case kReplace: return replace_.load(std::memory_order_relaxed) ? 1.0 : 0.0;
+    case kOnce: return once_.load(std::memory_order_relaxed) ? 1.0 : 0.0;
+    case kSpeed: return speed_.load(std::memory_order_relaxed);
     default: return 0.0;
   }
 }
@@ -491,6 +539,23 @@ void LooperInstance::set_parameter(uint32_t id, double value) {
       tone_.store(static_cast<float>(std::clamp(value, 0.0, 1.0)),
                   std::memory_order_relaxed);
       break;
+    case kReverse:
+      reverse_.store(value >= 0.5, std::memory_order_relaxed);
+      break;
+    case kFeedback:
+      feedback_.store(static_cast<float>(std::clamp(value, 0.0, 1.0)),
+                      std::memory_order_relaxed);
+      break;
+    case kReplace:
+      replace_.store(value >= 0.5, std::memory_order_relaxed);
+      break;
+    case kOnce:
+      once_.store(value >= 0.5, std::memory_order_relaxed);
+      break;
+    case kSpeed:
+      speed_.store(static_cast<float>(std::clamp(value, 0.25, 4.0)),
+                   std::memory_order_relaxed);
+      break;
     default:
       break;
   }
@@ -498,7 +563,8 @@ void LooperInstance::set_parameter(uint32_t id, double value) {
 
 namespace {
 
-constexpr char kLoopMagic[] = "NLOOP1\n";
+constexpr char kLoopMagic1[] = "NLOOP1\n";
+constexpr char kLoopMagic2[] = "NLOOP2\n";
 
 template <typename T>
 void append_pod(std::vector<uint8_t>& out, const T& value) {
@@ -536,12 +602,11 @@ std::vector<uint8_t> LooperInstance::save_state() const {
   // is silent for as long as this runs: a minute of stereo tape is 23 MB, and
   // growing into it a doubling at a time would copy most of that several times
   // over before the audio comes back.
-  // magic, quantize, three floats (gain, pitch, tone), six doubles (trim and
-  // fade either side, the rate, the beat count), then the frame count.
-  static constexpr size_t kHeaderBytes = 7 + sizeof(int) + 3 * sizeof(float) +
-                                         6 * sizeof(double) + sizeof(uint64_t);
+  static constexpr size_t kHeaderBytes =
+      7 + sizeof(int) + 5 * sizeof(float) + 6 * sizeof(double) +
+      3 * sizeof(int) + sizeof(uint64_t);
   out.reserve(kHeaderBytes + static_cast<size_t>(frames) * 2 * sizeof(float));
-  out.insert(out.end(), kLoopMagic, kLoopMagic + 7);
+  out.insert(out.end(), kLoopMagic2, kLoopMagic2 + 7);
   append_pod(out, quantize_.load(std::memory_order_relaxed));
   append_pod(out, gain_.load(std::memory_order_relaxed));
   append_pod(out, trim_start_.load(std::memory_order_relaxed));
@@ -553,6 +618,14 @@ std::vector<uint8_t> LooperInstance::save_state() const {
   append_pod(out, sample_rate_);
   append_pod(out, beats);
   append_pod(out, frames);
+  const int reverse = reverse_.load(std::memory_order_relaxed) ? 1 : 0;
+  const int once = once_.load(std::memory_order_relaxed) ? 1 : 0;
+  const int replace = replace_.load(std::memory_order_relaxed) ? 1 : 0;
+  append_pod(out, reverse);
+  append_pod(out, once);
+  append_pod(out, replace);
+  append_pod(out, speed_.load(std::memory_order_relaxed));
+  append_pod(out, feedback_.load(std::memory_order_relaxed));
   if (frames > 0 && buffer_.size() >= 2) {
     const uint64_t copied = std::min(have, frames);
     if (copied > 0 && buffer_.size() >= copied * 2) {
@@ -568,8 +641,11 @@ std::vector<uint8_t> LooperInstance::save_state() const {
 }
 
 bool LooperInstance::load_state(const std::vector<uint8_t>& blob) {
-  if (blob.size() >= 7 &&
-      std::memcmp(blob.data(), kLoopMagic, 7) == 0) {
+  const bool v2 = blob.size() >= 7 &&
+                  std::memcmp(blob.data(), kLoopMagic2, 7) == 0;
+  const bool v1 = blob.size() >= 7 &&
+                  std::memcmp(blob.data(), kLoopMagic1, 7) == 0;
+  if (v1 || v2) {
     const uint8_t* cursor = blob.data() + 7;
     const uint8_t* end = blob.data() + blob.size();
     int quantize = 0;
@@ -586,12 +662,25 @@ bool LooperInstance::load_state(const std::vector<uint8_t>& blob) {
         !read_pod(cursor, end, &length))
       return false;
 
+    int reverse = 0, once = 0, replace = 0;
+    float speed = 1.0f, feedback = 1.0f;
+    if (v2 &&
+        (!read_pod(cursor, end, &reverse) || !read_pod(cursor, end, &once) ||
+         !read_pod(cursor, end, &replace) || !read_pod(cursor, end, &speed) ||
+         !read_pod(cursor, end, &feedback)))
+      return false;
+
     set_parameter(kQuantize, quantize);
     set_parameter(kGain, gain);
     set_trim(trim_start, trim_end);
     set_fades(fade_in, fade_out);
     set_parameter(kPitch, pitch);
     set_parameter(kTone, tone);
+    set_parameter(kReverse, reverse);
+    set_parameter(kOnce, once);
+    set_parameter(kReplace, replace);
+    set_parameter(kSpeed, speed);
+    set_parameter(kFeedback, feedback);
 
     if (buffer_.empty())
       activate(sample_rate_ > 0.0 ? sample_rate_ : (saved_rate > 0.0 ? saved_rate
@@ -733,6 +822,21 @@ void LooperInstance::undo() {
 
 void LooperInstance::redo() {
   if (can_redo()) swap_undo();
+}
+
+bool LooperInstance::can_multiply() const {
+  const uint64_t n = length_.load(std::memory_order_relaxed);
+  return n > 0 && n <= capacity_frames_ / 2;
+}
+
+void LooperInstance::multiply() {
+  const uint64_t n = length_.load(std::memory_order_relaxed);
+  if (n == 0 || n > capacity_frames_ / 2) return;
+  if (buffer_.size() < n * 4) return;
+  std::memcpy(buffer_.data() + n * 2, buffer_.data(), n * 2 * sizeof(float));
+  length_.store(n * 2, std::memory_order_relaxed);
+  loop_beats_.store(loop_beats_.load(std::memory_order_relaxed) * 2.0,
+                    std::memory_order_relaxed);
 }
 
 }  // namespace nirbija

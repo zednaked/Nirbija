@@ -237,6 +237,8 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE bool looperCanRedo(int row, int slot) const;
   Q_INVOKABLE void undoLooper(int row, int slot);
   Q_INVOKABLE void redoLooper(int row, int slot);
+  Q_INVOKABLE void multiplyLooper(int row, int slot);
+  Q_INVOKABLE bool looperCanMultiply(int row, int slot) const;
 
   // One peak per bucket across the closed loop, for drawing a waveform - see
   // LooperInstance::waveform() for what "closed" and "peak" mean here.

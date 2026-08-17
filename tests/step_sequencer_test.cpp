@@ -338,6 +338,214 @@ int main() {
     damaged.load_state(half);
   }
 
+  // --- swing leans the off-beats late ---------------------------------------
+  {
+    nirbija::StepSequencerInstance seq;
+    seq.activate(kRate, kBlock);
+    for (int i = 0; i < nirbija::StepSequencerInstance::kSteps; ++i)
+      seq.set_parameter(80 + i, 1.0);
+    seq.set_parameter(5, 1.0);  // full swing: odd sixteenths +1/32
+
+    const std::vector<Note> notes =
+        run(seq, static_cast<int>(std::ceil(1.0 / block_beats)));
+    std::vector<double> beats;
+    for (const Note& note : notes)
+      if (note.on) beats.push_back(note.beat);
+    if (beats.size() < 4) {
+      fail("swing produced too few notes");
+    } else {
+      const double tol = block_beats;
+      if (std::abs(beats[0] - 0.0) > tol)
+        fail("swung step 0 left the grid");
+      if (std::abs(beats[1] - 0.375) > tol)
+        fail("swung step 1 landed on " + std::to_string(beats[1]) +
+             ", wanted ~0.375");
+    }
+  }
+
+  // --- reverse plays the last step first ------------------------------------
+  {
+    nirbija::StepSequencerInstance seq;
+    seq.activate(kRate, kBlock);
+    for (int i = 0; i < nirbija::StepSequencerInstance::kSteps; ++i) {
+      seq.set_parameter(80 + i, 1.0);
+      seq.set_parameter(16 + i, 40.0 + i);
+    }
+    seq.set_parameter(6, 1.0);  // reverse
+    const std::vector<Note> notes =
+        run(seq, static_cast<int>(std::ceil(1.0 / block_beats)));
+    int first = -1;
+    for (const Note& note : notes)
+      if (note.on) {
+        first = note.pitch;
+        break;
+      }
+    expect(first == 55, "reverse started on " + std::to_string(first) +
+                            ", wanted the last step (55)");
+  }
+
+  // --- pendulum turns without repeating the end -----------------------------
+  {
+    nirbija::StepSequencerInstance seq;
+    seq.activate(kRate, kBlock);
+    seq.set_parameter(1, 4.0);
+    for (int i = 0; i < 4; ++i) {
+      seq.set_parameter(80 + i, 1.0);
+      seq.set_parameter(16 + i, 40.0 + i);
+    }
+    seq.set_parameter(6, 2.0);  // pendulum
+    const std::vector<Note> notes =
+        run(seq, static_cast<int>(std::ceil(1.5 / block_beats)));
+    std::vector<int> pitches;
+    for (const Note& note : notes)
+      if (note.on) pitches.push_back(note.pitch);
+    const int want[] = {40, 41, 42, 43, 42, 41};
+    if (pitches.size() < 6) {
+      fail("pendulum produced too few notes");
+    } else {
+      for (int i = 0; i < 6; ++i)
+        if (pitches[i] != want[i])
+          fail("pendulum step " + std::to_string(i) + " was " +
+               std::to_string(pitches[i]));
+    }
+  }
+
+  // --- probability 0 never fires --------------------------------------------
+  {
+    nirbija::StepSequencerInstance seq;
+    seq.activate(kRate, kBlock);
+    for (int i = 0; i < nirbija::StepSequencerInstance::kSteps; ++i) {
+      seq.set_parameter(80 + i, 1.0);
+      seq.set_parameter(112 + i, 0.0);
+    }
+    const std::vector<Note> notes =
+        run(seq, static_cast<int>(std::ceil(4.0 / block_beats)));
+    int ons = 0;
+    for (const Note& note : notes)
+      if (note.on) ++ons;
+    expect(ons == 0, "probability 0 still produced notes");
+  }
+
+  // --- accent lifts the velocity --------------------------------------------
+  {
+    nirbija::StepSequencerInstance seq;
+    seq.activate(kRate, kBlock);
+    for (int i = 0; i < nirbija::StepSequencerInstance::kSteps; ++i)
+      seq.set_parameter(80 + i, 0.0);
+    seq.set_parameter(80 + 0, 1.0);
+    seq.set_parameter(48 + 0, 100.0);
+    seq.set_parameter(144 + 0, 1.0);
+    const std::vector<Note> notes =
+        run(seq, static_cast<int>(std::ceil(1.0 / block_beats)));
+    bool lifted = false;
+    for (const Note& note : notes)
+      if (note.on && note.velocity >= 120) lifted = true;
+    expect(lifted, "accent did not raise the velocity");
+  }
+
+  // --- a tie holds the same pitch without retriggering ----------------------
+  {
+    nirbija::StepSequencerInstance seq;
+    seq.activate(kRate, kBlock);
+    for (int i = 0; i < nirbija::StepSequencerInstance::kSteps; ++i) {
+      seq.set_parameter(80 + i, 1.0);
+      seq.set_parameter(16 + i, 60.0);
+      seq.set_parameter(176 + i, 1.0);
+    }
+    seq.set_parameter(2, 1.0);
+    const std::vector<Note> notes =
+        run(seq, static_cast<int>(std::ceil(4.0 / block_beats)));
+    int ons = 0;
+    for (const Note& note : notes)
+      if (note.on) ++ons;
+    expect(ons == 1, "a fully tied bar retriggered, got " +
+                         std::to_string(ons) + " note-ons");
+  }
+
+  // --- euclid 8 in 16 is every other step -----------------------------------
+  {
+    nirbija::StepSequencerInstance seq;
+    seq.activate(kRate, kBlock);
+    seq.set_parameter(14, 8.0);
+    for (int i = 0; i < 16; ++i) {
+      const bool on = seq.parameter_value(80 + i) >= 0.5;
+      const bool want = (i % 2) == 0;
+      if (on != want)
+        fail("euclid 8/16 step " + std::to_string(i) +
+             (on ? " was on" : " was off"));
+    }
+  }
+
+  // --- nudge slides the pattern ---------------------------------------------
+  {
+    nirbija::StepSequencerInstance seq;
+    seq.activate(kRate, kBlock);
+    seq.set_parameter(16 + 0, 50.0);
+    seq.set_parameter(10, 1.0);  // nudge right
+    if (seq.parameter_value(16 + 1) != 50.0)
+      fail("nudge right did not move step 0 onto step 1");
+  }
+
+  // --- the metronome grid is enough, Play can be off ------------------------
+  {
+    nirbija::StepSequencerInstance seq;
+    seq.activate(kRate, kBlock);
+    for (int i = 0; i < nirbija::StepSequencerInstance::kSteps; ++i)
+      seq.set_parameter(80 + i, 1.0);
+
+    const double block_beats_local = kBlock / kRate * kTempo / 60.0;
+    int ons = 0;
+    nirbija::MidiEvent buffer[64];
+    const int blocks = static_cast<int>(std::ceil(1.0 / block_beats_local));
+    for (int i = 0; i < blocks; ++i) {
+      nirbija::TransportInfo transport;
+      transport.playing = false;
+      transport.rolling = true;
+      transport.tempo_bpm = kTempo;
+      transport.beats = i * block_beats_local;
+      seq.set_transport(transport);
+      seq.process(nullptr, nullptr, kBlock);
+      const size_t count = seq.take_midi_output(buffer, 64);
+      for (size_t e = 0; e < count; ++e)
+        if ((buffer[e].data[0] & 0xf0) == 0x90 && buffer[e].data[2] > 0) ++ons;
+    }
+    expect(ons > 0, "rolling with Play off produced no notes");
+  }
+
+  // --- new fields survive a round trip; an old blob still loads -------------
+  {
+    nirbija::StepSequencerInstance seq;
+    seq.activate(kRate, kBlock);
+    seq.set_parameter(5, 0.4);
+    seq.set_parameter(6, 2.0);
+    seq.set_parameter(112 + 2, 0.25);
+    seq.set_parameter(144 + 2, 1.0);
+    seq.set_parameter(176 + 2, 1.0);
+    const auto blob = seq.save_state();
+
+    nirbija::StepSequencerInstance restored;
+    restored.activate(kRate, kBlock);
+    if (!restored.load_state(blob)) fail("new state blob was refused");
+    if (std::fabs(restored.parameter_value(5) - 0.4) > 1e-4)
+      fail("swing did not survive save");
+    if (restored.parameter_value(6) != 2.0) fail("direction did not survive save");
+    if (std::fabs(restored.parameter_value(112 + 2) - 0.25) > 1e-4)
+      fail("probability did not survive save");
+    if (restored.parameter_value(144 + 2) < 0.5) fail("accent did not survive save");
+    if (restored.parameter_value(176 + 2) < 0.5) fail("tie did not survive save");
+
+    const std::string old = "division 2\nlength 16\ngate 0.5000\ntranspose 0\n"
+                            "channel 0\nstep 60 100 1\n";
+    nirbija::StepSequencerInstance legacy;
+    legacy.activate(kRate, kBlock);
+    if (!legacy.load_state(std::vector<uint8_t>(old.begin(), old.end())))
+      fail("a pre-swing state blob was refused");
+    if (legacy.parameter_value(16 + 0) != 60.0)
+      fail("legacy step note did not load");
+    if (legacy.parameter_value(112 + 0) < 0.99)
+      fail("a legacy step did not default to chance 1");
+  }
+
   if (failures > 0) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return 1;

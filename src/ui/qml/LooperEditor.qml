@@ -40,13 +40,26 @@ Popup {
     property bool hasLoop: false
     property bool canUndo: false
     property bool canRedo: false
+    property bool canMultiply: false
+    property bool reverse: false
+    property bool once: false
+    property bool replace: false
+    property real speed: 1
+    property real feedback: 1
     readonly property string stageLabel:
-        root.recording ? (root.hasLoop ? qsTr("overdubbing…") : qsTr("recording…"))
-        : !root.hasAudio ? qsTr("empty")
-        : root.playing ? qsTr("playing") : qsTr("stopped")
+        root.recording
+            ? (root.hasLoop
+                   ? (root.replace ? qsTr("replacing…") : qsTr("overdubbing…"))
+                   : qsTr("recording…"))
+            : !root.hasAudio ? qsTr("empty")
+            : !root.playing ? qsTr("stopped")
+            : root.reverse && root.once ? qsTr("reverse once")
+            : root.reverse ? qsTr("reverse")
+            : root.once ? qsTr("once")
+            : qsTr("playing")
 
     width: Px.px(560)
-    height: Px.px(430)
+    height: Px.px(518)
     modal: true
     anchors.centerIn: Overlay.overlay
     padding: Skin.spacingL
@@ -138,12 +151,18 @@ Popup {
         root.hasLoop = Mixer.looperLoopClosed(root.targetRow, root.targetSlot)
         root.canUndo = Mixer.looperCanUndo(root.targetRow, root.targetSlot)
         root.canRedo = Mixer.looperCanRedo(root.targetRow, root.targetSlot)
+        root.canMultiply = Mixer.looperCanMultiply(root.targetRow, root.targetSlot)
         root.loopBeats = Mixer.looperBeats(root.targetRow, root.targetSlot)
         for (const p of Mixer.insertParameters(root.targetRow, root.targetSlot)) {
             if (p.id === 3) root.quantize = p.value
             else if (p.id === 4) root.gain = p.value
             else if (p.id === 5) root.pitch = p.value
             else if (p.id === 6) root.tone = p.value
+            else if (p.id === 7) root.reverse = p.value >= 0.5
+            else if (p.id === 8) root.feedback = p.value
+            else if (p.id === 9) root.replace = p.value >= 0.5
+            else if (p.id === 10) root.once = p.value >= 0.5
+            else if (p.id === 11) root.speed = p.value
         }
     }
 
@@ -538,7 +557,7 @@ Popup {
                         ? qsTr("%1 beats").arg(root.loopBeats.toFixed(1))
                         : ""
                 return length.length > 0
-                    ? qsTr("Trim and fade the handles. This take is %1.")
+                    ? qsTr("This take is %1. Trim the tall handles, fade the round ones.")
                           .arg(length)
                     : qsTr("Drag the tall handles to trim, the round ones just inside them to fade in and out.")
             }
@@ -589,7 +608,97 @@ Popup {
 
         RowLayout {
             Layout.fillWidth: true
+            spacing: Skin.spacingXS
+
+            StripButton {
+                Layout.preferredWidth: Px.px(56)
+                label: qsTr("Rev")
+                active: root.reverse
+                activeColor: Skin.solo
+                tip: qsTr("Play the loop backwards. Rec on top writes in that direction too.")
+                onClicked: {
+                    root.reverse = !root.reverse
+                    Mixer.setInsertParameter(root.targetRow, root.targetSlot,
+                                             7, root.reverse ? 1 : 0)
+                }
+            }
+            StripButton {
+                Layout.preferredWidth: Px.px(56)
+                label: qsTr("Once")
+                active: root.once
+                tip: qsTr("Stop after this pass. Reverse once walks back to the start and rests.")
+                onClicked: {
+                    root.once = !root.once
+                    Mixer.setInsertParameter(root.targetRow, root.targetSlot,
+                                             10, root.once ? 1 : 0)
+                }
+            }
+            StripButton {
+                Layout.preferredWidth: Px.px(64)
+                label: qsTr("Replace")
+                active: root.replace
+                tip: qsTr("Next Rec overwrites the tape instead of stacking a layer.")
+                onClicked: {
+                    root.replace = !root.replace
+                    Mixer.setInsertParameter(root.targetRow, root.targetSlot,
+                                             9, root.replace ? 1 : 0)
+                }
+            }
+            StripButton {
+                Layout.preferredWidth: Px.px(56)
+                label: qsTr("Mult")
+                enabled: root.canMultiply
+                tip: qsTr("Double the loop: a copy of itself, so the next take can fill the new half.")
+                onClicked: {
+                    Mixer.multiplyLooper(root.targetRow, root.targetSlot)
+                    root.refreshAll()
+                }
+            }
+
+            Item { Layout.fillWidth: true }
+
+            component SpeedButton: StripButton {
+                required property real forValue
+                Layout.preferredWidth: Px.px(44)
+                active: Math.abs(root.speed - forValue) < 0.01
+                onClicked: {
+                    root.speed = forValue
+                    Mixer.setInsertParameter(root.targetRow, root.targetSlot,
+                                             11, forValue)
+                }
+            }
+            SpeedButton {
+                forValue: 0.5
+                label: qsTr("½")
+                tip: qsTr("Half speed. An octave down, twice as long to walk the tape.")
+            }
+            SpeedButton {
+                forValue: 1
+                label: qsTr("×1")
+                tip: qsTr("Original speed. Pitch still sits on top.")
+            }
+            SpeedButton {
+                forValue: 2
+                label: qsTr("×2")
+                tip: qsTr("Double speed. An octave up, the cycle flies.")
+            }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
             spacing: Skin.spacing
+
+            ValueTrack {
+                Layout.fillWidth: true
+                label: qsTr("Feedback")
+                valueText: Math.round(root.feedback * 100) + "%"
+                value: root.feedback
+                tip: qsTr("How much of the old layer survives an overdub. 100% stacks forever; 0% is a one-shot replace.")
+                onMoved: v => {
+                    root.feedback = v
+                    Mixer.setInsertParameter(root.targetRow, root.targetSlot, 8, v)
+                }
+            }
 
             ValueTrack {
                 Layout.fillWidth: true

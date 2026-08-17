@@ -100,6 +100,12 @@ class LooperInstance : public PluginInstance {
   void undo();
   void redo();
 
+  // Doubles the tape by appending a copy of itself, so the next pass can
+  // write into the new half. UI thread, graph parked — the copy is the
+  // loop, not something process() can afford.
+  bool can_multiply() const;
+  void multiply();
+
  private:
   // What the audio thread is doing right now with the loop.
   enum class Stage { Empty, Defining, Playing, Overdubbing, Stopped };
@@ -112,6 +118,8 @@ class LooperInstance : public PluginInstance {
   double unit_beats() const;
   uint64_t snap_length(uint64_t written) const;
   float tone_sample(int channel, float sample);
+  // Walks play_pos_ around [start, end) after a step; true if it wrapped.
+  bool wrap_play_pos(double start, double end, bool reverse);
   // Stereo frames currently on the tape: the closed length, or the open
   // take if the loop has not been punched out yet.
   uint64_t tape_frames() const;
@@ -149,6 +157,11 @@ class LooperInstance : public PluginInstance {
   std::atomic<float> gain_{1.0f};
   std::atomic<float> pitch_{0.0f};  // semitones, -12..12
   std::atomic<float> tone_{1.0f};   // 0 dark .. 1 open
+  std::atomic<bool> reverse_{false};
+  std::atomic<bool> once_{false};
+  std::atomic<bool> replace_{false};
+  std::atomic<float> speed_{1.0f};      // 0.25..4, stacked on pitch
+  std::atomic<float> feedback_{1.0f};   // 0..1, applied on overdub
 
   // One-pole lowpass on the wet loop, audio thread only.
   float tone_lpf_[2] = {0.0f, 0.0f};

@@ -415,6 +415,140 @@ int main() {
     if (!layer.loop_closed()) fail("undo did not restore a cleared loop");
   }
 
+  {
+    nirbija::LooperInstance fx;
+    fx.set_channel_layout(2);
+    fx.activate(kRate, kBlock);
+    fx.set_parameter(3, 0.0);
+    fx.set_parameter(0, 1.0);
+    for (int i = 0; i < 8; ++i) run_block(fx, 0.7f);
+    fx.set_parameter(0, 0.0);
+    run_block(fx, 0.0f);
+
+    fx.set_parameter(7, 1.0);  // reverse
+    run_block(fx, 0.0f);       // wrap off the start onto the tail
+    const double a = fx.position_fraction();
+    run_block(fx, 0.0f);
+    const double b = fx.position_fraction();
+    if (!(b < a - 0.01 || (a < 0.15 && b > 0.7)))
+      fail("reverse did not walk the playhead backwards");
+
+    fx.set_parameter(7, 0.0);
+    fx.set_parameter(11, 2.0);  // double speed
+    const double s0 = fx.position_fraction();
+    run_block(fx, 0.0f);
+    const double s1 = fx.position_fraction();
+    const double step = s1 > s0 ? s1 - s0 : (1.0 - s0) + s1;
+    if (step < 0.15)
+      fail("double speed did not walk the tape faster");
+    fx.set_parameter(11, 1.0);
+  }
+
+  {
+    nirbija::LooperInstance fade;
+    fade.set_channel_layout(2);
+    fade.activate(kRate, kBlock);
+    fade.set_parameter(3, 0.0);
+    fade.set_parameter(0, 1.0);
+    for (int i = 0; i < 8; ++i) run_block(fade, 0.8f);
+    fade.set_parameter(0, 0.0);
+    run_block(fade, 0.0f);
+
+    fade.set_parameter(8, 0.0);  // feedback 0: overdub erases
+    fade.set_parameter(0, 1.0);
+    for (int i = 0; i < 8; ++i) run_block(fade, 0.0f);
+    fade.set_parameter(0, 0.0);
+    run_block(fade, 0.0f);
+    float left = 0.0f;
+    for (int i = 0; i < 8; ++i) left = std::max(left, run_block(fade, 0.0f));
+    if (left > 0.05f) fail("feedback 0 left the old layer standing");
+  }
+
+  {
+    nirbija::LooperInstance punch;
+    punch.set_channel_layout(2);
+    punch.activate(kRate, kBlock);
+    punch.set_parameter(3, 0.0);
+    punch.set_parameter(0, 1.0);
+    for (int i = 0; i < 8; ++i) run_block(punch, 0.8f);
+    punch.set_parameter(0, 0.0);
+    run_block(punch, 0.0f);
+
+    punch.set_parameter(9, 1.0);  // replace
+    punch.set_parameter(0, 1.0);
+    for (int i = 0; i < 8; ++i) run_block(punch, 0.0f);
+    punch.set_parameter(0, 0.0);
+    run_block(punch, 0.0f);
+    float left = 0.0f;
+    for (int i = 0; i < 8; ++i) left = std::max(left, run_block(punch, 0.0f));
+    if (left > 0.05f) fail("replace did not overwrite the take");
+  }
+
+  {
+    nirbija::LooperInstance once;
+    once.set_channel_layout(2);
+    once.activate(kRate, kBlock);
+    once.set_parameter(3, 0.0);
+    once.set_parameter(0, 1.0);
+    for (int i = 0; i < 8; ++i) run_block(once, 0.7f);
+    once.set_parameter(0, 0.0);
+    run_block(once, 0.0f);
+    once.set_parameter(10, 1.0);  // once
+    float first = 0.0f;
+    for (int i = 0; i < 8; ++i) first = std::max(first, run_block(once, 0.0f));
+    if (first < 0.5f) fail("once muted the first pass");
+    float after = 0.0f;
+    for (int i = 0; i < 8; ++i) after = std::max(after, run_block(once, 0.0f));
+    if (after > 1e-4f) fail("once kept playing after the wrap");
+    if (once.playing()) fail("once did not drop Play");
+  }
+
+  {
+    nirbija::LooperInstance doubled;
+    doubled.set_channel_layout(2);
+    doubled.activate(kRate, kBlock);
+    doubled.set_parameter(3, 0.0);
+    doubled.set_parameter(0, 1.0);
+    for (int i = 0; i < 8; ++i) run_block(doubled, 0.6f);
+    doubled.set_parameter(0, 0.0);
+    run_block(doubled, 0.0f);
+    const double beats = doubled.loop_beats();
+    if (!doubled.can_multiply()) fail("a short take could not be multiplied");
+    doubled.multiply();
+    if (doubled.loop_beats() < beats * 1.9)
+      fail("multiply did not double the loop");
+    float peak = 0.0f;
+    for (int i = 0; i < 16; ++i)
+      peak = std::max(peak, run_block(doubled, 0.0f));
+    if (peak < 0.4f) fail("the multiplied loop was silent");
+  }
+
+  {
+    nirbija::LooperInstance original;
+    original.set_channel_layout(2);
+    original.activate(kRate, kBlock);
+    original.set_parameter(3, 0.0);
+    original.set_parameter(0, 1.0);
+    for (int i = 0; i < 8; ++i) run_block(original, 0.6f);
+    original.set_parameter(0, 0.0);
+    run_block(original, 0.0f);
+    original.set_parameter(7, 1.0);
+    original.set_parameter(8, 0.7);
+    original.set_parameter(11, 0.5);
+    const auto blob = original.save_state();
+
+    nirbija::LooperInstance restored;
+    restored.set_channel_layout(2);
+    restored.activate(kRate, kBlock);
+    if (!restored.load_state(blob)) fail("NLOOP2 blob was refused");
+    if (restored.parameter_value(7) < 0.5) fail("reverse did not survive save");
+    if (std::fabs(restored.parameter_value(8) - 0.7) > 1e-4)
+      fail("feedback did not survive save");
+    if (std::fabs(restored.parameter_value(11) - 0.5) > 1e-4)
+      fail("speed did not survive save");
+    if (!restored.loop_closed()) fail("NLOOP2 came back without a loop");
+  }
+
   if (failures > 0) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return 1;

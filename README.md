@@ -64,10 +64,10 @@ the host and need nothing installed at all:
 
 | | |
 |---|---|
-| **Step Sequencer** | sixteen steps against the transport, with a grid to play |
+| **Step Sequencer** | sixteen steps, swing, scales, reverse/pendulum, chance, ties |
 | **Arpeggiator** | up, down, up-down, as played, random, chord; octaves and latch |
 | **Script** | a MIDI plugin you write in Lua, in the mixer |
-| **Looper** | quantised launch, in an insert slot |
+| **Looper** | quantised launch, reverse, half/double, multiply, replace, once |
 | **FX Pad** | sixteen held effects and a Hold latch |
 | **File Player** | a file into a strip |
 

@@ -168,6 +168,60 @@ int main() {
       fail(name + " froze on one sample value");
   }
 
+  // A click 0.75 s behind the press must come back: a 1 s tape walked with
+  // delay += 2 only covers half a second and would miss it.
+  {
+    constexpr uint32_t kBlock = 256;
+    constexpr double kRate = 48000.0;
+    nirbija::FxPadInstance fx;
+    fx.set_channel_layout(2);
+    fx.activate(kRate, kBlock);
+
+    std::vector<float> in_l(kBlock, 0.0f), in_r(kBlock, 0.0f);
+    std::vector<float> out_l(kBlock), out_r(kBlock);
+    const float* ins[2] = {in_l.data(), in_r.data()};
+    float* outs[2] = {out_l.data(), out_r.data()};
+    nirbija::TransportInfo transport;
+    transport.playing = true;
+    transport.rolling = true;
+    transport.tempo_bpm = 120.0;
+
+    const int fill = static_cast<int>(kRate / kBlock) + 4;
+    for (int b = 0; b < fill; ++b) {
+      fx.set_transport(transport);
+      fx.process(ins, outs, kBlock);
+    }
+
+    in_l[0] = in_r[0] = 1.0f;
+    fx.process(ins, outs, kBlock);
+    in_l[0] = in_r[0] = 0.0f;
+
+    const int behind = static_cast<int>(0.75 * kRate / kBlock);
+    for (int b = 0; b < behind; ++b) fx.process(ins, outs, kBlock);
+
+    fx.set_pad(nirbija::FxPadInstance::Reverse, true);
+    float peak = 0.0f;
+    int peak_block = -1;
+    const int listen = static_cast<int>(1.1 * kRate / kBlock);
+    for (int b = 0; b < listen; ++b) {
+      fx.process(ins, outs, kBlock);
+      for (float s : out_l) {
+        const float a = std::fabs(s);
+        if (a > peak) {
+          peak = a;
+          peak_block = b;
+        }
+      }
+    }
+    if (peak < 0.2f)
+      fail("reverse never reached a click 0.75 s back (peak " +
+           std::to_string(peak) + ")");
+    const double peak_at = peak_block * kBlock / kRate;
+    if (peak_at < 0.55 || peak_at > 0.95)
+      fail("reverse returned the 0.75 s click at " + std::to_string(peak_at) +
+           " s, not around 0.75 s");
+  }
+
   // The talkbox sweeps its vowel on an LFO of its own. It used to read the
   // flanger's phase, which only advances while that pad is held, so the vowel
   // stood still unless both were down at once.

@@ -83,7 +83,9 @@ bool FxPadInstance::activate(double sample_rate, uint32_t) {
   for (int ch = 0; ch < 2; ++ch) {
     hist_[ch].setup(two_sec);
     delay_[ch].setup(two_sec);
-    reverse_[ch].setup(one_sec);
+    // Two seconds: tap() is a distance behind a write head that also
+    // advances, so covering one second of reverse needs twice the tape.
+    reverse_[ch].setup(two_sec);
     stutter_[ch].setup(one_sec);
     flange_[ch].setup(static_cast<size_t>(sample_rate_ * 0.02) + 8);
     static constexpr float kCombMs[4] = {29.7f, 37.1f, 41.1f, 43.7f};
@@ -268,11 +270,8 @@ void FxPadInstance::process_sample(float* left, float* right) {
     for (int ch = 0; ch < 2; ++ch) s[ch] = wet(Cutter, s[ch], s[ch] * g);
   }
 
-  // Reverse: play the last second backwards. The tap is a distance behind the
-  // write head, and that head moves forward a sample per sample - so the
-  // distance has to grow by two for the point actually read to walk back by
-  // one. Growing it by one held the read index still and froze the pad on a
-  // single sample.
+  // Reverse: last second backwards. Distance grows by two so the tap walks
+  // one sample back against a write head that is also moving.
   if (mix_[Reverse] > 1e-4f) {
     const size_t n = reverse_[0].data.size();
     for (int ch = 0; ch < 2; ++ch) {
@@ -280,9 +279,6 @@ void FxPadInstance::process_sample(float* left, float* right) {
       s[ch] = wet(Reverse, s[ch], reverse_[ch].tap(reverse_play_));
     }
     reverse_play_ += 2;
-    // The far end of the buffer is the oldest sample there is; past it the
-    // sweep would read what this pass has already overwritten. Drop back to
-    // the head and run the second again, the way a reverse pedal loops.
     if (reverse_play_ + 1 >= n) reverse_play_ = 1;
   } else {
     for (int ch = 0; ch < 2; ++ch) reverse_[ch].push(s[ch]);

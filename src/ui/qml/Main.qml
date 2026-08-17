@@ -346,7 +346,7 @@ ApplicationWindow {
         anchors.top: topBar.bottom
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        enabled: !window.looperOpen && !window.fxPadOpen
+        enabled: !window.looperOpen && !window.fxPadOpen && !window.stepOpen
         gain: Mixer.masterGain
         positionLeft: Mixer.masterPositionLeft
         positionRight: Mixer.masterPositionRight
@@ -363,6 +363,7 @@ ApplicationWindow {
                                        && looperEditorLoader.item.opened
     readonly property bool fxPadOpen: fxPadLoader.item
                                       && fxPadLoader.item.opened
+    readonly property bool stepOpen: stepLoader.item && stepLoader.item.opened
 
     Flickable {
         id: mixerArea
@@ -371,7 +372,7 @@ ApplicationWindow {
         anchors.right: masterStrip.left
         anchors.bottom: parent.bottom
         anchors.margins: Skin.spacing
-        enabled: !window.looperOpen && !window.fxPadOpen
+        enabled: !window.looperOpen && !window.fxPadOpen && !window.stepOpen
         contentWidth: stripRow.width
         contentHeight: height
         flickableDirection: Flickable.HorizontalFlick
