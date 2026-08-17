@@ -44,7 +44,7 @@ Rectangle {
 
     component Separator: Rectangle {
         Layout.preferredWidth: 1
-        Layout.preferredHeight: Skin.px(22)
+        Layout.preferredHeight: Px.px(22)
         Layout.alignment: Qt.AlignVCenter
         color: Skin.border
         opacity: 0.6
@@ -58,7 +58,7 @@ Rectangle {
 
         // --- transport --------------------------------------------------------
         StripButton {
-            Layout.preferredWidth: Skin.px(32)
+            Layout.preferredWidth: Px.px(32)
             label: root.playing ? "■" : "▶"
             tip: qsTr("Play or stop the transport (Space). Sequencers and tempo-synced plugins follow it.")
             active: root.playing
@@ -67,14 +67,14 @@ Rectangle {
         }
 
         StripButton {
-            Layout.preferredWidth: Skin.px(32)
+            Layout.preferredWidth: Px.px(32)
             label: "⏮"
             tip: qsTr("Rewind to the start. Plugins are told the position jumped.")
             onClicked: Mixer.rewind()
         }
 
         StripButton {
-            Layout.preferredWidth: Skin.px(32)
+            Layout.preferredWidth: Px.px(32)
             label: "●"
             tip: qsTr("Record every armed channel plus the master, one file each, into a new folder.")
             active: root.recording
@@ -85,7 +85,7 @@ Rectangle {
         // Bar and beat, plus how long the take has been running. Fixed width so
         // the row does not shuffle sideways every time the beat rolls over.
         ColumnLayout {
-            Layout.preferredWidth: Skin.px(62)
+            Layout.preferredWidth: Px.px(62)
             spacing: 0
 
             Text {
@@ -125,7 +125,7 @@ Rectangle {
         // Tempo is dragged rather than typed: it is a value you nudge while
         // listening, and a text field would take the focus off the mixer.
         Item {
-            Layout.preferredWidth: Skin.px(74)
+            Layout.preferredWidth: Px.px(74)
             Layout.preferredHeight: Skin.buttonHeight
             activeFocusOnTab: true
 
@@ -209,16 +209,16 @@ Rectangle {
         }
 
         StripButton {
-            Layout.preferredWidth: Skin.px(32)
+            Layout.preferredWidth: Px.px(32)
             label: "♩"
-            tip: qsTr("Metronome: a click on every beat, a fifth higher on the downbeat. Sits after the master fader, so pulling the mix down keeps the count.")
+            tip: qsTr("Metronome: a click on every beat, a fifth higher on the downbeat. Runs the same clock as Play, so the looper can punch to the grid with the session stopped. Sits after the master fader.")
             active: root.metronome
             activeColor: Skin.solo
             onClicked: Mixer.toggleMetronome()
         }
 
         StripButton {
-            Layout.preferredWidth: Skin.px(40)
+            Layout.preferredWidth: Px.px(40)
             label: qsTr("clk")
             tip: qsTr("Send MIDI clock from the clock_out port, 24 pulses per quarter note, while the transport runs.")
             active: Mixer.midiClock
@@ -226,7 +226,7 @@ Rectangle {
         }
 
         StripButton {
-            Layout.preferredWidth: Skin.px(40)
+            Layout.preferredWidth: Px.px(40)
             label: qsTr("ext")
             tip: qsTr("Follow a MIDI clock arriving on clock_in: start, stop, position and tempo all come from it, and the transport here stops being in charge.")
             active: Mixer.followMidiClock
@@ -238,14 +238,14 @@ Rectangle {
 
         // --- what the master is doing -----------------------------------------
         StripButton {
-            Layout.preferredWidth: Skin.px(42)
+            Layout.preferredWidth: Px.px(42)
             label: qsTr("DIM")
             tip: qsTr("Dim the master by 12 dB without moving the fader.")
             active: Mixer.masterDim
             onClicked: Mixer.toggleMasterDim()
         }
         StripButton {
-            Layout.preferredWidth: Skin.px(48)
+            Layout.preferredWidth: Px.px(48)
             label: qsTr("MUTE")
             tip: qsTr("Mute the master. Meters keep reading what would have played.")
             active: Mixer.masterMute
@@ -253,7 +253,7 @@ Rectangle {
             onClicked: Mixer.toggleMasterMute()
         }
         StripButton {
-            Layout.preferredWidth: Skin.px(48)
+            Layout.preferredWidth: Px.px(48)
             label: qsTr("MONO")
             tip: qsTr("Sum the master to mono. A mix that thins out or loses a part here has phase cancellation in it. Not a polarity flip.")
             active: Mixer.masterMono
@@ -269,7 +269,7 @@ Rectangle {
         // Tapping it chooses where the master goes, which is the one routing
         // decision that is not per channel.
         ColumnLayout {
-            Layout.preferredWidth: Skin.px(190)
+            Layout.preferredWidth: Px.px(190)
             Layout.alignment: Qt.AlignVCenter
             spacing: Skin.spacingXS
 
@@ -286,7 +286,7 @@ Rectangle {
 
             Meter {
                 Layout.fillWidth: true
-                Layout.preferredHeight: Skin.px(6)
+                Layout.preferredHeight: Px.px(6)
                 vertical: false
                 position: root.positionLeft
                 hold: root.holdLeft
@@ -294,7 +294,7 @@ Rectangle {
 
             Meter {
                 Layout.fillWidth: true
-                Layout.preferredHeight: Skin.px(6)
+                Layout.preferredHeight: Px.px(6)
                 vertical: false
                 position: root.positionRight
                 hold: root.holdRight
@@ -333,8 +333,8 @@ Rectangle {
         // A mix that clipped since the last glance, said out loud rather than
         // left to a colour change on the bar counter.
         Rectangle {
-            Layout.preferredWidth: Skin.px(40)
-            Layout.preferredHeight: Skin.px(18)
+            Layout.preferredWidth: Px.px(40)
+            Layout.preferredHeight: Px.px(18)
             Layout.alignment: Qt.AlignVCenter
             radius: Skin.radiusS
             visible: Mixer.masterClip
@@ -351,21 +351,21 @@ Rectangle {
 
         // --- the rest of the session ------------------------------------------
         StripButton {
-            Layout.preferredWidth: Skin.px(34)
+            Layout.preferredWidth: Px.px(34)
             label: "▤"
             tip: qsTr("Navigator: every strip and its chain on one line. Jump to a strip, open an editor, or close them all.")
             onClicked: root.navigatorClicked()
         }
 
         StripButton {
-            Layout.preferredWidth: Skin.px(46)
+            Layout.preferredWidth: Px.px(46)
             label: qsTr("MIDI")
             tip: qsTr("MIDI matrix: sources down the side, channels across the top, a cell to connect each pair.")
             onClicked: root.matrixClicked()
         }
 
         StripButton {
-            Layout.preferredWidth: Skin.px(30)
+            Layout.preferredWidth: Px.px(30)
             label: "?"
             tip: qsTr("Keyboard shortcuts (F1).")
             onClicked: root.helpClicked()
@@ -373,7 +373,7 @@ Rectangle {
 
         StripButton {
             id: menuButton
-            Layout.preferredWidth: Skin.px(32)
+            Layout.preferredWidth: Px.px(32)
             label: "≡"
             tip: qsTr("Session menu: undo, plugins, recordings, save and load.")
             onClicked: root.menuRequested(menuButton)

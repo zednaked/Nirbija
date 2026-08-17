@@ -21,6 +21,7 @@ set(QT_QML_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/qml)
 qt_policy(SET QTP0004 NEW)
 
 set(nirbija_qml
+  qml/Px.qml
   qml/Main.qml
   qml/TopBar.qml
   qml/ChannelStrip.qml
@@ -41,6 +42,8 @@ set(nirbija_qml
   qml/SendRow.qml
   qml/SlotMenu.qml
   qml/ScriptEditor.qml
+  qml/LooperEditor.qml
+  qml/FxPad.qml
   qml/StepGrid.qml
   qml/RenameDialog.qml
   qml/PanControl.qml
@@ -52,6 +55,14 @@ foreach(qml_file IN LISTS nirbija_qml)
   set_source_files_properties(${qml_file}
     PROPERTIES QT_QML_SOURCE_FILE_NAME ${qml_name})
 endforeach()
+
+# `pragma Singleton` inside Px.qml is not enough on its own: the CMake QML
+# module tooling does not read a file's contents to decide this, so without
+# the property below Px registered as an ordinary, uninstantiated type. Every
+# Px.px(...) binding across the tree then failed silently, and whichever
+# item's own size came only from one of those - the MIDI keyboard, the
+# fader - collapsed to nothing instead of just drawing at the wrong size.
+set_source_files_properties(qml/Px.qml PROPERTIES QT_QML_SINGLETON_TYPE true)
 
 # The models live in their own library so a headless test can drive them
 # without the QML front end. The QML module is declared on that library rather

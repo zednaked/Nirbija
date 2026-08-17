@@ -29,7 +29,7 @@ Row {
                 ? root.position > 0.02
                 : root.position >= threshold - (1 / root.dots)
 
-            width: Skin.px(4)
+            width: Px.px(4)
             height: width
             radius: width / 2
             color: lit ? Skin.meterColor(threshold) : Skin.meterTrack

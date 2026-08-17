@@ -138,6 +138,10 @@ class ChannelStrip {
  private:
   void run_insert(PluginInstance* insert, float* const* buffers, uint32_t frames,
                   const TransportInfo* transport, bool filter_midi);
+  // Runs the plugin so it can consume MIDI (and not hang a voice) but puts
+  // the dry audio back and drops anything it emitted.
+  void run_bypassed(PluginInstance* insert, float* const* buffers,
+                    uint32_t frames, const TransportInfo* transport);
   static bool midi_allowed(const MidiEvent& event, uint16_t mask);
 
   // One block's view of the insert chain, taken whole before anything runs.

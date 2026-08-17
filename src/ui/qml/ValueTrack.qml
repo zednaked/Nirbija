@@ -30,7 +30,7 @@ Item {
     signal moved(real value)
     signal menuRequested
 
-    implicitHeight: Skin.px(20)
+    implicitHeight: Px.px(20)
     activeFocusOnTab: true
 
     Accessible.role: Accessible.Slider

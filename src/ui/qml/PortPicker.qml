@@ -17,8 +17,8 @@ Popup {
 
     signal picked(string port)
 
-    width: Skin.px(470)
-    height: Skin.px(440)
+    width: Px.px(470)
+    height: Px.px(440)
     modal: true
     padding: 0
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
@@ -104,7 +104,7 @@ Popup {
         ListView {
             id: list
             width: parent.width
-            height: parent.height - search.height - Skin.px(24) - 2 * Skin.spacingS
+            height: parent.height - search.height - Px.px(24) - 2 * Skin.spacingS
             clip: true
             model: root.visiblePorts
             currentIndex: -1
@@ -209,7 +209,7 @@ Popup {
 
         Text {
             width: parent.width
-            height: Skin.px(24)
+            height: Px.px(24)
             visible: root.visiblePorts.length === 0
             text: root.ports.length === 0
                   ? qsTr("The audio server is offering nothing of this kind.")

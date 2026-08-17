@@ -103,6 +103,18 @@ class ScriptInstance : public PluginInstance {
   static constexpr size_t kMaxEvents = 64;
   std::array<MidiEvent, kMaxEvents> events_{};
   size_t event_count_ = 0;
+
+  // Incoming (note, channel) -> the pitch and channel that actually went
+  // out, so a knob rebuild cannot send the matching note-off to a new
+  // pitch and leave the old one hanging.
+  struct Sounding {
+    uint8_t in_note = 0;
+    uint8_t in_channel = 0;
+    uint8_t out_note = 0;
+    uint8_t out_channel = 0;
+  };
+  std::array<Sounding, kMaxEvents> sounding_{};
+  size_t sounding_count_ = 0;
 };
 
 }  // namespace nirbija

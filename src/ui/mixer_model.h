@@ -120,10 +120,21 @@ class MixerModel : public QAbstractListModel {
   void setMetersActive(bool on);
   qreal masterGain() const { return master_gain_; }
   QString masterSink() const;
-  bool playing() const { return playing_ui_; }
+  bool playing() const {
+    return engine_.follow_midi_clock() ? engine_.playing() : playing_ui_;
+  }
   bool recording() const { return engine_.recording(); }
   QString recordingLabel() const;
-  qreal tempo() const { return engine_.tempo(); }
+  // The UI's own idea of tempo, except while an external MIDI clock is
+  // driving it - then it comes from the audio thread instead, since that is
+  // the only place it is known. Reading through to the engine unconditionally
+  // is what forced setTempo() to delay its notification: the command a drag
+  // just posted was not applied yet, so an immediate read echoed the old
+  // value right back. Every other setter this UI writes (masterGain,
+  // playing, metronome) keeps its own cache for the same reason.
+  qreal tempo() const {
+    return engine_.follow_midi_clock() ? engine_.tempo() : tempo_ui_;
+  }
   void setTempo(qreal bpm);
   bool metronome() const { return metronome_ui_; }
   Q_INVOKABLE void toggleMetronome();
@@ -214,9 +225,40 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE int sidechainRow(int row) const;
 
   Q_INVOKABLE bool insertIsLooper(int row, int slot) const;
+  Q_INVOKABLE bool insertIsFxPad(int row, int slot) const;
+  Q_INVOKABLE void setFxPad(int row, int slot, int pad, bool on);
+  Q_INVOKABLE bool fxPadOn(int row, int slot, int pad) const;
+  Q_INVOKABLE void setFxPadHold(int row, int slot, bool on);
+  Q_INVOKABLE bool fxPadHold(int row, int slot) const;
   Q_INVOKABLE void setLooperRecord(int row, int slot, bool on);
   Q_INVOKABLE void setLooperPlay(int row, int slot, bool on);
   Q_INVOKABLE void clearLooper(int row, int slot);
+  Q_INVOKABLE bool looperCanUndo(int row, int slot) const;
+  Q_INVOKABLE bool looperCanRedo(int row, int slot) const;
+  Q_INVOKABLE void undoLooper(int row, int slot);
+  Q_INVOKABLE void redoLooper(int row, int slot);
+
+  // One peak per bucket across the closed loop, for drawing a waveform - see
+  // LooperInstance::waveform() for what "closed" and "peak" mean here.
+  Q_INVOKABLE QVariantList looperWaveform(int row, int slot, int buckets) const;
+  Q_INVOKABLE qreal looperTrimStart(int row, int slot) const;
+  Q_INVOKABLE qreal looperTrimEnd(int row, int slot) const;
+  Q_INVOKABLE qreal looperFadeIn(int row, int slot) const;
+  Q_INVOKABLE qreal looperFadeOut(int row, int slot) const;
+  Q_INVOKABLE void setLooperTrim(int row, int slot, qreal start, qreal end);
+  Q_INVOKABLE void setLooperFades(int row, int slot, qreal fadeIn, qreal fadeOut);
+  // 0..1 through the closed loop, or -1 while there is nothing playing -
+  // read on a timer to move a playhead over the waveform.
+  Q_INVOKABLE qreal looperPosition(int row, int slot) const;
+  Q_INVOKABLE bool looperRecording(int row, int slot) const;
+  Q_INVOKABLE bool looperPlaying(int row, int slot) const;
+  Q_INVOKABLE bool looperHasAudio(int row, int slot) const;
+  Q_INVOKABLE bool looperLoopClosed(int row, int slot) const;
+  Q_INVOKABLE qreal looperBeats(int row, int slot) const;
+  Q_INVOKABLE int timeNumerator() const {
+    const int n = engine_.time_numerator();
+    return n > 0 ? n : 1;
+  }
 
   Q_INVOKABLE void toggleMasterDim();
   Q_INVOKABLE void toggleMasterMute();
@@ -450,6 +492,7 @@ class MixerModel : public QAbstractListModel {
   QString status_;
   bool playing_ui_ = false;
   bool metronome_ui_ = false;
+  qreal tempo_ui_ = 120.0;
   bool seed_empty_session_ = true;
   bool dirty_flag_ = false;
   bool master_clip_ = false;

@@ -18,7 +18,7 @@ Popup {
     property var entries: []
     property string heading: ""
 
-    implicitWidth: Skin.px(210)
+    implicitWidth: Px.px(210)
     padding: Skin.spacingS
     modal: true
     dim: false
@@ -26,8 +26,8 @@ Popup {
 
     // Never taller than the window it opens in; past that the list scrolls.
     readonly property int maximumHeight: Overlay.overlay
-                                         ? Overlay.overlay.height - Skin.px(16)
-                                         : Skin.px(400)
+                                         ? Overlay.overlay.height - Px.px(16)
+                                         : Px.px(400)
 
     background: Rectangle {
         color: Skin.popup
@@ -87,7 +87,7 @@ Popup {
             width: parent.width
             height: Math.min(contentHeight,
                              root.maximumHeight - (root.heading.length > 0
-                                                   ? Skin.px(26) : 0))
+                                                   ? Px.px(26) : 0))
             model: root.entries
             interactive: contentHeight > height
             clip: true

@@ -31,7 +31,7 @@ ToolTip {
         return room > implicitHeight + gap ? below : -implicitHeight - gap
     }
 
-    implicitWidth: Math.min(Skin.px(300), contentWidth + leftPadding + rightPadding)
+    implicitWidth: Math.min(Px.px(300), contentWidth + leftPadding + rightPadding)
 
     enter: Transition {
         NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Skin.fast }

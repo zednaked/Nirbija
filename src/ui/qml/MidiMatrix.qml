@@ -13,8 +13,17 @@ Popup {
 
     property var sources: []
 
-    width: Math.min(Skin.px(760), Skin.px(220) + Mixer.rowCount() * Skin.px(46))
-    height: Math.min(Skin.px(500), Skin.px(110) + sources.length * Skin.px(36))
+    // A session with enough channels or MIDI sources to want the 760/500
+    // caps can still not fit a window resized down toward its own minimum,
+    // especially at a high UI scale where both grow together - centred, an
+    // oversized popup would have overflowed evenly off both edges instead of
+    // just one, but still past the only surface it can draw on.
+    width: Math.min(Px.px(760), Px.px(220) + Mixer.rowCount() * Px.px(46),
+                    Overlay.overlay ? Overlay.overlay.width - Px.px(24)
+                                     : Px.px(760))
+    height: Math.min(Px.px(500), Px.px(110) + sources.length * Px.px(36),
+                     Overlay.overlay ? Overlay.overlay.height - Px.px(24)
+                                      : Px.px(500))
     modal: true
     padding: Skin.spacingL
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
@@ -33,8 +42,8 @@ Popup {
     // Fetched on open: the port list is whatever the server offers right now.
     onAboutToShow: root.sources = Mixer.sources(true)
 
-    readonly property int columnWidth: Skin.px(42)
-    readonly property int labelWidth: Skin.px(180)
+    readonly property int columnWidth: Px.px(42)
+    readonly property int labelWidth: Px.px(180)
 
     contentItem: ColumnLayout {
         spacing: Skin.spacingS
@@ -64,7 +73,7 @@ Popup {
 
             Item {
                 width: root.labelWidth
-                height: Skin.px(28)
+                height: Px.px(28)
             }
 
             Repeater {
@@ -77,7 +86,7 @@ Popup {
 
                     visible: !isBus
                     width: visible ? root.columnWidth : 0
-                    height: Skin.px(28)
+                    height: Px.px(28)
 
                     Text {
                         anchors.centerIn: parent

@@ -26,8 +26,8 @@ Item {
     readonly property real clampedPosition: Math.max(0, Math.min(1, position))
     readonly property real clampedHold: Math.max(0, Math.min(1, hold))
 
-    implicitWidth: vertical ? Skin.px(7) : Skin.px(120)
-    implicitHeight: vertical ? Skin.px(120) : Skin.px(6)
+    implicitWidth: vertical ? Px.px(7) : Px.px(120)
+    implicitHeight: vertical ? Px.px(120) : Px.px(6)
 
     Rectangle {
         anchors.fill: parent
@@ -99,8 +99,8 @@ Item {
             visible: root.showHold && root.clampedHold > 0.005
             color: Skin.text
             opacity: 0.85
-            width: root.vertical ? parent.width : Math.max(1, Skin.px(1.5))
-            height: root.vertical ? Math.max(1, Skin.px(1.5)) : parent.height
+            width: root.vertical ? parent.width : Math.max(1, Px.px(1.5))
+            height: root.vertical ? Math.max(1, Px.px(1.5)) : parent.height
             y: root.vertical
                ? Math.min(parent.height - height,
                           parent.height * (1.0 - root.clampedHold))

@@ -14,8 +14,12 @@ import Nirbija
 Popup {
     id: root
 
-    width: Skin.px(520)
-    height: Math.min(Skin.px(560), Skin.px(90) + rows.length * Skin.px(26))
+    width: Px.px(520)
+    // The row count is fixed at build time, but the window's minimum height
+    // (520 px) is not always bigger than this cap once both are scaled up.
+    height: Math.min(Px.px(560), Px.px(90) + rows.length * Px.px(26),
+                     Overlay.overlay ? Overlay.overlay.height - Px.px(24)
+                                      : Px.px(560))
     modal: true
     anchors.centerIn: Overlay.overlay
     padding: Skin.spacingL
@@ -74,7 +78,7 @@ Popup {
             }
 
             StripButton {
-                Layout.preferredWidth: Skin.px(64)
+                Layout.preferredWidth: Px.px(64)
                 label: qsTr("Close")
                 onClicked: root.close()
             }
@@ -99,13 +103,13 @@ Popup {
                 readonly property bool heading: modelData.key.length === 0
 
                 width: list.width
-                height: entry.heading ? Skin.px(30) : Skin.px(22)
+                height: entry.heading ? Px.px(30) : Px.px(22)
 
                 Text {
                     anchors.left: parent.left
                     anchors.bottom: parent.bottom
                     anchors.bottomMargin: entry.heading ? Skin.spacingXS : 0
-                    width: Skin.px(180)
+                    width: Px.px(180)
                     visible: !entry.heading
                     text: entry.modelData.key
                     color: Skin.textDim
@@ -116,7 +120,7 @@ Popup {
                 Text {
                     anchors.left: entry.heading ? parent.left : undefined
                     anchors.leftMargin: entry.heading ? 0 : 0
-                    x: entry.heading ? 0 : Skin.px(190)
+                    x: entry.heading ? 0 : Px.px(190)
                     anchors.bottom: parent.bottom
                     anchors.bottomMargin: entry.heading ? Skin.spacingXS : 0
                     text: entry.modelData.what

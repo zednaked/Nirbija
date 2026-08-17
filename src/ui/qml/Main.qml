@@ -10,10 +10,10 @@ ApplicationWindow {
 
     // In scaled pixels, like everything else: at NIRBIJA_UI_SCALE=1.35 a window
     // still 700 px tall squeezes the insert chain out of every strip.
-    width: Skin.px(1200)
-    height: Skin.px(700)
-    minimumWidth: Skin.px(660)
-    minimumHeight: Skin.px(520)
+    width: Px.px(1200)
+    height: Px.px(700)
+    minimumWidth: Px.px(660)
+    minimumHeight: Px.px(520)
     visible: true
     title: Mixer.dirty ? qsTr("Nirbija •") : qsTr("Nirbija")
     color: Skin.background
@@ -28,8 +28,12 @@ ApplicationWindow {
         value: window.visible && window.visibility !== Window.Minimized
     }
 
+    // StandardKey.Cancel already is "Escape" on this platform - the app only
+    // ever runs on Linux, forced onto X11 in platform.cpp - so listing both
+    // registered two shortcuts on the identical key. Qt saw that as ambiguous
+    // and fired neither: Escape did not cancel MIDI learn at all.
     Shortcut {
-        sequences: [StandardKey.Cancel, "Escape"]
+        sequence: StandardKey.Cancel
         onActivated: Mixer.cancelLearn()
     }
     Shortcut {
@@ -44,20 +48,29 @@ ApplicationWindow {
         sequence: StandardKey.Redo
         onActivated: Mixer.redo()
     }
+    // Same duplicate-registration bug as Cancel above: StandardKey.HelpContents
+    // already is "F1" here, so the literal alongside it made F1 ambiguous and
+    // the shortcut sheet never opened from the keyboard.
     Shortcut {
-        sequences: [StandardKey.HelpContents, "F1"]
+        sequence: StandardKey.HelpContents
         onActivated: window.openShortcuts()
     }
 
     // Resizing the whole interface, because a size that suits one screen is
     // wrong on the next one and NIRBIJA_UI_SCALE means restarting to find out.
-    // Both spellings of the plus key: the shifted one and the one on the pad.
+    // "Ctrl+=" is the unshifted key that types "+" on most layouts, kept
+    // alongside the standard "Ctrl++" - not on top of it. QML gives each
+    // string in `sequences` its own QShortcut, so StandardKey.ZoomOut and a
+    // literal "Ctrl+-" naming the same combination registered two shortcuts
+    // for one key: Qt saw that as ambiguous and fired neither, which is why
+    // zooming out silently did nothing while zooming in, whose extra entry
+    // ("Ctrl+=") is genuinely a different key, kept working.
     Shortcut {
-        sequences: [StandardKey.ZoomIn, "Ctrl++", "Ctrl+="]
+        sequences: [StandardKey.ZoomIn, "Ctrl+="]
         onActivated: window.zoom(() => Skin.zoomIn())
     }
     Shortcut {
-        sequences: [StandardKey.ZoomOut, "Ctrl+-"]
+        sequence: StandardKey.ZoomOut
         onActivated: window.zoom(() => Skin.zoomOut())
     }
     Shortcut {
@@ -249,6 +262,16 @@ ApplicationWindow {
             scriptLoader.item.openFor(row, slot)
             return
         }
+        if (Mixer.insertIsLooper(row, slot)) {
+            looperEditorLoader.active = true
+            looperEditorLoader.item.openFor(row, slot)
+            return
+        }
+        if (Mixer.insertIsFxPad(row, slot)) {
+            fxPadLoader.active = true
+            fxPadLoader.item.openFor(row, slot)
+            return
+        }
         if (Mixer.openInsertEditor(row, slot)) return
         paramLoader.active = true
         paramLoader.item.openFor(row, slot)
@@ -323,6 +346,7 @@ ApplicationWindow {
         anchors.top: topBar.bottom
         anchors.right: parent.right
         anchors.bottom: parent.bottom
+        enabled: !window.looperOpen && !window.fxPadOpen
         gain: Mixer.masterGain
         positionLeft: Mixer.masterPositionLeft
         positionRight: Mixer.masterPositionRight
@@ -332,6 +356,14 @@ ApplicationWindow {
         onOutputClicked: window.openPortPicker("sink", -1, masterStrip)
     }
 
+    // Pointer handlers on the strips ignore the popup's MouseArea dimmer.
+    // While the looper editor is up they have to be switched off, or a
+    // drag on the waveform still grabs the fader that happens to sit under it.
+    readonly property bool looperOpen: looperEditorLoader.item
+                                       && looperEditorLoader.item.opened
+    readonly property bool fxPadOpen: fxPadLoader.item
+                                      && fxPadLoader.item.opened
+
     Flickable {
         id: mixerArea
         anchors.top: topBar.bottom
@@ -339,6 +371,7 @@ ApplicationWindow {
         anchors.right: masterStrip.left
         anchors.bottom: parent.bottom
         anchors.margins: Skin.spacing
+        enabled: !window.looperOpen && !window.fxPadOpen
         contentWidth: stripRow.width
         contentHeight: height
         flickableDirection: Flickable.HorizontalFlick
@@ -473,7 +506,7 @@ ApplicationWindow {
                         anchors.horizontalCenter: parent.horizontalCenter
                         text: "+"
                         color: addHover.hovered ? Skin.text : Skin.textDim
-                        font.pixelSize: Skin.px(40)
+                        font.pixelSize: Px.px(40)
                     }
 
                     Text {
@@ -545,6 +578,18 @@ ApplicationWindow {
     }
 
     Loader {
+        id: looperEditorLoader
+        active: false
+        sourceComponent: LooperEditor {}
+    }
+
+    Loader {
+        id: fxPadLoader
+        active: false
+        sourceComponent: FxPad {}
+    }
+
+    Loader {
         id: portLoader
         active: false
         sourceComponent: PortPicker {
@@ -571,8 +616,13 @@ ApplicationWindow {
         id: navigatorLoader
         active: false
         sourceComponent: Navigator {
-            x: window.width - width - Skin.spacing
-            y: topBar.height + Skin.spacing
+            // Clamped, not just pinned to the corner: a small window at a
+            // high UI scale can be narrower or shorter than this popup wants
+            // to be, and the unclamped math put half of it past the window's
+            // own edge - past the edge of the one surface it can draw on.
+            x: Math.max(Skin.spacing, window.width - width - Skin.spacing)
+            y: Math.min(topBar.height + Skin.spacing,
+                       window.height - height - Skin.spacing)
             onJumpTo: row => mixerArea.contentX =
                           Math.max(0, Math.min(row * (Skin.stripWidth + Skin.gap),
                                                mixerArea.contentWidth
@@ -663,8 +713,8 @@ ApplicationWindow {
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
         anchors.bottomMargin: Skin.spacingL
-        width: Math.min(parent.width - Skin.px(40),
-                        toastText.implicitWidth + Skin.px(28))
+        width: Math.min(parent.width - Px.px(40),
+                        toastText.implicitWidth + Px.px(28))
         height: toastText.implicitHeight + Skin.spacingL
         radius: Skin.radius
         color: Skin.popup
@@ -681,7 +731,7 @@ ApplicationWindow {
         Text {
             id: toastText
             anchors.centerIn: parent
-            width: parent.width - Skin.px(24)
+            width: parent.width - Px.px(24)
             text: statusToast.message
             color: Skin.text
             font.pixelSize: Skin.font

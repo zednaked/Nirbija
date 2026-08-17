@@ -64,15 +64,16 @@ bool FilePlayerInstance::load(const std::string& path) {
   path_ = path;
 
   // The audio thread may be inside the old buffer right now, so it is retired
-  // rather than freed.
+  // rather than freed. Position is reset before the pointer is published, or
+  // one block of the new file plays at the old file's offset.
   const uint64_t now = process_generation_.load(std::memory_order_acquire);
   std::erase_if(retired_, [now](const RetiredBuffer& item) {
     return now >= item.generation + 2;
   });
   if (owned_ != nullptr) retired_.push_back({owned_, now});
   owned_ = std::move(buffer);
+  rewind_.store(true, std::memory_order_relaxed);
   live_.store(owned_.get(), std::memory_order_release);
-  position_ = 0.0;
   return true;
 }
 
@@ -103,6 +104,7 @@ void FilePlayerInstance::render(const float* const*, float* const* outputs,
 
   Buffer* buffer = live_.load(std::memory_order_acquire);
   if (buffer == nullptr || buffer->frames == 0 || !transport_playing_) return;
+  if (rewind_.exchange(false, std::memory_order_relaxed)) position_ = 0.0;
 
   const float gain = gain_.load(std::memory_order_relaxed);
   const bool loop = loop_.load(std::memory_order_relaxed);

@@ -55,6 +55,11 @@ PluginKind kind_from_ports(int audio_inputs, int audio_outputs,
 // without it.
 struct TransportInfo {
   bool playing = false;
+  // The beat grid is moving: Play is on, or the metronome is keeping time
+  // without it. Sequencers and the file player still look at `playing`.
+  // The looper's quantise looks at this, so a loop can be punched to the
+  // click with the session stopped.
+  bool rolling = false;
   double tempo_bpm = 120.0;
   int numerator = 4;
   int denominator = 4;

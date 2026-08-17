@@ -217,6 +217,25 @@ int main() {
            "a key pressed after latch joined the old chord: " + show(after));
   }
 
+  // A note-off mid-chord is not "the hands left". Latch should keep adding.
+  {
+    Arp arp;
+    arp.activate(kRate, kBlock);
+    arp.set_parameter(5, 1.0);  // latch
+    note_on(arp, C); note_on(arp, E); note_on(arp, G);
+    note_off(arp, C);
+    note_on(arp, 65);  // F
+    const std::vector<int> got = run(arp, 4);
+    bool saw_e = false, saw_g = false, saw_f = false;
+    for (int n : got) {
+      if (n == 64) saw_e = true;
+      if (n == 67) saw_g = true;
+      if (n == 65) saw_f = true;
+    }
+    expect(saw_e && saw_g && saw_f,
+           "latch treated a mid-chord note-off as a new chord: " + show(got));
+  }
+
   // --- stopping the transport releases everything ----------------------------
   {
     Arp arp;

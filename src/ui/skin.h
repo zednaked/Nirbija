@@ -126,7 +126,7 @@ class Skin : public QObject {
   // sets it at startup; so does whatever was last chosen from the keyboard,
   // which is remembered per machine rather than per session - how big the
   // interface should be is a fact about the screen in front of you.
-  static qreal scale() { return scale_; }
+  static qreal scale() { return scaleRef(); }
 
   static constexpr qreal kMinScale = 0.6;
   static constexpr qreal kMaxScale = 3.0;
@@ -134,8 +134,8 @@ class Skin : public QObject {
   // Steps rather than a free number: a size worth having is one you can get
   // back to, and twelve percent a press is coarse enough to feel and fine
   // enough to land on comfortable.
-  Q_INVOKABLE void zoomIn() { setScale(scale_ * 1.12); }
-  Q_INVOKABLE void zoomOut() { setScale(scale_ / 1.12); }
+  Q_INVOKABLE void zoomIn() { setScale(scaleRef() * 1.12); }
+  Q_INVOKABLE void zoomOut() { setScale(scaleRef() / 1.12); }
   Q_INVOKABLE void zoomReset() { setScale(startingScale()); }
   Q_INVOKABLE void setScale(qreal value);
 
@@ -213,7 +213,13 @@ class Skin : public QObject {
   Q_INVOKABLE static QVariantList faderTicks();
 
  private:
-  static qreal scale_;
+  // A function-local static rather than a namespace-scope one: the latter
+  // would run during static initialization, before main() has had a chance
+  // to call QApplication::setOrganizationName(). QSettings reads under that
+  // window found no organization set, so every restart came back to 1.0
+  // instead of whatever the last session left the scale at. This one builds
+  // on first use instead, which for a QML-driven app is well after main().
+  static qreal& scaleRef();
 
  public:
 

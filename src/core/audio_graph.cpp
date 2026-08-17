@@ -298,7 +298,16 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
 
   for (size_t i = 0; i < count; ++i) {
     ChannelStrip* live = live_[i].load(std::memory_order_acquire);
-    if (live == nullptr) continue;  // removed channel
+    if (live == nullptr) {
+      if (tap_written_[i] > 0) {
+        for (int p = 0; p < tap_written_[i]; ++p) {
+          std::fill(tap_l_[i][p].begin(), tap_l_[i][p].end(), 0.0f);
+          std::fill(tap_r_[i][p].begin(), tap_r_[i][p].end(), 0.0f);
+        }
+        tap_written_[i] = 0;
+      }
+      continue;  // removed channel
+    }
     ChannelStrip& strip = *live;
 
     // Two channels wide is all the scratch there is, and a strip wider than
@@ -357,6 +366,11 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
     for (int p = 0; p < pairs; ++p)
       strip.copy_extra_output(p, tap_l_[i][p].data(), tap_r_[i][p].data(),
                               frames);
+    for (int p = pairs; p < tap_written_[i]; ++p) {
+      std::fill(tap_l_[i][p].begin(), tap_l_[i][p].end(), 0.0f);
+      std::fill(tap_r_[i][p].begin(), tap_r_[i][p].end(), 0.0f);
+    }
+    tap_written_[i] = pairs;
 
     const bool mix_channel =
         (!channel_solo && !bus_solo) ||

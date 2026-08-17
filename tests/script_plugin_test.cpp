@@ -258,6 +258,29 @@ int main() {
                 "the restored script did not see the restored knob");
   }
 
+  // A held note must turn off at the pitch that actually sounded, even if
+  // a knob rebuild remaps the same incoming key to somewhere else.
+  {
+    nirbija::ScriptInstance script;
+    script.activate(48000.0, 256);
+    expect(script.set_script(R"(
+      function build(knob)
+        local m = {}
+        local shift = math.floor(knob[1] * 12 + 0.5)
+        for n = 0, 127 do m[n] = math.min(127, n + shift) end
+        return { note_map = m }
+      end)"), "transpose script refused: " + script.error());
+
+    const auto on = through(script, {note(60)});
+    expect(on.size() == 1 && on[0].data[1] == 60, "the first on was not 60");
+    script.set_parameter(0, 1.0);  // +12
+    const auto off = through(script, {note(60, 0, 0, false)});
+    if (off.size() != 1) fail("the matching off was dropped after a rebuild");
+    else expect(off[0].data[1] == 60,
+                "the off went to " + std::to_string(off[0].data[1]) +
+                    " after the rebuild, not the pitch that sounded");
+  }
+
   if (failures > 0) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return 1;

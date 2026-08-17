@@ -65,7 +65,7 @@ Rectangle {
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
-        height: Skin.px(3)
+        height: Px.px(3)
         radius: Skin.radiusS
         color: root.accent
     }
@@ -73,7 +73,7 @@ Rectangle {
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: Skin.gap
-        anchors.topMargin: Skin.gap + Skin.px(3)
+        anchors.topMargin: Skin.gap + Px.px(3)
         spacing: Skin.gap
 
         // A bus is fed by the strips pointed at it, so it has nothing to pick
@@ -107,7 +107,7 @@ Rectangle {
         MidiKeyboard {
             visible: !root.isBus
             Layout.fillWidth: true
-            Layout.preferredHeight: visible ? Skin.px(56) : 0
+            Layout.preferredHeight: visible ? Px.px(56) : 0
             targetRow: root.row
         }
 
@@ -115,16 +115,16 @@ Rectangle {
         RowLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            Layout.minimumHeight: Skin.px(150)
-            Layout.preferredHeight: Skin.px(200)
+            Layout.minimumHeight: Px.px(150)
+            Layout.preferredHeight: Px.px(200)
             // Past about this, a taller fader is no easier to set, while the
             // insert chain is always easier to read with another slot showing.
-            Layout.maximumHeight: Skin.px(250)
+            Layout.maximumHeight: Px.px(250)
             spacing: Skin.gap
 
             Fader {
                 Layout.fillHeight: true
-                Layout.preferredWidth: Skin.px(58)
+                Layout.preferredWidth: Px.px(58)
                 gain: root.gain
                 positionLeft: root.positionLeft
                 positionRight: root.positionRight
@@ -142,7 +142,7 @@ Rectangle {
 
                 StripButton {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: Skin.px(26)
+                    Layout.preferredHeight: Px.px(26)
                     label: "M"
                     tip: qsTr("Mute this channel.")
                     active: root.muted
@@ -152,7 +152,7 @@ Rectangle {
 
                 StripButton {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: Skin.px(26)
+                    Layout.preferredHeight: Px.px(26)
                     label: "S"
                     tip: qsTr("Solo. While anything is soloed, only soloed strips reach the master.")
                     active: root.soloed
@@ -162,7 +162,7 @@ Rectangle {
 
                 StripButton {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: Skin.px(26)
+                    Layout.preferredHeight: Px.px(26)
                     label: "R"
                     tip: qsTr("Arm for recording. Which tracks get recorded is decided when recording starts, so arming mid-take does nothing until the next one.")
                     active: root.armed
@@ -181,7 +181,7 @@ Rectangle {
 
                 PanControl {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: Skin.px(18)
+                    Layout.preferredHeight: Px.px(18)
                     pan: root.pan
                     onPanRequested: value => Mixer.setPan(root.row, value)
                 }
@@ -237,7 +237,7 @@ Rectangle {
                 required property var modelData
 
                 Layout.fillWidth: true
-                Layout.preferredHeight: Skin.px(20)
+                Layout.preferredHeight: Px.px(20)
                 busName: modelData.name
                 level: modelData.level
                 onLevelRequested: value => root.sendLevelRequested(send.index, value)
@@ -260,7 +260,7 @@ Rectangle {
         StripButton {
             id: title
             Layout.fillWidth: true
-            Layout.preferredHeight: Skin.px(20)
+            Layout.preferredHeight: Px.px(20)
             label: root.channelName
             flat: true
             tip: qsTr("%1 — click to rename this strip, duplicate it, or remove it.").arg(root.channelName)

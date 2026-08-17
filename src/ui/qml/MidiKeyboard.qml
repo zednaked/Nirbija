@@ -19,7 +19,7 @@ Rectangle {
     property int octave: 4
 
     implicitWidth: Skin.stripWidth - 2 * Skin.gap
-    implicitHeight: Skin.px(56)
+    implicitHeight: Px.px(56)
 
     color: Skin.slotEmpty
     border.width: 1
@@ -113,11 +113,11 @@ Rectangle {
         Row {
             id: octaveRow
             width: parent.width
-            height: Skin.px(16)
+            height: Px.px(16)
             spacing: Skin.spacingXS
 
             StripButton {
-                width: Skin.px(20)
+                width: Px.px(20)
                 height: parent.height
                 label: "−"
                 tip: qsTr("An octave down.")
@@ -125,7 +125,7 @@ Rectangle {
             }
 
             Text {
-                width: parent.width - 2 * (Skin.px(20) + Skin.spacingXS)
+                width: parent.width - 2 * (Px.px(20) + Skin.spacingXS)
                 height: parent.height
                 horizontalAlignment: Text.AlignHCenter
                 verticalAlignment: Text.AlignVCenter
@@ -136,7 +136,7 @@ Rectangle {
             }
 
             StripButton {
-                width: Skin.px(20)
+                width: Px.px(20)
                 height: parent.height
                 label: "+"
                 tip: qsTr("An octave up.")

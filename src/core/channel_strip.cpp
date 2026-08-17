@@ -72,6 +72,29 @@ void ChannelStrip::run_insert(PluginInstance* insert, float* const* buffers,
   }
 }
 
+void ChannelStrip::run_bypassed(PluginInstance* insert, float* const* buffers,
+                                uint32_t frames,
+                                const TransportInfo* transport) {
+  const bool can_stash =
+      static_cast<int>(output_cache_.size()) >= channel_count_ &&
+      !output_cache_.empty() && frames <= output_cache_[0].size();
+  if (can_stash) {
+    for (int ch = 0; ch < channel_count_; ++ch)
+      std::copy_n(buffers[ch], frames, output_cache_[ch].data());
+  }
+  if (transport != nullptr) insert->set_transport(*transport);
+  for (size_t e = 0; e < midi_chain_count_; ++e)
+    insert->queue_midi(midi_chain_[e]);
+  insert->process(buffers, buffers, frames);
+  MidiEvent dump[32];
+  while (insert->take_midi_output(dump, 32) == 32) {
+  }
+  if (can_stash) {
+    for (int ch = 0; ch < channel_count_; ++ch)
+      std::copy_n(output_cache_[ch].data(), frames, buffers[ch]);
+  }
+}
+
 bool ChannelStrip::snapshot_chain(ChainSnapshot* out) const {
   // Four attempts is generous: the writer's window is a handful of stores, and
   // failing every time means the UI thread was descheduled inside one of them.
@@ -119,8 +142,7 @@ void ChannelStrip::process(float* const* buffers, uint32_t frames,
     if (insert == nullptr) continue;
     if (flags_of(i) & kPostFader) continue;
     if (flags_of(i) & kBypass) {
-      for (size_t e = 0; e < midi_chain_count_; ++e)
-        insert->queue_midi(midi_chain_[e]);
+      run_bypassed(insert, buffers, frames, transport);
       continue;
     }
     run_insert(insert, plugin_io_.data(), frames, transport, false);
@@ -150,8 +172,7 @@ void ChannelStrip::process(float* const* buffers, uint32_t frames,
     if (insert == nullptr) continue;
     if ((flags_of(i) & kPostFader) == 0) continue;
     if (flags_of(i) & kBypass) {
-      for (size_t e = 0; e < midi_chain_count_; ++e)
-        insert->queue_midi(midi_chain_[e]);
+      run_bypassed(insert, buffers, frames, transport);
       continue;
     }
     run_insert(insert, plugin_io_.data(), frames, transport, false);
@@ -204,6 +225,9 @@ bool ChannelStrip::add_insert(std::unique_ptr<PluginInstance> plugin,
   // Publish the slot before the count, so the audio thread can never see a
   // count that reaches a slot it cannot read yet.
   begin_chain_edit();
+  // A removal leaves the previous occupant's bypass/post-fader bits. A
+  // new plugin in that hole is not the old one and should start clean.
+  insert_flags_[index].store(0, std::memory_order_release);
   insert_slots_[index].store(raw, std::memory_order_release);
   if (index == count) insert_count_.store(count + 1, std::memory_order_release);
   end_chain_edit();
@@ -215,6 +239,7 @@ void ChannelStrip::remove_insert(size_t index) {
   if (index >= insert_count_.load(std::memory_order_relaxed)) return;
   begin_chain_edit();
   PluginInstance* raw = insert_slots_[index].exchange(nullptr, std::memory_order_release);
+  insert_flags_[index].store(0, std::memory_order_release);
   end_chain_edit();
   if (raw == nullptr) return;
 

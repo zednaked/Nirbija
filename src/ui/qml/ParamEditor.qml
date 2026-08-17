@@ -16,8 +16,12 @@ Popup {
     property string pluginName: ""
     property var parameters: []
 
-    width: Skin.px(460)
-    height: Math.min(Skin.px(600), Skin.px(80) + parameters.length * Skin.px(34))
+    width: Px.px(460)
+    // A plugin with enough parameters to want the 600 px cap can still not
+    // fit a window resized down toward its own 520 px minimum height.
+    height: Math.min(Px.px(600), Px.px(80) + parameters.length * Px.px(34),
+                     Overlay.overlay ? Overlay.overlay.height - Px.px(24)
+                                      : Px.px(600))
     modal: true
     anchors.centerIn: Overlay.overlay
     padding: Skin.spacingL
@@ -72,37 +76,6 @@ Popup {
             wrapMode: Text.WordWrap
         }
 
-        RowLayout {
-            visible: Mixer.insertIsLooper(root.targetRow, root.targetSlot)
-            spacing: Skin.spacingS
-
-            StripButton {
-                Layout.preferredWidth: Skin.px(76)
-                label: qsTr("Rec")
-                activeColor: Skin.arm
-                tip: qsTr("Arm the loop for recording; it starts at the next cycle.")
-                onClicked: Mixer.setLooperRecord(root.targetRow, root.targetSlot, true)
-            }
-            StripButton {
-                Layout.preferredWidth: Skin.px(76)
-                label: qsTr("Play")
-                activeColor: Skin.meterLow
-                tip: qsTr("Play the recorded loop.")
-                onClicked: Mixer.setLooperPlay(root.targetRow, root.targetSlot, true)
-            }
-            StripButton {
-                Layout.preferredWidth: Skin.px(76)
-                label: qsTr("Clear")
-                danger: true
-                tip: qsTr("Throw the loop away.")
-                onClicked: Mixer.clearLooper(root.targetRow, root.targetSlot)
-            }
-
-            Item {
-                Layout.fillWidth: true
-            }
-        }
-
         ListView {
             id: list
             Layout.fillWidth: true
@@ -123,16 +96,24 @@ Popup {
                 required property var modelData
 
                 width: list.width
-                height: Skin.px(26)
+                height: Px.px(26)
 
                 readonly property real span: modelData.max - modelData.min
                 // Kept locally while dragging so the bar follows the finger
-                // without re-fetching the whole list.
+                // without re-fetching the whole list. Assigning to it below
+                // breaks this binding for good, which is fine while the row
+                // stays put - but the list reuses delegates, so scrolling can
+                // hand this same Item a different row's modelData without
+                // its dead binding ever picking up the new value. Explicitly
+                // resyncing on that change is what makes a value dragged
+                // earlier stop bleeding into whatever parameter scrolls into
+                // this slot next.
                 property real liveValue: modelData.value
+                onModelDataChanged: liveValue = modelData.value
 
                 Text {
                     id: label
-                    width: Skin.px(150)
+                    width: Px.px(150)
                     anchors.verticalCenter: parent.verticalCenter
                     text: parameter.modelData.name
                     color: Skin.textDim
@@ -146,7 +127,7 @@ Popup {
                     anchors.leftMargin: Skin.spacing
                     anchors.rightMargin: Skin.spacingL
                     anchors.verticalCenter: parent.verticalCenter
-                    height: Skin.px(18)
+                    height: Px.px(18)
 
                     // The rows scroll, so a drag has to prove itself before it
                     // wins the gesture from the list.

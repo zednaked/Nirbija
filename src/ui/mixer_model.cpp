@@ -3,6 +3,8 @@
 #include "core/script_plugin.h"
 
 #include "core/file_player.h"
+#include "core/looper.h"
+#include "core/fx_pad.h"
 
 #include <unistd.h>
 
@@ -553,11 +555,12 @@ void MixerModel::setTempo(qreal bpm) {
   // Below 20 or above 300 is not a tempo anyone meant to set, and plugins
   // divide by it.
   const qreal clamped = qBound(20.0, bpm, 300.0);
+  tempo_ui_ = clamped;
   EngineCommand command;
   command.kind = EngineCommand::Kind::SetTempo;
   command.value = static_cast<float>(clamped);
   engine_.post(command);
-  QTimer::singleShot(50, this, [this] { emit transportChanged(); });
+  emit transportChanged();
   markDirty();
 }
 
@@ -902,6 +905,13 @@ void MixerModel::newSession() {
   setMasterGain(1.0);
   setTempo(120.0);
   if (engine_.metronome()) toggleMetronome();
+  if (masterDim()) toggleMasterDim();
+  if (masterMute()) toggleMasterMute();
+  if (masterMono()) toggleMasterMono();
+  if (engine_.midi_clock()) toggleMidiClock();
+  if (engine_.follow_midi_clock()) toggleFollowMidiClock();
+  setTimeSignature(4, 4);
+  if (playing_ui_) togglePlay();
   saveSession();
 }
 
@@ -1123,6 +1133,14 @@ void MixerModel::pollLevels() {
     }
   }
   if (plugin_state_moved) markDirty();
+
+  if (engine_.follow_midi_clock()) {
+    const bool now = engine_.playing();
+    if (now != playing_ui_) {
+      playing_ui_ = now;
+      emit transportChanged();
+    }
+  }
 }
 
 // A fader that is linear in decibels spends most of its travel where the ear
@@ -1239,6 +1257,7 @@ void MixerModel::duplicateChannel(int row) {
 
   // The chain, in order, each plugin handed back the state its twin was in.
   // A copy of a strip that arrives empty is not a copy of anything.
+  engine_.park_graph();
   for (size_t i = 0; i < plugin_rows.size(); ++i) {
     if (plugin_rows[i] < 0) continue;  // no longer installed
     const int slot = placeInsert(dest, plugin_rows[i], -1);
@@ -1252,6 +1271,7 @@ void MixerModel::duplicateChannel(int row) {
     PluginInstance* insert = strip->insert_at(static_cast<size_t>(slot));
     if (insert != nullptr) insert->load_state(blobs[i]);
   }
+  engine_.unpark_graph();
 
   // Sends last, the way a session restores them, since they name a bus.
   const QVariantList sends = src.sends;
@@ -1390,9 +1410,50 @@ bool MixerModel::insertIsLooper(int row, int slot) const {
   return insert != nullptr && insert->descriptor().uid == "nirbija.looper";
 }
 
-void MixerModel::setLooperRecord(int row, int slot, bool on) {
+bool MixerModel::insertIsFxPad(int row, int slot) const {
   PluginInstance* insert = insertFor(row, slot);
-  if (insert != nullptr) insert->set_parameter(0, on ? 1.0 : 0.0);
+  return insert != nullptr && insert->descriptor().uid == "nirbija.fxpad";
+}
+
+void MixerModel::setFxPad(int row, int slot, int pad, bool on) {
+  auto* fx = dynamic_cast<FxPadInstance*>(insertFor(row, slot));
+  if (fx == nullptr) return;
+  fx->set_pad(pad, on);
+  markDirty();
+}
+
+bool MixerModel::fxPadOn(int row, int slot, int pad) const {
+  auto* fx = dynamic_cast<FxPadInstance*>(insertFor(row, slot));
+  return fx != nullptr && fx->pad_on(pad);
+}
+
+void MixerModel::setFxPadHold(int row, int slot, bool on) {
+  auto* fx = dynamic_cast<FxPadInstance*>(insertFor(row, slot));
+  if (fx == nullptr) return;
+  fx->set_hold(on);
+  markDirty();
+}
+
+bool MixerModel::fxPadHold(int row, int slot) const {
+  auto* fx = dynamic_cast<FxPadInstance*>(insertFor(row, slot));
+  return fx != nullptr && fx->hold();
+}
+
+void MixerModel::setLooperRecord(int row, int slot, bool on) {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  if (looper == nullptr) return;
+  if (on) {
+    // Snapshot before the audio thread starts writing. Parked so the copy
+    // cannot tear a sample the process callback is mid-overdub.
+    engine_.park_graph();
+    if (looper->loop_closed())
+      looper->capture_undo();
+    else
+      looper->capture_undo_empty();
+    engine_.unpark_graph();
+  }
+  looper->set_parameter(0, on ? 1.0 : 0.0);
+  markDirty();
 }
 
 void MixerModel::setLooperPlay(int row, int slot, bool on) {
@@ -1401,8 +1462,113 @@ void MixerModel::setLooperPlay(int row, int slot, bool on) {
 }
 
 void MixerModel::clearLooper(int row, int slot) {
-  PluginInstance* insert = insertFor(row, slot);
-  if (insert != nullptr) insert->set_parameter(2, 1.0);
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  if (looper == nullptr) return;
+  engine_.park_graph();
+  looper->capture_undo();
+  looper->set_parameter(2, 1.0);
+  engine_.unpark_graph();
+  markDirty();
+}
+
+bool MixerModel::looperCanUndo(int row, int slot) const {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  return looper != nullptr && looper->can_undo();
+}
+
+bool MixerModel::looperCanRedo(int row, int slot) const {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  return looper != nullptr && looper->can_redo();
+}
+
+void MixerModel::undoLooper(int row, int slot) {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  if (looper == nullptr || !looper->can_undo()) return;
+  engine_.park_graph();
+  looper->undo();
+  engine_.unpark_graph();
+  markDirty();
+}
+
+void MixerModel::redoLooper(int row, int slot) {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  if (looper == nullptr || !looper->can_redo()) return;
+  engine_.park_graph();
+  looper->redo();
+  engine_.unpark_graph();
+  markDirty();
+}
+
+QVariantList MixerModel::looperWaveform(int row, int slot, int buckets) const {
+  QVariantList out;
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  if (looper == nullptr) return out;
+  for (float peak : looper->waveform(buckets)) out.append(peak);
+  return out;
+}
+
+qreal MixerModel::looperTrimStart(int row, int slot) const {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  return looper == nullptr ? 0.0 : looper->trim_start();
+}
+
+qreal MixerModel::looperTrimEnd(int row, int slot) const {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  return looper == nullptr ? 1.0 : looper->trim_end();
+}
+
+qreal MixerModel::looperFadeIn(int row, int slot) const {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  return looper == nullptr ? 0.0 : looper->fade_in();
+}
+
+qreal MixerModel::looperFadeOut(int row, int slot) const {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  return looper == nullptr ? 0.0 : looper->fade_out();
+}
+
+void MixerModel::setLooperTrim(int row, int slot, qreal start, qreal end) {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  if (looper == nullptr) return;
+  looper->set_trim(start, end);
+  markDirty();
+}
+
+void MixerModel::setLooperFades(int row, int slot, qreal fadeIn, qreal fadeOut) {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  if (looper == nullptr) return;
+  looper->set_fades(fadeIn, fadeOut);
+  markDirty();
+}
+
+qreal MixerModel::looperPosition(int row, int slot) const {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  return looper == nullptr ? -1.0 : looper->position_fraction();
+}
+
+bool MixerModel::looperRecording(int row, int slot) const {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  return looper != nullptr && looper->recording();
+}
+
+bool MixerModel::looperPlaying(int row, int slot) const {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  return looper != nullptr && looper->playing();
+}
+
+bool MixerModel::looperHasAudio(int row, int slot) const {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  return looper != nullptr && looper->has_audio();
+}
+
+bool MixerModel::looperLoopClosed(int row, int slot) const {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  return looper != nullptr && looper->loop_closed();
+}
+
+qreal MixerModel::looperBeats(int row, int slot) const {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  return looper == nullptr ? 0.0 : looper->loop_beats();
 }
 
 void MixerModel::toggleMasterDim() {

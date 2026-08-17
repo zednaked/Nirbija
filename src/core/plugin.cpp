@@ -15,6 +15,7 @@
 #include "core/arpeggiator.h"
 #include "core/script_plugin.h"
 #include "core/step_sequencer.h"
+#include "core/fx_pad.h"
 
 #include <charconv>
 
@@ -56,6 +57,7 @@ class InternalBackend : public PluginBackend {
 
   std::vector<PluginDescriptor> scan() override {
     return {FilePlayerInstance::make_descriptor(), LooperInstance::make_descriptor(),
+            FxPadInstance::make_descriptor(),
             StepSequencerInstance::make_descriptor(),
             ArpeggiatorInstance::make_descriptor(),
             ScriptInstance::make_descriptor()};
@@ -66,6 +68,7 @@ class InternalBackend : public PluginBackend {
     if (desc.uid == "nirbija.fileplayer")
       return std::make_unique<FilePlayerInstance>();
     if (desc.uid == "nirbija.looper") return std::make_unique<LooperInstance>();
+    if (desc.uid == "nirbija.fxpad") return std::make_unique<FxPadInstance>();
     if (desc.uid == "nirbija.stepseq")
       return std::make_unique<StepSequencerInstance>();
     if (desc.uid == "nirbija.arp")

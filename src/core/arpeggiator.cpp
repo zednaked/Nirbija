@@ -61,7 +61,8 @@ void ArpeggiatorInstance::deactivate() {
   position_ = 0;
   last_step_beat_ = -1.0;
   event_count_ = 0;
-  keys_down_ = false;
+  keys_down_count_ = 0;
+  key_held_.fill(false);
   restart_on_next_ = false;
   playhead_.store(-1, std::memory_order_relaxed);
 }
@@ -130,18 +131,24 @@ void ArpeggiatorInstance::queue_midi(const MidiEvent& event) {
       restart_on_next_ = false;
     }
     hold(note, velocity);
-    keys_down_ = true;
+    if (note < key_held_.size() && !key_held_[note]) {
+      key_held_[note] = true;
+      ++keys_down_count_;
+    }
     return;
   }
   if (status == kNoteOff || (status == kNoteOn && velocity == 0)) {
+    if (note < key_held_.size() && key_held_[note]) {
+      key_held_[note] = false;
+      if (keys_down_count_ > 0) --keys_down_count_;
+    }
     if (latch_.load(std::memory_order_relaxed)) {
-      // The chord stays; only note that the hands have left it.
-      keys_down_ = false;
-      restart_on_next_ = true;
+      // The chord stays until every key is up. One note-off mid-hold is
+      // not the start of a new chord.
+      if (keys_down_count_ == 0) restart_on_next_ = true;
       return;
     }
     drop(note);
-    if (held_count_ == 0) keys_down_ = false;
   }
 }
 
@@ -272,6 +279,10 @@ void ArpeggiatorInstance::process(const float* const*, float* const*,
 }
 
 size_t ArpeggiatorInstance::take_midi_output(MidiEvent* out, size_t capacity) {
+  std::sort(events_.begin(), events_.begin() + event_count_,
+            [](const MidiEvent& a, const MidiEvent& b) {
+              return a.frame < b.frame;
+            });
   const size_t count = std::min(event_count_, capacity);
   std::copy_n(events_.begin(), count, out);
   event_count_ = 0;

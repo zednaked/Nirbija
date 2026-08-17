@@ -260,23 +260,49 @@ void ScriptInstance::queue_midi(const MidiEvent& event) {
     return;
   }
 
-  const int note = tables->note[event.data[1] & 0x7f];
+  const uint8_t in_note = event.data[1] & 0x7f;
+  const uint8_t in_channel = event.data[0] & 0x0f;
+  const bool off = status == kNoteOff ||
+                   (status == kNoteOn && event.data[2] == 0);
+
+  if (off) {
+    for (size_t i = 0; i < sounding_count_; ++i) {
+      if (sounding_[i].in_note != in_note ||
+          sounding_[i].in_channel != in_channel)
+        continue;
+      MidiEvent& out = events_[event_count_++];
+      out = event;
+      out.data[0] = static_cast<uint8_t>(kNoteOff | sounding_[i].out_channel);
+      out.data[1] = sounding_[i].out_note;
+      out.data[2] = event.data[2];
+      sounding_[i] = sounding_[sounding_count_ - 1];
+      --sounding_count_;
+      return;
+    }
+  }
+
+  const int note = tables->note[in_note];
   if (note < 0) return;  // the script dropped it
 
-  const uint8_t channel = event.data[0] & 0x0f;
   int velocity = event.data[2] & 0x7f;
   // A note-off carries a velocity too, and remapping it to zero would be
   // silently turning it into another note-off. Only note-ons can be dropped.
-  if (status == kNoteOn) {
+  if (status == kNoteOn && event.data[2] > 0) {
     velocity = tables->velocity[velocity];
-    if (velocity == 0 && event.data[2] > 0) return;
+    if (velocity == 0) return;
   }
 
+  const uint8_t out_channel =
+      static_cast<uint8_t>(tables->channel[in_channel] & 0x0f);
   MidiEvent& out = events_[event_count_++];
   out = event;
-  out.data[0] = static_cast<uint8_t>(status | (tables->channel[channel] & 0x0f));
+  out.data[0] = static_cast<uint8_t>(status | out_channel);
   out.data[1] = static_cast<uint8_t>(note);
   out.data[2] = static_cast<uint8_t>(velocity);
+
+  if (!off && sounding_count_ < sounding_.size())
+    sounding_[sounding_count_++] = {in_note, in_channel,
+                                    static_cast<uint8_t>(note), out_channel};
 }
 
 void ScriptInstance::process(const float* const*, float* const*, uint32_t) {

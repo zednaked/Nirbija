@@ -167,11 +167,25 @@ size_t Engine::add_channel(const std::string& name, int channel_count) {
 
   // Revive a hole: ports from the previous occupant are still registered.
   if (index < channel_ports_.size() && channel_ports_[index].audio[0] != nullptr) {
+    ChannelPorts& record = channel_ports_[index];
+    // A mono occupant only registered the left half. A stereo strip in
+    // the same hole needs the right-hand ports or its right side is
+    // permanently silent.
+    if (channel_count > 1 && record.audio[1] == nullptr) {
+      const std::string in_name = std::to_string(index + 1) + "_in_r";
+      record.audio[1] = jack_port_register(client_, in_name.c_str(),
+                                           JACK_DEFAULT_AUDIO_TYPE,
+                                           JackPortIsInput, 0);
+      const std::string out_name = std::to_string(index + 1) + "_out_r";
+      record.audio_out[1] = jack_port_register(client_, out_name.c_str(),
+                                               JACK_DEFAULT_AUDIO_TYPE,
+                                               JackPortIsOutput, 0);
+    }
+    record.tap = false;
     return graph_->add_channel(
         name, channel_count,
-        std::make_unique<JackInputSource>(channel_ports_[index].audio[0],
-                                          channel_ports_[index].audio[1]),
-        std::make_unique<JackMidiSource>(channel_ports_[index].midi));
+        std::make_unique<JackInputSource>(record.audio[0], record.audio[1]),
+        std::make_unique<JackMidiSource>(record.midi));
   }
 
   // Ports are named by index, not by the channel's display name: two channels
@@ -218,6 +232,7 @@ size_t Engine::add_channel(const std::string& name, int channel_count) {
   // (a tap channel that was removed leaves one with no ports of its own), and
   // pushing there would file this channel's ports under someone else's number.
   if (channel_ports_.size() <= index) channel_ports_.resize(index + 1);
+  record.tap = false;
   channel_ports_[index] = record;
 
   return graph_->add_channel(name, channel_count,
@@ -228,15 +243,25 @@ size_t Engine::add_channel(const std::string& name, int channel_count) {
 std::string Engine::start_recording(const std::string& directory) {
   if (client_ == nullptr || recorder_.recording()) return {};
 
-  // Armed channels first, master last, so the file numbers read in strip order.
+  // Armed channels first, then armed buses, master last, so the file
+  // numbers read in strip order.
   std::vector<std::string> names;
   std::vector<size_t> armed;
+  std::vector<size_t> armed_buses;
   const size_t count = graph_->channel_count();
   for (size_t i = 0; i < count; ++i) {
     if (!graph_->channel_alive(i)) continue;
     ChannelStrip& strip = graph_->channel(i);
     if (!strip.armed()) continue;
     armed.push_back(i);
+    names.push_back(strip.name());
+  }
+  const size_t buses = graph_->bus_count();
+  for (size_t i = 0; i < buses; ++i) {
+    if (!graph_->bus_alive(i)) continue;
+    ChannelStrip& strip = graph_->bus(i);
+    if (!strip.armed()) continue;
+    armed_buses.push_back(i);
     names.push_back(strip.name());
   }
   names.push_back("master");
@@ -251,6 +276,9 @@ std::string Engine::start_recording(const std::string& directory) {
 
   for (size_t track = 0; track < armed.size(); ++track)
     graph_->channel(armed[track]).set_record_track(static_cast<int>(track));
+  for (size_t i = 0; i < armed_buses.size(); ++i)
+    graph_->bus(armed_buses[i])
+        .set_record_track(static_cast<int>(armed.size() + i));
 
   graph_->set_recorder(&recorder_, static_cast<int>(names.size()) - 1);
   return take;
@@ -265,6 +293,9 @@ void Engine::stop_recording() {
   const size_t count = graph_->channel_count();
   for (size_t i = 0; i < count; ++i)
     if (graph_->channel_alive(i)) graph_->channel(i).set_record_track(-1);
+  const size_t buses = graph_->bus_count();
+  for (size_t i = 0; i < buses; ++i)
+    if (graph_->bus_alive(i)) graph_->bus(i).set_record_track(-1);
   // Best effort only. What actually makes the teardown safe is the in-flight
   // guard inside Recorder::stop(), since a write() can already be past its
   // recording() check when this returns.
@@ -360,8 +391,13 @@ bool Engine::connect_source(size_t channel, const std::string& port, bool midi) 
     if (target != nullptr) jack_port_disconnect(client_, target);
   }
   if (port.empty()) return true;
+  if (record.tap) return false;
 
-  if (midi) return jack_connect(client_, port.c_str(), jack_port_name(record.midi)) == 0;
+  if (midi) {
+    if (record.midi == nullptr) return false;
+    return jack_connect(client_, port.c_str(), jack_port_name(record.midi)) == 0;
+  }
+  if (record.audio[0] == nullptr) return false;
 
   // A stereo channel fed from a stereo source should take both sides. The
   // sibling is the next port of the same client, which is how JACK names them.
@@ -474,6 +510,17 @@ size_t Engine::add_tap_channel(size_t source, int pair) {
   const size_t index = graph_->next_channel_slot();
   if (index >= kMaxChannels) return kMaxChannels;
   if (channel_ports_.size() <= index) channel_ports_.resize(index + 1);
+
+  ChannelPorts& record = channel_ports_[index];
+  // A removed strip leaves its ports registered. Disconnect them so the
+  // tap does not leak onto the previous occupant's hardware outs, and
+  // mark the slot so process() will not write them either.
+  for (jack_port_t* port : record.audio)
+    if (port != nullptr) jack_port_disconnect(client_, port);
+  for (jack_port_t* port : record.audio_out)
+    if (port != nullptr) jack_port_disconnect(client_, port);
+  if (record.midi != nullptr) jack_port_disconnect(client_, record.midi);
+  record.tap = true;
 
   auto tap = std::make_unique<TapSource>(graph_.get(), source, pair);
   tap->prepare(block_frames_);
@@ -630,11 +677,16 @@ int Engine::process(jack_nframes_t frames) {
   read_external_clock(frames);
 
   const bool playing = playing_.load(std::memory_order_relaxed);
+  const bool metronome = metronome_.load(std::memory_order_relaxed);
+  // One clock. Play unmutes sequenced plugins; the metronome alone is
+  // enough to walk the grid so a looper can punch to the click.
+  const bool rolling = playing || metronome;
   const double tempo = tempo_.load(std::memory_order_relaxed);
   const uint64_t frame = transport_frame_.load(std::memory_order_relaxed);
 
   TransportInfo transport;
   transport.playing = playing;
+  transport.rolling = rolling;
   transport.tempo_bpm = tempo;
   transport.numerator = time_num_.load(std::memory_order_relaxed);
   transport.denominator = time_den_.load(std::memory_order_relaxed);
@@ -653,10 +705,11 @@ int Engine::process(jack_nframes_t frames) {
     master[ch] = static_cast<float*>(jack_port_get_buffer(master_out_[ch], frames));
 
   graph_->render(master, frames);
-  render_metronome(master, frames, playing, tempo, transport.beats);
+  render_metronome(master, frames, tempo, transport.beats);
 
   for (size_t i = 0; i < channel_ports_.size(); ++i) {
     if (!graph_->channel_alive(i)) continue;
+    if (channel_ports_[i].tap) continue;
     ChannelStrip& strip = graph_->channel(i);
     for (int ch = 0; ch < 2; ++ch) {
       jack_port_t* port = channel_ports_[i].audio_out[ch];
@@ -691,7 +744,7 @@ int Engine::process(jack_nframes_t frames) {
     }
   }
 
-  if (playing && !follow_clock_.load(std::memory_order_relaxed))
+  if (rolling && !follow_clock_.load(std::memory_order_relaxed))
     transport_frame_.store(frame + frames, std::memory_order_relaxed);
   return 0;
 }
@@ -789,9 +842,9 @@ void Engine::read_external_clock(uint32_t frames) {
 // A short sine tick on every beat, a fifth higher on the downbeat. Added after
 // the master fader on purpose: pulling the mix down for a break should not
 // take the count with it.
-void Engine::render_metronome(float* const* master, uint32_t frames, bool playing,
-                              double tempo, double start_beats) {
-  const bool wanted = metronome_.load(std::memory_order_relaxed) && playing;
+void Engine::render_metronome(float* const* master, uint32_t frames, double tempo,
+                              double start_beats) {
+  const bool wanted = metronome_.load(std::memory_order_relaxed);
   if (!wanted && click_remaining_ == 0) return;
 
   const double beats_per_frame = tempo / 60.0 / sample_rate_;

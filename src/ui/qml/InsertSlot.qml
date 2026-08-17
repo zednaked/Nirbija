@@ -58,7 +58,7 @@ AbstractButton {
             anchors.top: parent.top
             anchors.bottom: parent.bottom
             anchors.margins: 1
-            width: Skin.px(3)
+            width: Px.px(3)
             radius: Skin.radiusS
             color: Skin.mute
         }

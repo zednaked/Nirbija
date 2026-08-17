@@ -100,7 +100,11 @@ class ArpeggiatorInstance : public PluginInstance {
   size_t held_count_ = 0;
   // Latch keeps a chord after the keys come up; the next key pressed starts a
   // new one rather than adding to the old.
-  bool keys_down_ = false;
+  // How many physical keys are still down. Latch must not start a new chord
+  // until that count hits zero: a single note-off mid-hold is not "the hands
+  // have left".
+  size_t keys_down_count_ = 0;
+  std::array<bool, 128> key_held_{};
   bool restart_on_next_ = false;
 
   std::array<uint8_t, kMaxHeld> sounding_{};

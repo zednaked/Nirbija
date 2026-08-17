@@ -175,6 +175,11 @@ class Engine {
     jack_port_t* audio[2] = {nullptr, nullptr};
     jack_port_t* audio_out[2] = {nullptr, nullptr};
     jack_port_t* midi = nullptr;
+    // A tap reads another strip's extra outs and has no JACK ports of its
+    // own. The slot may still hold leftovers from a previous occupant; the
+    // flag is what stops process() writing into those and connect_source
+    // calling jack_port_name on null.
+    bool tap = false;
   };
 
   struct InjectedMidi {
@@ -215,8 +220,8 @@ class Engine {
   double click_phase_ = 0.0;
   double click_step_ = 0.0;
 
-  void render_metronome(float* const* master, uint32_t frames, bool playing,
-                        double tempo, double start_beats);
+  void render_metronome(float* const* master, uint32_t frames, double tempo,
+                        double start_beats);
   double clock_phase_ = 0.0;
 
   // --- following an external clock, audio thread only ------------------------

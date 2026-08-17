@@ -18,7 +18,7 @@ Rectangle {
 
     // Wider than a channel: this is the fader that gets the numbered scale, and
     // the numbers need the room.
-    width: Skin.stripWidth + Skin.px(16)
+    width: Skin.stripWidth + Px.px(16)
     color: Skin.bar
 
     // A hairline against the mixer area, so the master reads as pinned rather
@@ -35,7 +35,7 @@ Rectangle {
         anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
-        height: Skin.px(3)
+        height: Px.px(3)
         color: Skin.text
         opacity: 0.5
     }
@@ -43,12 +43,12 @@ Rectangle {
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: Skin.gap
-        anchors.topMargin: Skin.gap + Skin.px(3)
+        anchors.topMargin: Skin.gap + Px.px(3)
         spacing: Skin.gap
 
         Text {
             Layout.fillWidth: true
-            Layout.preferredHeight: Skin.px(20)
+            Layout.preferredHeight: Px.px(20)
             text: qsTr("MASTER")
             color: Skin.text
             font.pixelSize: Skin.font
@@ -61,7 +61,7 @@ Rectangle {
         Fader {
             Layout.fillHeight: true
             Layout.alignment: Qt.AlignHCenter
-            Layout.preferredWidth: Skin.px(96)
+            Layout.preferredWidth: Px.px(96)
             gain: root.gain
             positionLeft: root.positionLeft
             positionRight: root.positionRight

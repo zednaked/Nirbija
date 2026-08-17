@@ -46,8 +46,8 @@ Popup {
     property int transpose: 0
     property int playhead: -1
 
-    width: Skin.px(620)
-    height: Skin.px(430)
+    width: Px.px(620)
+    height: Px.px(430)
     modal: true
     anchors.centerIn: Overlay.overlay
     padding: Skin.spacingL
@@ -162,7 +162,7 @@ Popup {
                 id: columns
                 anchors.fill: parent
                 anchors.margins: Skin.spacingXS
-                spacing: Skin.px(2)
+                spacing: Px.px(2)
 
                 Repeater {
                     model: root.stepCount
@@ -177,7 +177,7 @@ Popup {
                         readonly property real note: root.notes[column.index] || 60
                         readonly property real velocity: root.velocities[column.index] || 100
 
-                        width: (columns.width - (root.stepCount - 1) * Skin.px(2))
+                        width: (columns.width - (root.stepCount - 1) * Px.px(2))
                                / root.stepCount
                         height: columns.height
                         opacity: column.inPattern ? 1.0 : 0.3
@@ -211,13 +211,13 @@ Popup {
 
                             anchors.left: parent.left
                             anchors.right: parent.right
-                            anchors.margins: Skin.px(3)
+                            anchors.margins: Px.px(3)
                             anchors.bottom: parent.bottom
-                            anchors.bottomMargin: velocityStrip.height + Skin.px(4)
-                            height: Math.max(Skin.px(4),
+                            anchors.bottomMargin: velocityStrip.height + Px.px(4)
+                            height: Math.max(Px.px(4),
                                              Math.min(1, Math.max(0, bar.fraction)) *
                                              (column.height - velocityStrip.height
-                                              - Skin.px(8)))
+                                              - Px.px(8)))
                             radius: Skin.radiusS
                             color: column.on ? Skin.accent : Skin.slot
                             opacity: column.on ? 0.55 + 0.45 * (column.velocity / 127)
@@ -231,8 +231,8 @@ Popup {
                         Text {
                             anchors.horizontalCenter: parent.horizontalCenter
                             anchors.bottom: bar.top
-                            anchors.bottomMargin: Skin.px(2)
-                            visible: column.on && column.width > Skin.px(26)
+                            anchors.bottomMargin: Px.px(2)
+                            visible: column.on && column.width > Px.px(26)
                             text: root.noteName(column.note)
                             color: Skin.textDim
                             font.pixelSize: Skin.fontXS
@@ -245,8 +245,8 @@ Popup {
                             anchors.left: parent.left
                             anchors.right: parent.right
                             anchors.bottom: parent.bottom
-                            anchors.margins: Skin.px(3)
-                            height: Skin.px(10)
+                            anchors.margins: Px.px(3)
+                            height: Px.px(10)
                             radius: Skin.radiusS
                             color: Skin.slot
 
@@ -328,7 +328,7 @@ Popup {
 
             ValueTrack {
                 Layout.fillWidth: true
-                Layout.preferredHeight: Skin.px(22)
+                Layout.preferredHeight: Px.px(22)
                 label: qsTr("steps")
                 valueText: Math.round(root.length)
                 value: (root.length - 1) / 15
@@ -342,7 +342,7 @@ Popup {
 
             ValueTrack {
                 Layout.fillWidth: true
-                Layout.preferredHeight: Skin.px(22)
+                Layout.preferredHeight: Px.px(22)
                 label: qsTr("division")
                 valueText: ["1/4", "1/8", "1/16", "1/32", "1/4T", "1/8T"][root.division]
                 value: root.division / 5
@@ -356,7 +356,7 @@ Popup {
 
             ValueTrack {
                 Layout.fillWidth: true
-                Layout.preferredHeight: Skin.px(22)
+                Layout.preferredHeight: Px.px(22)
                 label: qsTr("gate")
                 valueText: Math.round(root.gate * 100) + "%"
                 value: (root.gate - 0.05) / 0.95
@@ -368,7 +368,7 @@ Popup {
 
             ValueTrack {
                 Layout.fillWidth: true
-                Layout.preferredHeight: Skin.px(22)
+                Layout.preferredHeight: Px.px(22)
                 label: qsTr("transpose")
                 valueText: (root.transpose > 0 ? "+" : "") + Math.round(root.transpose)
                 value: (root.transpose + 24) / 48

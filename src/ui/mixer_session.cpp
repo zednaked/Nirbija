@@ -268,6 +268,9 @@ void MixerModel::writeSession(const QString& target) const {
   if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
   const QByteArray payload = QJsonDocument(root).toJson(QJsonDocument::Indented);
   if (file.write(payload) != payload.size()) {
+    qWarning("session: short write to %s (%lld bytes)",
+             qPrintable(file.fileName()),
+             static_cast<long long>(payload.size()));
     file.close();
     QFile::remove(file.fileName());
     return;
@@ -534,7 +537,9 @@ bool MixerModel::loadChannelFrom(const QUrl& file) {
   const QJsonObject entry = channels.first().toObject();
 
   QStringList missing;
+  engine_.park_graph();
   const int row = restoreChannel(entry, &missing);
+  engine_.unpark_graph();
   if (row < 0) {
     emit errorOccurred(tr("There is no room for another strip"));
     return false;

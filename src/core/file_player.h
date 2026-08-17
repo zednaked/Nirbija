@@ -77,7 +77,10 @@ class FilePlayerInstance : public PluginInstance {
   int channels_ = 2;
 
   // Playback position in file frames, fractional because of resampling.
+  // Audio thread only. A load asks for a rewind via the flag below rather
+  // than writing this from the UI thread while process() is using it.
   double position_ = 0.0;
+  std::atomic<bool> rewind_{false};
   bool transport_playing_ = false;
 
   std::atomic<float> gain_{1.0f};

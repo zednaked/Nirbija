@@ -15,8 +15,15 @@ Popup {
     signal jumpTo(int row)
     signal openInsert(int row, int slot)
 
-    width: Skin.px(380)
-    height: Math.min(Skin.px(560), Skin.px(100) + list.count * Skin.px(48))
+    width: Px.px(380)
+    // Also bounded by the window itself: a session with enough channels to
+    // want the 560 px cap could still be taller than a window resized down
+    // toward its own minimum, especially at a high UI scale where both grow
+    // together. Overlay.overlay is the window's content area, so this is the
+    // same bound PortPicker clamps its own position against.
+    height: Math.min(Px.px(560), Px.px(100) + list.count * Px.px(48),
+                     Overlay.overlay ? Overlay.overlay.height - Px.px(24)
+                                      : Px.px(560))
     modal: true
     padding: Skin.spacing
     closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
@@ -54,7 +61,7 @@ Popup {
             }
 
             StripButton {
-                Layout.preferredWidth: Skin.px(84)
+                Layout.preferredWidth: Px.px(84)
                 label: qsTr("close UIs")
                 tip: qsTr("Close every plugin editor this session has open.")
                 onClicked: Mixer.closeAllEditors()
@@ -99,7 +106,7 @@ Popup {
                 required property var insertDetails
 
                 width: list.width
-                height: Skin.px(44)
+                height: Px.px(44)
                 radius: Skin.radius
                 color: rowHover.hovered ? Skin.slot : Skin.slotEmpty
                 border.width: 1
@@ -118,7 +125,7 @@ Popup {
 
                 Rectangle {
                     id: chip
-                    width: Skin.px(4)
+                    width: Px.px(4)
                     anchors.left: parent.left
                     anchors.top: parent.top
                     anchors.bottom: parent.bottom
@@ -175,7 +182,7 @@ Popup {
                                 visible: modelData.name.length > 0
                                 width: visible ? insertLabel.implicitWidth
                                                  + Skin.spacing : 0
-                                height: Skin.px(16)
+                                height: Px.px(16)
                                 radius: Skin.radiusS
                                 color: insertHover.hovered ? Skin.accent
                                      : modelData.bypassed ? Skin.slotEmpty

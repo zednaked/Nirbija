@@ -18,8 +18,15 @@ Popup {
     property string message: ""
     property bool failed: false
 
-    width: Skin.px(680)
-    height: Skin.px(560)
+    // 680x560 is bigger than the window's own minimum (660x520), so at a high
+    // UI scale, or a window resized down toward that minimum, this popup
+    // could ask for more room than the window has to give it.
+    width: Math.min(Px.px(680),
+                    Overlay.overlay ? Overlay.overlay.width - Px.px(24)
+                                     : Px.px(680))
+    height: Math.min(Px.px(560),
+                     Overlay.overlay ? Overlay.overlay.height - Px.px(24)
+                                      : Px.px(560))
     modal: true
     anchors.centerIn: Overlay.overlay
     padding: Skin.spacingL
@@ -138,7 +145,7 @@ Popup {
                     required property int index
 
                     Layout.fillWidth: true
-                    Layout.preferredHeight: Skin.px(22)
+                    Layout.preferredHeight: Px.px(22)
                     label: qsTr("knob %1").arg(knob.index + 1)
                     valueText: knob.value.toFixed(2)
                     value: 0
@@ -164,13 +171,13 @@ Popup {
             Item { Layout.fillWidth: true }
 
             StripButton {
-                Layout.preferredWidth: Skin.px(80)
+                Layout.preferredWidth: Px.px(80)
                 label: qsTr("apply")
                 onClicked: root.apply()
             }
 
             StripButton {
-                Layout.preferredWidth: Skin.px(80)
+                Layout.preferredWidth: Px.px(80)
                 label: qsTr("close")
                 onClicked: root.close()
             }

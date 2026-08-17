@@ -28,21 +28,32 @@ qreal Skin::startingScale() {
 
 // The environment wins when it is set - someone who typed NIRBIJA_UI_SCALE
 // this time meant it - and otherwise the size last chosen here comes back.
-qreal Skin::scale_ = [] {
-  if (!qEnvironmentVariableIsEmpty("NIRBIJA_UI_SCALE")) return startingScale();
-  const QSettings settings;
-  return clamped(settings.value(QString::fromLatin1(kScaleKey), 1.0).toReal());
-}();
+//
+// Built lazily, on first call, rather than as a namespace-scope static: this
+// still runs exactly once, but the first call happens once the QML engine
+// starts asking Skin for sizes, which is after main() has named the
+// application. A namespace-scope static initializes during static init,
+// before QApplication exists, so QSettings had no organization or
+// application name to key its store on and every read came back empty.
+qreal& Skin::scaleRef() {
+  static qreal value = [] {
+    if (!qEnvironmentVariableIsEmpty("NIRBIJA_UI_SCALE")) return startingScale();
+    const QSettings settings;
+    return clamped(settings.value(QString::fromLatin1(kScaleKey), 1.0).toReal());
+  }();
+  return value;
+}
 
 void Skin::setScale(qreal value) {
   const qreal wanted = clamped(value);
+  qreal& current = scaleRef();
   // Sizes are whole pixels, so two scales a hair apart draw identically and
   // the second one would be a repaint that changes nothing.
-  if (qFuzzyCompare(wanted, scale_)) return;
-  scale_ = wanted;
+  if (qFuzzyCompare(wanted, current)) return;
+  current = wanted;
 
   QSettings settings;
-  settings.setValue(QString::fromLatin1(kScaleKey), scale_);
+  settings.setValue(QString::fromLatin1(kScaleKey), current);
   emit scaleChanged();
 }
 

@@ -196,6 +196,10 @@ void StepSequencerInstance::process(const float* const*, float* const*,
 }
 
 size_t StepSequencerInstance::take_midi_output(MidiEvent* out, size_t capacity) {
+  std::sort(events_.begin(), events_.begin() + event_count_,
+            [](const MidiEvent& a, const MidiEvent& b) {
+              return a.frame < b.frame;
+            });
   const size_t count = std::min(event_count_, capacity);
   std::copy_n(events_.begin(), count, out);
   event_count_ = 0;

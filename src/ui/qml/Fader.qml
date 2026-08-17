@@ -34,7 +34,7 @@ Item {
     // wheel gesture is built from.
     readonly property real decibel: 1.0 / 76.0
 
-    implicitWidth: Skin.px(62)
+    implicitWidth: Px.px(62)
     activeFocusOnTab: true
 
     Accessible.role: Accessible.Slider
@@ -67,7 +67,7 @@ Item {
         Item {
             id: scale
             visible: root.showScale
-            width: visible ? Skin.px(22) : 0
+            width: visible ? Px.px(22) : 0
             height: parent.height
 
             Repeater {
@@ -91,12 +91,12 @@ Item {
         // --- fader track -----------------------------------------------------
         Item {
             id: track
-            width: Skin.px(26)
+            width: Px.px(26)
             height: parent.height
 
             Rectangle {
                 anchors.horizontalCenter: parent.horizontalCenter
-                width: Skin.px(5)
+                width: Px.px(5)
                 height: parent.height
                 radius: width / 2
                 color: Skin.meterTrack
@@ -113,7 +113,7 @@ Item {
                 Rectangle {
                     required property var modelData
                     anchors.horizontalCenter: parent.horizontalCenter
-                    width: modelData.major ? Skin.px(16) : Skin.px(10)
+                    width: modelData.major ? Px.px(16) : Px.px(10)
                     height: 1
                     color: modelData.major ? Skin.textDim : Skin.border
                     opacity: modelData.major ? 0.7 : 0.5
@@ -125,7 +125,7 @@ Item {
             // when the handle is hard to see against the panel.
             Rectangle {
                 anchors.horizontalCenter: parent.horizontalCenter
-                width: Skin.px(5)
+                width: Px.px(5)
                 radius: width / 2
                 color: root.accent
                 opacity: 0.28
@@ -135,8 +135,8 @@ Item {
 
             Rectangle {
                 id: handle
-                width: Skin.px(24)
-                height: Skin.px(14)
+                width: Px.px(24)
+                height: Px.px(14)
                 radius: Skin.radiusS
                 color: drag.active || fineDrag.active ? Skin.slotHover : Skin.slot
                 border.width: root.activeFocus ? 2 : 1
@@ -222,14 +222,14 @@ Item {
             height: parent.height
 
             Meter {
-                width: Skin.px(7)
+                width: Px.px(7)
                 height: track.height
                 position: root.positionLeft
                 hold: root.holdLeft
             }
 
             Meter {
-                width: Skin.px(7)
+                width: Px.px(7)
                 height: track.height
                 position: root.positionRight
                 hold: root.holdRight

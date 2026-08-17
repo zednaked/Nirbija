@@ -16,8 +16,8 @@ Popup {
     property int targetSlot: -1
     property bool replace: false
 
-    width: Skin.px(420)
-    height: Skin.px(480)
+    width: Px.px(420)
+    height: Px.px(480)
     modal: true
     anchors.centerIn: Overlay.overlay
     padding: 0
@@ -118,7 +118,7 @@ Popup {
                     required property var modelData
                     readonly property bool picked: filter.kind === chip.modelData.value
 
-                    height: Skin.px(22)
+                    height: Px.px(22)
                     width: chipText.implicitWidth + Skin.spacingL
                     radius: Skin.radiusS
                     color: chip.picked ? Skin.accent
@@ -186,7 +186,7 @@ Popup {
 
                 width: list.width - (list.ScrollBar.vertical.visible
                                      ? Skin.spacingL : 0)
-                height: Skin.px(40)
+                height: Px.px(40)
                 radius: Skin.radius
                 color: list.currentIndex === entry.index ? Skin.slot
                      : hover.hovered ? Skin.stripAlt
@@ -238,7 +238,7 @@ Popup {
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.rightMargin: Skin.spacing
                     width: formatText.implicitWidth + Skin.spacing
-                    height: Skin.px(16)
+                    height: Px.px(16)
                     radius: Skin.radiusS
                     color: Skin.slotEmpty
                     border.width: 1

@@ -13,7 +13,7 @@ Item {
 
     signal panRequested(real pan)
 
-    implicitHeight: Skin.px(18)
+    implicitHeight: Px.px(18)
     activeFocusOnTab: true
 
     readonly property real clamped: Math.max(-1, Math.min(1, pan))
@@ -58,14 +58,14 @@ Item {
         // Centre mark, so the resting place is visible when nothing is set.
         Rectangle {
             width: 1
-            height: parent.height - Skin.px(8)
+            height: parent.height - Px.px(8)
             anchors.centerIn: parent
             color: Skin.border
         }
 
         Rectangle {
-            width: Skin.px(3)
-            height: parent.height - Skin.px(4)
+            width: Px.px(3)
+            height: parent.height - Px.px(4)
             radius: Skin.radiusS
             color: Skin.accent
             anchors.verticalCenter: parent.verticalCenter

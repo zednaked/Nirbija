@@ -10,7 +10,7 @@ Popup {
 
     signal accepted(string name)
 
-    width: Skin.px(320)
+    width: Px.px(320)
     modal: true
     anchors.centerIn: Overlay.overlay
     padding: Skin.spacingL
@@ -72,13 +72,13 @@ Popup {
             spacing: Skin.spacingS
 
             StripButton {
-                width: Skin.px(76)
+                width: Px.px(76)
                 label: qsTr("Cancel")
                 onClicked: root.close()
             }
 
             StripButton {
-                width: Skin.px(76)
+                width: Px.px(76)
                 label: qsTr("Rename")
                 active: field.text.trim().length > 0
                 enabled: field.text.trim().length > 0

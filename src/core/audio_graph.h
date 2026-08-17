@@ -207,6 +207,10 @@ class AudioGraph {
   static constexpr int kMaxTapPairs = 8;
   std::array<std::array<std::vector<float>, kMaxTapPairs>, kMaxChannels> tap_l_{};
   std::array<std::array<std::vector<float>, kMaxTapPairs>, kMaxChannels> tap_r_{};
+  // How many pairs the last block actually wrote, so a bypassed or removed
+  // multi-out insert can have the leftover block zeroed once rather than
+  // looping forever into any tap that is still listening.
+  std::array<int, kMaxChannels> tap_written_{};
 
   // One block's worth of MIDI, reused per channel. Deep enough for anything a
   // sequencer sends in a single period.

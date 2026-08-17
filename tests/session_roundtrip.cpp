@@ -8,8 +8,10 @@
 
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #include "mixer_model.h"
+#include "core/looper.h"
 
 namespace {
 
@@ -98,6 +100,66 @@ int main(int argc, char* argv[]) {
       fail("the insert did not come back");
     else
       std::printf("  insert restored: %s\n", effect_name.toUtf8().constData());
+  }
+
+  // The looper's tape is megabytes of floats inside the insert blob. Saving
+  // the mixer and constructing a new one is what closing the app does, and
+  // that path used to come back with a silent looper.
+  {
+    qputenv("NIRBIJA_SESSION", (dir.path() + "/looper.json").toLocal8Bit());
+    const int looper_row =
+        restored.plugins()->rowFor(nirbija::PluginFormat::Internal,
+                                   "nirbija.looper");
+    if (looper_row < 0) {
+      fail("the built-in looper is not in the plugin list");
+    } else {
+      nirbija::MixerModel with_loop;
+      if (!with_loop.running()) {
+        fail("audio server went away before the looper round trip");
+      } else {
+        with_loop.addChannel(QStringLiteral("Loop"), 2);
+        if (!with_loop.addInsert(0, looper_row)) {
+          fail("could not add a looper");
+        } else {
+          with_loop.engineForTests().park_graph();
+          nirbija::LooperInstance* looper = dynamic_cast<nirbija::LooperInstance*>(
+              with_loop.engineForTests().graph().channel(0).insert_at(0));
+          if (looper == nullptr) {
+            fail("the insert was not a looper");
+          } else {
+            looper->set_parameter(3, 0.0);
+            looper->set_parameter(0, 1.0);
+            std::vector<float> in_l(256, 0.6f), in_r(256, 0.6f);
+            std::vector<float> out_l(256), out_r(256);
+            const float* ins[2] = {in_l.data(), in_r.data()};
+            float* outs[2] = {out_l.data(), out_r.data()};
+            nirbija::TransportInfo transport;
+            transport.playing = true;
+            looper->set_transport(transport);
+            for (int i = 0; i < 8; ++i) looper->process(ins, outs, 256);
+            looper->set_parameter(0, 0.0);
+            looper->process(ins, outs, 256);
+            if (!looper->loop_closed())
+              fail("the take did not close before the session save");
+          }
+          with_loop.engineForTests().unpark_graph();
+          with_loop.saveSession();
+        }
+      }
+    }
+
+    nirbija::MixerModel looped;
+    if (!looped.looperLoopClosed(0, 0))
+      fail("the looper came back without a closed loop");
+    else if (!looped.looperHasAudio(0, 0))
+      fail("the looper came back silent");
+    else {
+      bool heard = false;
+      for (const QVariant& peak : looped.looperWaveform(0, 0, 8))
+        heard |= peak.toFloat() > 0.1f;
+      if (!heard) fail("the restored looper waveform was empty");
+    }
+    qputenv("NIRBIJA_SESSION", (dir.path() + "/session.json").toLocal8Bit());
   }
 
   // Loading a file into a mixer that already has channels walks the removal

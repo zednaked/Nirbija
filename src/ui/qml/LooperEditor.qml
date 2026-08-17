@@ -1,0 +1,632 @@
+pragma ComponentBehavior: Bound
+
+import QtQuick
+import QtQuick.Controls.Basic
+import QtQuick.Layouts
+import Nirbija
+
+// The Looper's own editor: a waveform to trim and fade by dragging, instead
+// of the generic per-parameter sliders every other insert without an editor
+// gets. Record, play, clear, quantise and gain are still numbers underneath -
+// LooperInstance keeps them reachable by id for MIDI-learn - but nothing here
+// asks to be read as one.
+Popup {
+    id: root
+
+    property int targetRow: -1
+    property int targetSlot: -1
+
+    // Mirrors of the engine's own state, refreshed on open and on a timer
+    // while the popup is up. Dragging a handle updates its half of this
+    // immediately, ahead of the next refresh, so the handle never visibly
+    // snaps back while the finger is still on it.
+    property var peaks: []
+    property real trimStart: 0.0
+    property real trimEnd: 1.0
+    property real fadeIn: 0.0
+    property real fadeOut: 0.0
+    property real playPosition: -1.0
+    property real quantize: 2
+    property real gain: 1.0
+    property real pitch: 0
+    property real tone: 1
+    property real loopBeats: 0
+    property bool recording: false
+    property bool playing: true
+    // Audio on the tape, including a first pass still being written. A silent
+    // take still counts: peak-scanning treated digital zero as empty.
+    property bool hasAudio: false
+    // A closed loop, as opposed to the first record pass.
+    property bool hasLoop: false
+    property bool canUndo: false
+    property bool canRedo: false
+    readonly property string stageLabel:
+        root.recording ? (root.hasLoop ? qsTr("overdubbing…") : qsTr("recording…"))
+        : !root.hasAudio ? qsTr("empty")
+        : root.playing ? qsTr("playing") : qsTr("stopped")
+
+    width: Px.px(560)
+    height: Px.px(430)
+    modal: true
+    anchors.centerIn: Overlay.overlay
+    padding: Skin.spacingL
+    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+
+    // The default modal dimmer is a MouseArea. Pointer handlers on the
+    // mixer (faders, strip hover, the sideways flick) do not care about
+    // MouseAreas and keep seeing the pointer through the glass. A handler
+    // on the dimmer is what actually stops a drag on the waveform from
+    // grabbing a fader that happens to sit underneath.
+    Overlay.modal: Rectangle {
+        color: Qt.rgba(0, 0, 0, 0.45)
+
+        HoverHandler {}
+        TapHandler {
+            onTapped: {
+                if (root.closePolicy & Popup.CloseOnPressOutside)
+                    root.close()
+            }
+        }
+        DragHandler {
+            target: null
+            grabPermissions: PointerHandler.TakeOverForbidden
+        }
+        WheelHandler {
+            acceptedModifiers: Qt.NoModifier
+            onWheel: event => event.accepted = true
+        }
+        WheelHandler {
+            acceptedModifiers: Qt.ShiftModifier
+            onWheel: event => event.accepted = true
+        }
+    }
+
+    background: Rectangle {
+        color: Skin.popup
+        border.width: 1
+        border.color: Skin.border
+        radius: Skin.radiusL
+
+        // Same leak, inside the popup: empty chrome is not a handler, so a
+        // press on the padding or the graph falls through onto the strip.
+        HoverHandler {}
+        TapHandler {}
+        DragHandler {
+            target: null
+            grabPermissions: PointerHandler.TakeOverForbidden
+        }
+        WheelHandler {
+            acceptedModifiers: Qt.NoModifier
+            onWheel: event => event.accepted = true
+        }
+        WheelHandler {
+            acceptedModifiers: Qt.ShiftModifier
+            onWheel: event => event.accepted = true
+        }
+    }
+
+    enter: Transition {
+        NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Skin.fast }
+    }
+
+    function openFor(row, slot) {
+        root.targetRow = row
+        root.targetSlot = slot
+        root.refreshAll()
+        root.open()
+    }
+
+    onOpened: {
+        positionTimer.start()
+        waveformTimer.start()
+    }
+    onClosed: {
+        positionTimer.stop()
+        waveformTimer.stop()
+    }
+
+    function refreshAll() {
+        root.refreshWaveform()
+        root.refreshPosition()
+        root.refreshTransport()
+    }
+
+    function refreshTransport() {
+        root.recording = Mixer.looperRecording(root.targetRow, root.targetSlot)
+        root.playing = Mixer.looperPlaying(root.targetRow, root.targetSlot)
+        root.hasAudio = Mixer.looperHasAudio(root.targetRow, root.targetSlot)
+        root.hasLoop = Mixer.looperLoopClosed(root.targetRow, root.targetSlot)
+        root.canUndo = Mixer.looperCanUndo(root.targetRow, root.targetSlot)
+        root.canRedo = Mixer.looperCanRedo(root.targetRow, root.targetSlot)
+        root.loopBeats = Mixer.looperBeats(root.targetRow, root.targetSlot)
+        for (const p of Mixer.insertParameters(root.targetRow, root.targetSlot)) {
+            if (p.id === 3) root.quantize = p.value
+            else if (p.id === 4) root.gain = p.value
+            else if (p.id === 5) root.pitch = p.value
+            else if (p.id === 6) root.tone = p.value
+        }
+    }
+
+    function refreshWaveform() {
+        root.peaks = Mixer.looperWaveform(root.targetRow, root.targetSlot, 160)
+        root.trimStart = Mixer.looperTrimStart(root.targetRow, root.targetSlot)
+        root.trimEnd = Mixer.looperTrimEnd(root.targetRow, root.targetSlot)
+        root.fadeIn = Mixer.looperFadeIn(root.targetRow, root.targetSlot)
+        root.fadeOut = Mixer.looperFadeOut(root.targetRow, root.targetSlot)
+    }
+
+    function refreshPosition() {
+        root.playPosition = Mixer.looperPosition(root.targetRow, root.targetSlot)
+    }
+
+    // The playhead moves every block; the waveform only changes while
+    // recording or right after a clear. Polling it at the same rate would
+    // mean rescanning up to a minute of audio fifteen times a second for a
+    // line that is not moving.
+    Timer {
+        id: positionTimer
+        interval: 66
+        repeat: true
+        onTriggered: root.refreshPosition()
+    }
+    Timer {
+        id: waveformTimer
+        interval: 400
+        repeat: true
+        onTriggered: {
+            root.refreshWaveform()
+            root.refreshTransport()
+        }
+    }
+
+    contentItem: ColumnLayout {
+        spacing: Skin.spacing
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Skin.spacingS
+
+            Text {
+                text: qsTr("Looper")
+                color: Skin.text
+                font.pixelSize: Skin.fontL
+                font.bold: true
+            }
+
+            Text {
+                text: root.stageLabel
+                color: root.recording ? Skin.arm : Skin.textDim
+                font.pixelSize: Skin.fontS
+            }
+
+            Item { Layout.fillWidth: true }
+
+            StripButton {
+                Layout.preferredWidth: Px.px(76)
+                label: qsTr("Rec")
+                activeColor: Skin.arm
+                active: root.recording
+                tip: qsTr("Start recording, at the next cycle if quantised; press again to close the loop.")
+                onClicked: {
+                    root.recording = !root.recording
+                    Mixer.setLooperRecord(root.targetRow, root.targetSlot, root.recording)
+                    root.refreshTransport()
+                }
+            }
+            StripButton {
+                Layout.preferredWidth: Px.px(76)
+                label: qsTr("Play")
+                activeColor: Skin.meterLow
+                active: root.playing
+                tip: qsTr("Play the recorded loop; press again to mute it without losing it.")
+                onClicked: {
+                    root.playing = !root.playing
+                    Mixer.setLooperPlay(root.targetRow, root.targetSlot, root.playing)
+                }
+            }
+            StripButton {
+                Layout.preferredWidth: Px.px(76)
+                label: qsTr("Clear")
+                danger: true
+                tip: qsTr("Throw the loop away.")
+                onClicked: {
+                    Mixer.clearLooper(root.targetRow, root.targetSlot)
+                    root.recording = false
+                    root.hasAudio = false
+                    root.hasLoop = false
+                    root.refreshAll()
+                }
+            }
+            StripButton {
+                Layout.preferredWidth: Px.px(76)
+                label: qsTr("Undo")
+                enabled: root.canUndo
+                tip: qsTr("Peel the last take, overdub or clear. Press again from Redo to put it back.")
+                onClicked: {
+                    Mixer.undoLooper(root.targetRow, root.targetSlot)
+                    root.refreshAll()
+                }
+            }
+            StripButton {
+                Layout.preferredWidth: Px.px(76)
+                label: qsTr("Redo")
+                enabled: root.canRedo
+                tip: qsTr("Put back what Undo just peeled.")
+                onClicked: {
+                    Mixer.redoLooper(root.targetRow, root.targetSlot)
+                    root.refreshAll()
+                }
+            }
+        }
+
+        // --- the waveform: trim by dragging its edges, fade by dragging the
+        // small marks just inside them -------------------------------------
+        Item {
+            id: wave
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+
+            // A miss on a handle used to fall through the graph onto the
+            // strip behind it. Eat the gesture here; the handles take over
+            // when they actually get the press.
+            HoverHandler { cursorShape: Qt.ArrowCursor }
+            TapHandler {}
+            DragHandler {
+                target: null
+                grabPermissions: PointerHandler.TakeOverForbidden
+            }
+            WheelHandler {
+                acceptedModifiers: Qt.NoModifier
+                onWheel: event => event.accepted = true
+            }
+            WheelHandler {
+                acceptedModifiers: Qt.ShiftModifier
+                onWheel: event => event.accepted = true
+            }
+
+            readonly property int trimStartX: root.trimStart * wave.width
+            readonly property int trimEndX: root.trimEnd * wave.width
+            // Fades are capped at half the trim window in the engine, so a
+            // fade fraction of 1.0 walks its handle exactly to the midpoint.
+            readonly property real halfWindow: (trimEndX - trimStartX) / 2
+            readonly property int fadeInX: trimStartX + root.fadeIn * wave.halfWindow
+            readonly property int fadeOutX: trimEndX - root.fadeOut * wave.halfWindow
+
+            Rectangle {
+                anchors.fill: parent
+                radius: Skin.radius
+                color: Skin.slotEmpty
+                border.width: 1
+                border.color: Skin.border
+                clip: true
+
+                Text {
+                    anchors.centerIn: parent
+                    visible: !root.hasAudio
+                    text: qsTr("Nothing recorded yet. Rec, play something, Rec again to close the loop.")
+                    color: Skin.disabled
+                    font.pixelSize: Skin.font
+                    horizontalAlignment: Text.AlignHCenter
+                    width: parent.width - 2 * Skin.spacingL
+                    wrapMode: Text.WordWrap
+                }
+
+                // The waveform itself, drawn from the middle out - the usual
+                // shape, and one Rectangle per bucket is what every other bar
+                // in this app is already built from.
+                Row {
+                    id: bars
+                    visible: root.hasAudio
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    height: parent.height - 2 * Skin.spacingS
+
+                    Repeater {
+                        model: root.peaks
+
+                        Rectangle {
+                            required property real modelData
+                            readonly property real peak: Math.min(1, modelData)
+
+                            width: Math.max(1, bars.width / Math.max(1, root.peaks.length))
+                            height: Math.max(Px.px(2), peak * bars.height)
+                            anchors.verticalCenter: bars.verticalCenter
+                            color: Skin.accent
+                            opacity: 0.8
+                        }
+                    }
+                }
+
+                // Dims what trimming leaves out of the loop.
+                Rectangle {
+                    visible: root.hasLoop
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    width: wave.trimStartX
+                    color: Skin.background
+                    opacity: 0.72
+                }
+                Rectangle {
+                    visible: root.hasLoop
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    width: parent.width - wave.trimEndX
+                    color: Skin.background
+                    opacity: 0.72
+                }
+
+                // The fade ramps, as a gradient rather than a number: opaque
+                // where the loop is silent, clear where it is at full volume.
+                Rectangle {
+                    visible: root.hasLoop && root.fadeIn > 0
+                    anchors.left: parent.left
+                    anchors.leftMargin: wave.trimStartX
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    width: wave.fadeInX - wave.trimStartX
+                    gradient: Gradient {
+                        orientation: Gradient.Horizontal
+                        GradientStop { position: 0.0; color: Skin.background }
+                        GradientStop { position: 1.0; color: "transparent" }
+                    }
+                    opacity: 0.6
+                }
+                Rectangle {
+                    visible: root.hasLoop && root.fadeOut > 0
+                    anchors.right: parent.right
+                    anchors.rightMargin: parent.width - wave.trimEndX
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    width: wave.trimEndX - wave.fadeOutX
+                    gradient: Gradient {
+                        orientation: Gradient.Horizontal
+                        GradientStop { position: 0.0; color: "transparent" }
+                        GradientStop { position: 1.0; color: Skin.background }
+                    }
+                    opacity: 0.6
+                }
+
+                // Bar lines from the length the close snap settled on, so a
+                // 4-bar take reads as four rooms rather than a long smear.
+                Repeater {
+                    model: {
+                        const num = Mixer.timeNumerator()
+                        const bars = num > 0 ? Math.round(root.loopBeats / num) : 0
+                        return root.hasLoop && bars > 1 ? bars - 1 : 0
+                    }
+                    Rectangle {
+                        required property int index
+                        readonly property int bars: Math.round(root.loopBeats /
+                                                               Mixer.timeNumerator())
+                        x: (index + 1) / bars * parent.width
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        width: 1
+                        color: Skin.border
+                        opacity: 0.85
+                    }
+                }
+
+                // The playhead. -1 while nothing is playing.
+                Rectangle {
+                    visible: root.hasAudio && root.playPosition >= 0
+                    x: root.playPosition * parent.width - width / 2
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    width: Px.px(2)
+                    color: Skin.meterLow
+                }
+            }
+
+            // Trim handles: full-height, dragged to wherever the loop should
+            // start and stop.
+            component TrimHandle: Rectangle {
+                id: handle
+                required property bool isStart
+                property int atX: 0
+
+                x: handle.atX - width / 2
+                width: Px.px(6)
+                height: wave.height
+                radius: Skin.radiusS
+                color: dragHover.hovered || drag.active ? Skin.focus : Skin.accent
+
+                HoverHandler { id: dragHover; cursorShape: Qt.SizeHorCursor }
+
+                DragHandler {
+                    id: drag
+                    target: null
+                    // Both axes, or a slightly vertical drag is a better
+                    // match for the fader sitting under this popup and
+                    // steals the grab mid-trim.
+                    xAxis.enabled: true
+                    yAxis.enabled: true
+                    grabPermissions: PointerHandler.CanTakeOverFromAnything
+                                     | PointerHandler.ApprovesTakeOverByNothing
+                    onCentroidChanged: if (drag.active) {
+                        const fraction = Math.max(0, Math.min(1,
+                            (handle.x + width / 2 + drag.centroid.position.x
+                             - drag.centroid.pressPosition.x) / wave.width))
+                        if (handle.isStart)
+                            root.trimStart = Math.min(fraction, root.trimEnd - 0.02)
+                        else
+                            root.trimEnd = Math.max(fraction, root.trimStart + 0.02)
+                        Mixer.setLooperTrim(root.targetRow, root.targetSlot,
+                                            root.trimStart, root.trimEnd)
+                    }
+                }
+            }
+
+            TrimHandle {
+                isStart: true
+                atX: wave.trimStartX
+                visible: root.hasLoop
+            }
+            TrimHandle {
+                isStart: false
+                atX: wave.trimEndX
+                visible: root.hasLoop
+            }
+
+            // Fade handles: small marks that only move between their own
+            // trim edge and the window's midpoint.
+            component FadeHandle: Rectangle {
+                id: fadeHandle
+                required property bool isIn
+                property int atX: 0
+
+                x: fadeHandle.atX - width / 2
+                anchors.verticalCenter: wave.verticalCenter
+                width: Px.px(10)
+                height: Px.px(10)
+                radius: width / 2
+                color: fadeHover.hovered || fadeDrag.active ? Skin.focus : Skin.solo
+
+                HoverHandler { id: fadeHover; cursorShape: Qt.SizeHorCursor }
+
+                DragHandler {
+                    id: fadeDrag
+                    target: null
+                    xAxis.enabled: true
+                    yAxis.enabled: true
+                    grabPermissions: PointerHandler.CanTakeOverFromAnything
+                                     | PointerHandler.ApprovesTakeOverByNothing
+                    onCentroidChanged: if (fadeDrag.active) {
+                        const half = Math.max(1, wave.halfWindow)
+                        const x = fadeHandle.x + width / 2
+                                  + fadeDrag.centroid.position.x
+                                  - fadeDrag.centroid.pressPosition.x
+                        if (fadeHandle.isIn) {
+                            const frac = Math.max(0, Math.min(1,
+                                (x - wave.trimStartX) / half))
+                            root.fadeIn = frac
+                        } else {
+                            const frac = Math.max(0, Math.min(1,
+                                (wave.trimEndX - x) / half))
+                            root.fadeOut = frac
+                        }
+                        Mixer.setLooperFades(root.targetRow, root.targetSlot,
+                                             root.fadeIn, root.fadeOut)
+                    }
+                }
+            }
+
+            FadeHandle {
+                isIn: true
+                atX: wave.fadeInX
+                visible: root.hasLoop
+            }
+            FadeHandle {
+                isIn: false
+                atX: wave.fadeOutX
+                visible: root.hasLoop
+            }
+        }
+
+        Text {
+            Layout.fillWidth: true
+            visible: root.hasLoop
+            text: {
+                const num = Mixer.timeNumerator()
+                const bars = num > 0 ? root.loopBeats / num : 0
+                const length = bars >= 0.95 && Math.abs(bars - Math.round(bars)) < 0.08
+                    ? qsTr("%1 bars").arg(Math.round(bars))
+                    : root.loopBeats > 0
+                        ? qsTr("%1 beats").arg(root.loopBeats.toFixed(1))
+                        : ""
+                return length.length > 0
+                    ? qsTr("Trim and fade the handles. This take is %1.")
+                          .arg(length)
+                    : qsTr("Drag the tall handles to trim, the round ones just inside them to fade in and out.")
+            }
+            color: Skin.textDim
+            font.pixelSize: Skin.fontXS
+        }
+
+        // Grid for the close: the take is then snapped to that many beats
+        // or bars, so a phrase that ran a little long still sits on the
+        // meter.
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Skin.spacingXS
+
+            Text {
+                text: qsTr("Length")
+                color: Skin.textDim
+                font.pixelSize: Skin.fontS
+            }
+
+            component QuantizeButton: StripButton {
+                required property real forValue
+                Layout.preferredWidth: Px.px(44)
+                active: root.quantize === forValue
+                onClicked: {
+                    root.quantize = forValue
+                    Mixer.setInsertParameter(root.targetRow, root.targetSlot,
+                                             3, forValue)
+                }
+            }
+
+            QuantizeButton { forValue: 0; label: qsTr("free") }
+            QuantizeButton { forValue: 1; label: qsTr("beat") }
+            QuantizeButton { forValue: 2; label: qsTr("1") }
+            QuantizeButton { forValue: 3; label: qsTr("2") }
+            QuantizeButton { forValue: 4; label: qsTr("4") }
+            QuantizeButton { forValue: 5; label: qsTr("8") }
+
+            Text {
+                text: qsTr("bars")
+                color: Skin.textDim
+                font.pixelSize: Skin.fontS
+                visible: root.quantize >= 2
+            }
+
+            Item { Layout.fillWidth: true }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Skin.spacing
+
+            ValueTrack {
+                Layout.fillWidth: true
+                label: qsTr("Pitch")
+                valueText: (root.pitch >= 0 ? "+" : "") + root.pitch.toFixed(1)
+                value: (root.pitch + 12) / 24
+                tip: qsTr("Loop pitch in semitones, −12 to +12. Does not change the live input.")
+                onMoved: v => {
+                    root.pitch = v * 24 - 12
+                    Mixer.setInsertParameter(root.targetRow, root.targetSlot,
+                                             5, root.pitch)
+                }
+            }
+
+            ValueTrack {
+                Layout.fillWidth: true
+                label: qsTr("Tone")
+                valueText: Math.round(root.tone * 100) + "%"
+                value: root.tone
+                tip: qsTr("Darker cuts the highs on the loop; 100% leaves it open.")
+                onMoved: v => {
+                    root.tone = v
+                    Mixer.setInsertParameter(root.targetRow, root.targetSlot, 6, v)
+                }
+            }
+
+            ValueTrack {
+                Layout.fillWidth: true
+                label: qsTr("Gain")
+                valueText: root.gain.toFixed(2)
+                value: root.gain / 2.0
+                tip: qsTr("Loop gain, 0 to 200%.")
+                onMoved: v => {
+                    root.gain = v * 2.0
+                    Mixer.setInsertParameter(root.targetRow, root.targetSlot, 4, root.gain)
+                }
+            }
+        }
+    }
+}

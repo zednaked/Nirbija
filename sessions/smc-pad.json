@@ -1,0 +1,49 @@
+{
+    "channels": [
+        {
+            "armed": false,
+            "audioSource": "",
+            "channelSink": "",
+            "destination": -1,
+            "destinationKind": "master",
+            "gain": 1,
+            "inserts": [
+                {
+                    "bypassed": false,
+                    "format": "LV2",
+                    "postFader": false,
+                    "state": "PHVybjpuaXJiaWphOnN0YXRlPgoJYSBwc2V0OlByZXNldCA7CglsdjI6YXBwbGllc1RvIDxodHRwOi8vZHJ1bWt2MS5zb3VyY2Vmb3JnZS5uZXQvbHYyPiA7CglsdjI6cG9ydCBbCgkJbHYyOnN5bWJvbCAiQ0hPMV9ERUxBWSIgOwoJCXBzZXQ6dmFsdWUgMC41CgldICwgWwoJCWx2MjpzeW1ib2wgIkNITzFfRkVFREIiIDsKCQlwc2V0OnZhbHVlIDAuNQoJXSAsIFsKCQlsdjI6c3ltYm9sICJDSE8xX01PRCIgOwoJCXBzZXQ6dmFsdWUgMC41CgldICwgWwoJCWx2MjpzeW1ib2wgIkNITzFfUkFURSIgOwoJCXBzZXQ6dmFsdWUgMC41CgldICwgWwoJCWx2MjpzeW1ib2wgIkNITzFfV0VUIiA7CgkJcHNldDp2YWx1ZSAwLjAKCV0gLCBbCgkJbHYyOnN5bWJvbCAiREVGMV9DSEFOTkVMIiA7CgkJcHNldDp2YWx1ZSAwLjAKCV0gLCBbCgkJbHYyOnN5bWJvbCAiREVGMV9NT0RXSEVFTCIgOwoJCXBzZXQ6dmFsdWUgMC4yCgldICwgWwoJCWx2MjpzeW1ib2wgIkRFRjFfTk9URU9GRiIgOwoJCXBzZXQ6dmFsdWUgMS4wCgldICwgWwoJCWx2MjpzeW1ib2wgIkRFRjFfUElUQ0hCRU5EIiA7CgkJcHNldDp2YWx1ZSAwLjIKCV0gLCBbCgkJbHYyOnN5bWJvbCAiREVGMV9QUkVTU1VSRSIgOwoJCXBzZXQ6dmFsdWUgMC4yCgldICwgWwoJCWx2MjpzeW1ib2wgIkRFRjFfVkVMT0NJVFkiIDsKCQlwc2V0OnZhbHVlIDAuMgoJXSAsIFsKCQlsdjI6c3ltYm9sICJERUwxX0JQTSIgOwoJCXBzZXQ6dmFsdWUgMTgwLjAKCV0gLCBbCgkJbHYyOnN5bWJvbCAiREVMMV9ERUxBWSIgOwoJCXBzZXQ6dmFsdWUgMC41CgldICwgWwoJCWx2MjpzeW1ib2wgIkRFTDFfRkVFREIiIDsKCQlwc2V0OnZhbHVlIDAuNQoJXSAsIFsKCQlsdjI6c3ltYm9sICJERUwxX1dFVCIgOwoJCXBzZXQ6dmFsdWUgMC4wCgldICwgWwoJCWx2MjpzeW1ib2wgIkRZTjFfQ09NUFJFU1MiIDsKCQlwc2V0OnZhbHVlIDAuMAoJXSAsIFsKCQlsdjI6c3ltYm9sICJEWU4xX0xJTUlURVIiIDsKCQlwc2V0OnZhbHVlIDEuMAoJXSAsIFsKCQlsdjI6c3ltYm9sICJGTEExX0RBRlQiIDsKCQlwc2V0OnZhbHVlIDAuMAoJXSAsIFsKCQlsdjI6c3ltYm9sICJGTEExX0RFTEFZIiA7CgkJcHNldDp2YWx1ZSAwLjUKCV0gLCBbCgkJbHYyOnN5bWJvbCAiRkxBMV9GRUVEQiIgOwoJCXBzZXQ6dmFsdWUgMC41CgldICwgWwoJCWx2MjpzeW1ib2wgIkZMQTFfV0VUIiA7CgkJcHNldDp2YWx1ZSAwLjAKCV0gLCBbCgkJbHYyOnN5bWJvbCAiR0VOMV9TQU1QTEUiIDsKCQlwc2V0OnZhbHVlIDM2LjAKCV0gLCBbCgkJbHYyOnN5bWJvbCAiUEhBMV9EQUZUIiA7CgkJcHNldDp2YWx1ZSAwLjAKCV0gLCBbCgkJbHYyOnN5bWJvbCAiUEhBMV9ERVBUSCIgOwoJCXBzZXQ6dmFsdWUgMC41CgldICwgWwoJCWx2MjpzeW1ib2wgIlBIQTFfRkVFREIiIDsKCQlwc2V0OnZhbHVlIDAuNQoJXSAsIFsKCQlsdjI6c3ltYm9sICJQSEExX1JBVEUiIDsKCQlwc2V0OnZhbHVlIDAuNQoJXSAsIFsKCQlsdjI6c3ltYm9sICJQSEExX1dFVCIgOwoJCXBzZXQ6dmFsdWUgMC4wCgldICwgWwoJCWx2MjpzeW1ib2wgIlJFVjFfREFNUCIgOwoJCXBzZXQ6dmFsdWUgMC41CgldICwgWwoJCWx2MjpzeW1ib2wgIlJFVjFfRkVFREIiIDsKCQlwc2V0OnZhbHVlIDAuNQoJXSAsIFsKCQlsdjI6c3ltYm9sICJSRVYxX1JPT00iIDsKCQlwc2V0OnZhbHVlIDAuNQoJXSAsIFsKCQlsdjI6c3ltYm9sICJSRVYxX1dFVCIgOwoJCXBzZXQ6dmFsdWUgMC4wCgldICwgWwoJCWx2MjpzeW1ib2wgIlJFVjFfV0lEVEgiIDsKCQlwc2V0OnZhbHVlIDAuMAoJXSA7CglzdGF0ZTpzdGF0ZSBbCgkJPGh0dHA6Ly9kcnVta3YxLnNvdXJjZWZvcmdlLm5ldC9sdjIjc3RhdGU+ICJQQ0ZFVDBOVVdWQkZJR1J5ZFcxcmRqRStDanh6ZEdGMFpUNEtJRHhsYkdWdFpXNTBjeTgrQ2p3dmMzUmhkR1UrQ2c9PSJeXnhzZDpiYXNlNjRCaW5hcnkKCV0gLgo=",
+                    "uid": "http://drumkv1.sourceforge.net/lv2"
+                }
+            ],
+            "isBus": false,
+            "midiMask": 65535,
+            "midiSources": [
+                "Midi-Bridge:SINCO: SMC-PAD-Master (capture)"
+            ],
+            "muted": false,
+            "name": "SMC Pad",
+            "pan": 0,
+            "sends": [
+            ],
+            "soloed": false,
+            "width": 2
+        }
+    ],
+    "followMidiClock": false,
+    "master": {
+        "dim": false,
+        "gain": 1,
+        "mono": false,
+        "mute": false,
+        "sink": "Built-in Audio Analog Stereo:playback_FL"
+    },
+    "metronome": false,
+    "midiClock": false,
+    "midiMaps": [
+    ],
+    "tempo": 120,
+    "timeDenominator": 4,
+    "timeNumerator": 4,
+    "version": 1
+}
