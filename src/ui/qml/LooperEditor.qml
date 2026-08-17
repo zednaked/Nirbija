@@ -225,7 +225,7 @@ Popup {
                 label: qsTr("Rec")
                 activeColor: Skin.arm
                 active: root.recording
-                tip: qsTr("Start recording, at the next cycle if quantised; press again to close the loop.")
+                tip: qsTr("Start recording, at the next cycle if quantised. The take closes at Length and keeps looping; press again to stop recording.")
                 onClicked: {
                     root.recording = !root.recording
                     Mixer.setLooperRecord(root.targetRow, root.targetSlot, root.recording)
@@ -247,7 +247,7 @@ Popup {
                 Layout.preferredWidth: Px.px(76)
                 label: qsTr("Clear")
                 danger: true
-                tip: qsTr("Throw the loop away.")
+                tip: qsTr("Throw the loop away and drop Rec.")
                 onClicked: {
                     Mixer.clearLooper(root.targetRow, root.targetSlot)
                     root.recording = false
@@ -260,7 +260,7 @@ Popup {
                 Layout.preferredWidth: Px.px(76)
                 label: qsTr("Undo")
                 enabled: root.canUndo
-                tip: qsTr("Peel the last take, overdub or clear. Press again from Redo to put it back.")
+                tip: qsTr("Peel the last thing you played — the phrase between silences — not the whole Rec pass. Press again from Redo to put it back.")
                 onClicked: {
                     Mixer.undoLooper(root.targetRow, root.targetSlot)
                     root.refreshAll()
@@ -565,9 +565,10 @@ Popup {
             font.pixelSize: Skin.fontXS
         }
 
-        // Grid for the close: the take is then snapped to that many beats
-        // or bars, so a phrase that ran a little long still sits on the
-        // meter.
+        // How long the first take is. Rec left down closes on this grid and
+        // stays in overdub, so the phrase loops instead of growing a tail of
+        // silence that buries it. Punching out early still snaps to the same
+        // grid, the way it always did.
         RowLayout {
             Layout.fillWidth: true
             spacing: Skin.spacingXS
@@ -693,7 +694,8 @@ Popup {
                 label: qsTr("Feedback")
                 valueText: Math.round(root.feedback * 100) + "%"
                 value: root.feedback
-                tip: qsTr("How much of the old layer survives an overdub. 100% stacks forever; 0% is a one-shot replace.")
+                absolute: false
+                tip: qsTr("How much of the old layer survives an overdub. 100% stacks forever; drag down only if you want the take to fade. A tap on the word is not a jump.")
                 onMoved: v => {
                     root.feedback = v
                     Mixer.setInsertParameter(root.targetRow, root.targetSlot, 8, v)

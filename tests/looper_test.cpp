@@ -72,11 +72,17 @@ int main() {
   if (run_block(looper, 0.5f) < 0.45f) fail("play off swallowed the live input");
   looper.set_parameter(1, 1.0);
 
-  // Clear empties it.
+  // Clear empties it and drops Rec, or the next block starts a new take
+  // on the empty tape and the button stays lit.
+  looper.set_parameter(0, 1.0);
+  run_block(looper, 0.0f);
+  if (!looper.recording()) fail("rec did not arm before clear");
   looper.set_parameter(2, 1.0);
   float cleared = 0.0f;
   for (int i = 0; i < 8; ++i) cleared = std::max(cleared, run_block(looper, 0.0f));
   if (cleared > 1e-6f) fail("clear left audio behind");
+  if (looper.recording()) fail("clear left rec armed");
+  if (looper.has_audio()) fail("clear left rec running on the empty tape");
 
   // --- trim and fade -----------------------------------------------------
   // A fresh phrase: loud for the first half, silent for the second, so trim
@@ -415,6 +421,45 @@ int main() {
     if (!layer.loop_closed()) fail("undo did not restore a cleared loop");
   }
 
+  // Two phrases in one Rec pass, split by silence. Undo has to drop only
+  // the last one — the whole-pass swap used to throw the first away too.
+  {
+    nirbija::LooperInstance split;
+    split.set_channel_layout(2);
+    split.activate(kRate, kBlock);
+    split.set_parameter(3, 0.0);
+    split.capture_undo_empty();
+    split.set_parameter(0, 1.0);
+    for (int i = 0; i < 8; ++i) run_block(split, 0.7f);
+    for (int i = 0; i < 32; ++i) run_block(split, 0.0f);
+    for (int i = 0; i < 8; ++i) run_block(split, 0.7f);
+    split.set_parameter(0, 0.0);
+    run_block(split, 0.0f);
+
+    const auto whole = split.waveform(8);
+    if (whole.size() < 8 || whole.front() < 0.4f || whole.back() < 0.4f)
+      fail("two-phrase take did not land both licks on the tape");
+
+    split.undo();
+    if (!split.loop_closed()) fail("undo of the last phrase dropped the loop");
+    const auto peaks = split.waveform(8);
+    if (peaks.size() < 8) fail("waveform of the split take was empty");
+    if (peaks.front() < 0.4f)
+      fail("undo of the last phrase took the first one too");
+    if (peaks.back() > 0.05f)
+      fail("the last phrase was still on the tape after undo");
+
+    split.redo();
+    const auto back = split.waveform(8);
+    if (back.size() < 8 || back.back() < 0.4f)
+      fail("redo did not put the last phrase back");
+
+    split.undo();
+    split.undo();
+    if (split.loop_closed())
+      fail("undo of the remaining phrase did not drop an empty take");
+  }
+
   {
     nirbija::LooperInstance fx;
     fx.set_channel_layout(2);
@@ -547,6 +592,38 @@ int main() {
     if (std::fabs(restored.parameter_value(11) - 0.5) > 1e-4)
       fail("speed did not survive save");
     if (!restored.loop_closed()) fail("NLOOP2 came back without a loop");
+  }
+
+  // Length is 1 bar. Rec left down has to close on that bar and keep the
+  // take at full level: writing silence onto the end used to bury the
+  // phrase, and an overdub that scaled the old layer every sample ate it.
+  {
+    nirbija::LooperInstance held;
+    held.set_channel_layout(2);
+    held.activate(kRate, kBlock);
+    held.set_parameter(3, 2.0);  // 1 bar
+    held.set_parameter(0, 1.0);
+
+    const int bar_blocks =
+        static_cast<int>(kRate * 60.0 / 120.0 * 4.0 / kBlock);  // 375
+    for (int i = 0; i < bar_blocks; ++i) run_block(held, 0.6f);
+    if (!held.loop_closed())
+      fail("a held Rec did not close the take at Length");
+    if (!held.recording()) fail("closing at Length dropped Rec");
+
+    float first = 0.0f;
+    for (int i = 0; i < bar_blocks; ++i)
+      first = std::max(first, run_block(held, 0.0f));
+    if (first < 0.5f)
+      fail("the take was gone once Rec stayed down (peak " +
+           std::to_string(first) + ")");
+
+    float later = 0.0f;
+    for (int i = 0; i < bar_blocks * 3; ++i)
+      later = std::max(later, run_block(held, 0.0f));
+    if (later < first - 0.05f)
+      fail("a held Rec faded the take (first " + std::to_string(first) +
+           " later " + std::to_string(later) + ")");
   }
 
   if (failures > 0) {

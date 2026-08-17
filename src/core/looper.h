@@ -89,14 +89,15 @@ class LooperInstance : public PluginInstance {
   // The editor draws a bar grid from this and the time signature.
   double loop_beats() const { return loop_beats_.load(std::memory_order_relaxed); }
 
-  // One layer, like a pedal: the state before the last take, overdub or
-  // clear. Undo swaps with that snapshot; undo again puts the take back.
-  // Called from the UI thread with the graph parked — the copy is the
-  // loop itself, not something process() can afford.
+  // The state before the last Rec or Clear, plus each phrase recorded
+  // since — a phrase is a run of input between silences. Undo peels the
+  // last of those, not the whole pass, so a held Rec with two licks in it
+  // does not throw the first one away. Called from the UI thread with the
+  // graph parked — the copy is the loop, not something process() can afford.
   void capture_undo();
   void capture_undo_empty();
-  bool can_undo() const { return undo_.valid && !undo_.undone; }
-  bool can_redo() const { return undo_.valid && undo_.undone; }
+  bool can_undo() const;
+  bool can_redo() const;
   void undo();
   void redo();
 
@@ -117,6 +118,11 @@ class LooperInstance : public PluginInstance {
   void apply_requests(uint32_t frames);
   double unit_beats() const;
   uint64_t snap_length(uint64_t written) const;
+  // One Length unit in frames, 0 when Length is free. The first take closes
+  // here on its own so leaving Rec down does not keep eating silence onto
+  // the end of the phrase — and then keep playing that growing tape.
+  uint64_t grid_frames() const;
+  void close_loop(uint64_t frames, Stage next);
   float tone_sample(int channel, float sample);
   // Walks play_pos_ around [start, end) after a step; true if it wrapped.
   bool wrap_play_pos(double start, double end, bool reverse);
@@ -203,6 +209,23 @@ class LooperInstance : public PluginInstance {
   };
   UndoLayer undo_;
   void swap_undo();
+
+  // One byte per frame, set when Rec heard something this pass. Sized in
+  // activate() with the tape so the audio thread never grows it.
+  std::vector<uint8_t> recorded_;
+  struct Peel {
+    uint64_t start = 0;
+    uint64_t end = 0;
+    std::vector<float> audio;
+    uint64_t dropped_length = 0;
+    double dropped_beats = 0.0;
+  };
+  std::vector<Peel> peels_;
+  bool last_burst(uint64_t* start, uint64_t* end) const;
+  bool peel_last_burst();
+  void restore_peel();
+  void clear_recorded();
 };
+
 
 }  // namespace nirbija

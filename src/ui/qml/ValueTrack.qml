@@ -26,6 +26,10 @@ Item {
     // How much one notch of the wheel or one arrow key is worth.
     property real step: 0.05
     property real fineStep: 0.01
+    // Jump to where the pointer landed. Off for a control where a tap on the
+    // label would slam the value to nearly zero — overdub feedback is one,
+    // and a held Rec then eats the take.
+    property bool absolute: true
 
     signal moved(real value)
     signal menuRequested
@@ -102,12 +106,13 @@ Item {
     }
 
     // A tap lands the value where it was tapped; a drag keeps it under the
-    // finger.
+    // finger. Relative mode only moves from where the value already was, so
+    // a press on the label is not a jump to 10%.
     TapHandler {
         acceptedButtons: Qt.LeftButton
         onSingleTapped: eventPoint => {
             root.forceActiveFocus(Qt.MouseFocusReason)
-            root.applyAt(eventPoint.position.x)
+            if (root.absolute) root.applyAt(eventPoint.position.x)
         }
         onLongPressed: root.menuRequested()
     }
@@ -123,8 +128,22 @@ Item {
         xAxis.enabled: true
         yAxis.enabled: false
         dragThreshold: root.pressThreshold
-        onActiveChanged: if (active) root.forceActiveFocus(Qt.MouseFocusReason)
-        onCentroidChanged: if (active) root.applyAt(centroid.position.x)
+        property real startValue: 0
+        onActiveChanged: {
+            if (!active) return
+            startValue = root.value
+            root.forceActiveFocus(Qt.MouseFocusReason)
+        }
+        onCentroidChanged: {
+            if (!active) return
+            if (root.absolute) {
+                root.applyAt(centroid.position.x)
+                return
+            }
+            const travelled = (centroid.position.x - centroid.pressPosition.x)
+                              / Math.max(1, root.width)
+            root.moved(Math.max(0, Math.min(1, startValue + travelled)))
+        }
     }
 
     // The wheel is what a mouse has instead of a fine drag, and Shift makes it

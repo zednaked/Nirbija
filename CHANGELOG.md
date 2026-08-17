@@ -25,10 +25,26 @@ the middle is off, up and down go opposite ways.
 A session that only stored 0 or 1 still loads; those values were already the
 ends of the same range.
 
+### The looper keeps the take you already have
+
+Leaving Rec down used to keep writing onto the end of the first pass, so the
+phrase sat at the head of a growing tape and sounded like it was fading out.
+It now closes at Length and stays in overdub: the loop plays, Rec still
+layers, and unity feedback no longer scales the old layer at all.
+
+A tap on the Feedback label no longer jumps the value to nearly zero, which
+is what then ate the take on every pass.
+
 ### Also
 
 - The landing page says what the mixer does now: eight entries rather than
   six, with the sequencers, the Lua plugin and strip files.
+- The metronome is not Play. Turning the click on walks the grid for the
+  looper and sounds the tick; sequencers stay quiet until Play is on.
+- Looper undo peels the last phrase between silences, not the whole Rec
+  pass, so a held take with two licks in it keeps the first one.
+- Clear on the looper drops Rec, so it does not start a new take on the
+  empty tape.
 
 ## 0.3.0 — 2026-08-16
 
