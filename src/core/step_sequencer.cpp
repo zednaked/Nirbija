@@ -232,10 +232,10 @@ void StepSequencerInstance::process(const float* const*, float* const*,
                                     uint32_t frames) {
   if (frames == 0) return;
 
-  // The same grid the looper punches to: Play, or the metronome keeping time
-  // with Play off. A synth downstream still has to see a note-off when that
-  // grid stops, or it rings forever.
-  const bool run = transport_.playing || transport_.rolling;
+  // Play starts the figure. The metronome may be walking the same grid so a
+  // looper can punch to the click, but that is not a reason to fire notes —
+  // turning the click on used to start the sequencer as if Play had been hit.
+  const bool run = transport_.playing;
   if (!run || transport_.changed) {
     stop_sounding(0);
     last_step_beat_ = -1.0;

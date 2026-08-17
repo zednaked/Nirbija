@@ -486,7 +486,7 @@ int main() {
       fail("nudge right did not move step 0 onto step 1");
   }
 
-  // --- the metronome grid is enough, Play can be off ------------------------
+  // --- the metronome is not Play -------------------------------------------
   {
     nirbija::StepSequencerInstance seq;
     seq.activate(kRate, kBlock);
@@ -509,7 +509,7 @@ int main() {
       for (size_t e = 0; e < count; ++e)
         if ((buffer[e].data[0] & 0xf0) == 0x90 && buffer[e].data[2] > 0) ++ons;
     }
-    expect(ons > 0, "rolling with Play off produced no notes");
+    expect(ons == 0, "the metronome grid fired notes with Play off");
   }
 
   // --- new fields survive a round trip; an old blob still loads -------------

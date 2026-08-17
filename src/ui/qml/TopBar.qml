@@ -211,7 +211,7 @@ Rectangle {
         StripButton {
             Layout.preferredWidth: Px.px(32)
             label: "♩"
-            tip: qsTr("Metronome: a click on every beat, a fifth higher on the downbeat. Runs the same clock as Play, so the looper can punch to the grid with the session stopped. Sits after the master fader.")
+            tip: qsTr("Metronome: a click on every beat, a fifth higher on the downbeat. Independent of Play — the click runs with the session stopped, and does not start sequencers. Sits after the master fader.")
             active: root.metronome
             activeColor: Skin.solo
             onClicked: Mixer.toggleMetronome()
