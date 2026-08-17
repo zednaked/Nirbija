@@ -122,6 +122,18 @@ QVariant MixerModel::data(const QModelIndex& index, int role) const {
                      insertBypassed(index.row(), slot));
         entry.insert(QStringLiteral("postFader"),
                      insertPostFader(index.row(), slot));
+        // Cheap even when it is not a Looper: insertIsLooper() is one
+        // dynamic_cast, and the three state reads below short-circuit to
+        // false on a null cast. Read once a poll so a strip can show which
+        // of its inserts are armed or playing without opening each one.
+        if (insertIsLooper(index.row(), slot)) {
+          entry.insert(QStringLiteral("looperRecording"),
+                       looperRecording(index.row(), slot));
+          entry.insert(QStringLiteral("looperPlaying"),
+                       looperPlaying(index.row(), slot));
+          entry.insert(QStringLiteral("looperHasAudio"),
+                       looperHasAudio(index.row(), slot));
+        }
         details.append(entry);
       }
       return details;
@@ -1154,7 +1166,8 @@ void MixerModel::pollLevels() {
     if (!channels_.empty()) {
       emit dataChanged(index(0), index(static_cast<int>(channels_.size()) - 1),
                        {PeakLeftRole, PeakRightRole, PositionLeftRole,
-                        PositionRightRole, HoldLeftRole, HoldRightRole});
+                        PositionRightRole, HoldLeftRole, HoldRightRole,
+                        InsertDetailsRole});
     }
     emit levelsChanged();
   }
@@ -1173,6 +1186,20 @@ void MixerModel::pollLevels() {
       // none of this model's setters, so without asking, the session would
       // never learn it had anything new to write.
       if (insert->take_state_dirty()) plugin_state_moved = true;
+      // Length reading Sync: this instance never looks at the graph around
+      // it, so the host measures the target here once a poll and hands the
+      // number in. A target with no closed loop of its own reads as 0, the
+      // same as free-running, rather than leaving the last thing it had.
+      if (auto* looper = dynamic_cast<LooperInstance*>(insert)) {
+        if (looper->quantize() == LooperInstance::kQuantizeSync) {
+          auto* source = dynamic_cast<LooperInstance*>(
+              insertFor(looper->sync_target_row(), looper->sync_target_slot()));
+          looper->set_sync_beats(
+              source != nullptr && source->loop_closed()
+                  ? source->loop_beats()
+                  : 0.0);
+        }
+      }
     }
   }
   if (plugin_state_moved) markDirty();
@@ -1663,6 +1690,69 @@ bool MixerModel::looperLoopClosed(int row, int slot) const {
 qreal MixerModel::looperBeats(int row, int slot) const {
   auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
   return looper == nullptr ? 0.0 : looper->loop_beats();
+}
+
+qreal MixerModel::looperLevel(int row, int slot) const {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  return looper == nullptr ? 0.0 : static_cast<qreal>(looper->loop_peak());
+}
+
+QVariantList MixerModel::looperLayers(int row, int slot, int buckets) const {
+  QVariantList out;
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  if (looper == nullptr) return out;
+  for (int layer : looper->layer_map(buckets)) out.append(layer);
+  return out;
+}
+
+void MixerModel::setLooperSyncTarget(int row, int slot, int targetRow,
+                                     int targetSlot) {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  if (looper == nullptr) return;
+  looper->set_sync_target(targetRow, targetSlot);
+  // Nothing pushed yet at the new target: a stale beat count from whatever
+  // was picked before would otherwise sit there until the next poll.
+  looper->set_sync_beats(0.0);
+  markDirty(false);
+}
+
+int MixerModel::looperSyncTargetRow(int row, int slot) const {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  return looper == nullptr ? -1 : looper->sync_target_row();
+}
+
+int MixerModel::looperSyncTargetSlot(int row, int slot) const {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  return looper == nullptr ? -1 : looper->sync_target_slot();
+}
+
+QVariantList MixerModel::looperSyncCandidates(int row, int slot) const {
+  QVariantList out;
+  for (int r = 0; r < static_cast<int>(channels_.size()); ++r) {
+    ChannelStrip* strip = const_cast<MixerModel*>(this)->stripFor(r);
+    if (strip == nullptr) continue;
+    // Two passes: a channel with two Loopers needs its slot said out loud,
+    // one with a single Looper reads better without the extra number.
+    int looper_count = 0;
+    for (size_t s = 0; s < strip->insert_count(); ++s)
+      if (dynamic_cast<LooperInstance*>(strip->insert_at(s)) != nullptr)
+        ++looper_count;
+    for (size_t s = 0; s < strip->insert_count(); ++s) {
+      if (r == row && static_cast<int>(s) == slot) continue;
+      auto* looper = dynamic_cast<LooperInstance*>(strip->insert_at(s));
+      if (looper == nullptr) continue;
+      QVariantMap entry;
+      entry.insert(QStringLiteral("row"), r);
+      entry.insert(QStringLiteral("slot"), static_cast<int>(s));
+      const QString& name = channels_[static_cast<size_t>(r)].name;
+      entry.insert(QStringLiteral("label"),
+                   looper_count > 1
+                       ? QStringLiteral("%1 (slot %2)").arg(name).arg(s + 1)
+                       : name);
+      out.append(entry);
+    }
+  }
+  return out;
 }
 
 void MixerModel::toggleMasterDim() {

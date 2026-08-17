@@ -219,6 +219,12 @@ Rectangle {
                           && root.inserts[index].bypassed === true
                 postFader: index < root.inserts.length
                            && root.inserts[index].postFader === true
+                looperRecording: index < root.inserts.length
+                                 && root.inserts[index].looperRecording === true
+                looperPlaying: index < root.inserts.length
+                               && root.inserts[index].looperPlaying === true
+                looperHasAudio: index < root.inserts.length
+                                && root.inserts[index].looperHasAudio === true
                 onClicked: root.insertSlotClicked(slot.index, slot)
                 onMenuRequested: {
                     if (slot.index < root.inserts.length)

@@ -74,6 +74,8 @@ bool LooperInstance::activate(double sample_rate, uint32_t) {
   capacity_frames_ = static_cast<uint64_t>(sample_rate * kMaxLoopSeconds);
   buffer_.assign(capacity_frames_ * 2, 0.0f);
   recorded_.assign(capacity_frames_, 0);
+  layer_.assign(capacity_frames_, 0);
+  current_layer_ = 0;
   peels_.clear();
   play_pos_ = 0.0;
   tone_lpf_[0] = tone_lpf_[1] = 0.0f;
@@ -147,6 +149,11 @@ uint64_t LooperInstance::import_audio(const float* src, uint64_t src_frames,
 double LooperInstance::unit_beats() const {
   const int quantize = std::clamp(quantize_.load(std::memory_order_relaxed),
                                   0, kQuantizeMax);
+  // Sync: follow whatever the host last measured on the looper this one is
+  // set to chase, pushed in through set_sync_beats(). 0 until it has one,
+  // which grid_frames() already treats the same as free-running.
+  if (quantize == kQuantizeSync)
+    return sync_beats_.load(std::memory_order_relaxed);
   if (quantize <= 0) return 0.0;
   if (quantize == 1) return 1.0;
   const double bar = std::max(1, transport_.numerator);
@@ -224,7 +231,11 @@ void LooperInstance::begin_record() {
   if (stage_ == Stage::Empty) {
     written_.store(0, std::memory_order_relaxed);
     stage_ = Stage::Defining;
+    current_layer_ = 0;
   } else {
+    // A fresh overdub pass, one layer past whatever was on top before -
+    // clamped short of wrapping the byte layer_ is stored in.
+    current_layer_ = std::min(current_layer_ + 1, 254);
     // Overdub from the start of the audible window, not the raw buffer:
     // a trimmed loop's "top" is the trim start.
     const uint64_t length = length_.load(std::memory_order_relaxed);
@@ -295,6 +306,7 @@ void LooperInstance::apply_requests(uint32_t frames) {
     loop_beats_.store(0.0, std::memory_order_relaxed);
     tone_lpf_[0] = tone_lpf_[1] = 0.0f;
     stage_ = Stage::Empty;
+    current_layer_ = 0;
     // A trim or fade shaped for the phrase that just got thrown away means
     // nothing to whatever gets recorded next.
     trim_start_.store(0.0, std::memory_order_relaxed);
@@ -386,6 +398,9 @@ void LooperInstance::process(const float* const* inputs, float* const* outputs,
   const float speed =
       std::clamp(speed_.load(std::memory_order_relaxed), 0.25f, 4.0f);
   const int width = std::min(channels_, 2);
+  // The loop's own contribution to the output this block, dry input not
+  // included - see loop_peak() above.
+  float block_peak = 0.0f;
 
   for (uint32_t i = 0; i < frames; ++i) {
     float in[2] = {0.0f, 0.0f};
@@ -433,6 +448,8 @@ void LooperInstance::process(const float* const* inputs, float* const* outputs,
           buffer_[written * 2 + 1] = in[1];
           if (written < recorded_.size() && input_loud(in[0], in[1]))
             recorded_[written] = 1;
+          if (written < layer_.size())
+            layer_[written] = static_cast<uint8_t>(current_layer_);
           const uint64_t next = written + 1;
           written_.store(next, std::memory_order_relaxed);
           // Length is how long the first take is, not only a snap at punch-out.
@@ -473,6 +490,8 @@ void LooperInstance::process(const float* const* inputs, float* const* outputs,
           if (stage_ == Stage::Overdubbing) {
             if (i0 < recorded_.size() && input_loud(in[0], in[1]))
               recorded_[i0] = 1;
+            if (i0 < layer_.size() && input_loud(in[0], in[1]))
+              layer_[i0] = static_cast<uint8_t>(current_layer_);
             if (replace) {
               buffer_[i0 * 2] = in[0];
               buffer_[i0 * 2 + 1] = in[1];
@@ -494,8 +513,11 @@ void LooperInstance::process(const float* const* inputs, float* const* outputs,
                                 (buffer_[i1 * 2] - buffer_[i0 * 2]) * frac;
             const float raw_r = buffer_[i0 * 2 + 1] +
                                 (buffer_[i1 * 2 + 1] - buffer_[i0 * 2 + 1]) * frac;
-            out[0] += tone_sample(0, raw_l * gain * env);
-            out[1] += tone_sample(1, raw_r * gain * env);
+            const float wet_l = tone_sample(0, raw_l * gain * env);
+            const float wet_r = tone_sample(1, raw_r * gain * env);
+            out[0] += wet_l;
+            out[1] += wet_r;
+            block_peak = std::max(block_peak, std::max(std::fabs(wet_l), std::fabs(wet_r)));
           }
           const float pitch = std::clamp(
               pitch_.load(std::memory_order_relaxed), -12.0f, 12.0f);
@@ -530,14 +552,25 @@ void LooperInstance::process(const float* const* inputs, float* const* outputs,
     for (int ch = 0; ch < width; ++ch) outputs[ch][i] = out[ch];
   }
 
+  loop_peak_.store(block_peak, std::memory_order_relaxed);
+
   const uint64_t length = length_.load(std::memory_order_relaxed);
   const uint64_t written = written_.load(std::memory_order_relaxed);
-  // While the first pass is still open the playhead sits at the write head,
-  // so the editor can show something moving before the loop exists.
-  position_fraction_.store(
-      length > 0 ? play_pos_ / static_cast<double>(length)
-                 : (written > 0 ? 1.0 : -1.0),
-      std::memory_order_relaxed);
+  // While the first pass is still open there is no play_pos_ to report yet -
+  // show how far into the Length grid the write head has gotten instead, so
+  // the playhead actually moves across the take instead of jumping straight
+  // to the far edge the moment anything is heard.
+  double fraction = -1.0;
+  if (length > 0) {
+    fraction = play_pos_ / static_cast<double>(length);
+  } else if (written > 0) {
+    const uint64_t grid = grid_frames();
+    fraction = grid > 0
+                   ? std::min(1.0, static_cast<double>(written) /
+                                       static_cast<double>(grid))
+                   : 1.0;
+  }
+  position_fraction_.store(fraction, std::memory_order_relaxed);
 }
 
 uint64_t LooperInstance::trim_start_frames(uint64_t length) const {
@@ -602,11 +635,21 @@ void LooperInstance::set_fades(double fade_in, double fade_out) {
 
 std::vector<float> LooperInstance::waveform(int buckets) const {
   std::vector<float> out(static_cast<size_t>(std::max(buckets, 1)), 0.0f);
-  uint64_t len = length_.load(std::memory_order_relaxed);
-  // The first pass has no closed length yet; draw what has been written so
-  // the editor is not blank for the whole take.
-  if (len == 0) len = written_.load(std::memory_order_relaxed);
+  const uint64_t closed_len = length_.load(std::memory_order_relaxed);
+  const uint64_t written = written_.load(std::memory_order_relaxed);
+  uint64_t len = closed_len;
+  if (len == 0) {
+    // The first pass has no closed length yet. Scale the view to the length
+    // it will snap to on Length's grid, not to what has been written so
+    // far - otherwise the picture keeps restretching to fill the widget on
+    // every refresh and never shows how much room is actually left.
+    const uint64_t grid = grid_frames();
+    len = grid > 0 ? grid : written;
+  }
   if (len == 0) return out;
+  // How far into `len` real audio reaches; buckets past this stay at 0 so
+  // the untouched part of the grid reads as empty space, not a guess.
+  const uint64_t recorded_span = closed_len > 0 ? len : std::min(written, len);
 
   // buffer_ itself is not atomic - the audio thread can still be writing
   // into it here, during Defining or Overdubbing. Reading it unguarded is
@@ -616,13 +659,41 @@ std::vector<float> LooperInstance::waveform(int buckets) const {
 
   for (size_t b = 0; b < out.size(); ++b) {
     const uint64_t from = len * b / out.size();
+    if (from >= recorded_span) continue;
     const uint64_t to = std::max(from + 1, len * (b + 1) / out.size());
     float peak = 0.0f;
-    for (uint64_t i = from; i < to && i < len; ++i) {
+    for (uint64_t i = from; i < to && i < recorded_span; ++i) {
       peak = std::max(peak, std::fabs(buffer_[i * 2]));
       peak = std::max(peak, std::fabs(buffer_[i * 2 + 1]));
     }
     out[b] = peak;
+  }
+  return out;
+}
+
+std::vector<int> LooperInstance::layer_map(int buckets) const {
+  std::vector<int> out(static_cast<size_t>(std::max(buckets, 1)), 0);
+  const uint64_t closed_len = length_.load(std::memory_order_relaxed);
+  const uint64_t written = written_.load(std::memory_order_relaxed);
+  uint64_t len = closed_len;
+  if (len == 0) {
+    const uint64_t grid = grid_frames();
+    len = grid > 0 ? grid : written;
+  }
+  if (len == 0) return out;
+  const uint64_t recorded_span = closed_len > 0 ? len : std::min(written, len);
+  if (layer_.size() < recorded_span) return out;
+
+  // Same unguarded-read tradeoff as waveform() above, and the same
+  // best-effort story Undo does not rewind - see layer_map() in the header.
+  for (size_t b = 0; b < out.size(); ++b) {
+    const uint64_t from = len * b / out.size();
+    if (from >= recorded_span) continue;
+    const uint64_t to = std::max(from + 1, len * (b + 1) / out.size());
+    int newest = 0;
+    for (uint64_t i = from; i < to && i < recorded_span; ++i)
+      newest = std::max(newest, static_cast<int>(layer_[i]));
+    out[b] = newest;
   }
   return out;
 }
@@ -632,8 +703,9 @@ std::vector<ParameterInfo> LooperInstance::parameters() const {
       {kRecord, "Record", 0.0, 1.0, 0.0},
       {kPlay, "Play", 0.0, 1.0, 1.0},
       {kClear, "Clear", 0.0, 1.0, 0.0},
-      {kQuantize, "Quantize (0 off, 1 beat, 2 1bar, 3 2, 4 4, 5 8)", 0.0,
-       static_cast<double>(kQuantizeMax), 2.0},
+      {kQuantize,
+       "Quantize (0 off, 1 beat, 2 1bar, 3 2, 4 4, 5 8, 6 sync to another Looper)",
+       0.0, static_cast<double>(kQuantizeMax), 2.0},
       {kGain, "Loop gain", 0.0, 2.0, 1.0},
       {kPitch, "Pitch (semitones)", -12.0, 12.0, 0.0},
       {kTone, "Tone", 0.0, 1.0, 1.0},
@@ -796,6 +868,10 @@ std::vector<uint8_t> LooperInstance::save_state() const {
   // Trailer: older blobs stop at the tape. A missing int keeps Count off.
   const int count_in = count_in_.load(std::memory_order_relaxed) ? 1 : 0;
   append_pod(out, count_in);
+  // Also trailer-only: which Looper this one follows when Length reads
+  // Sync. A blob without it leaves the default -1/-1, i.e. nothing picked.
+  append_pod(out, sync_target_row_.load(std::memory_order_relaxed));
+  append_pod(out, sync_target_slot_.load(std::memory_order_relaxed));
   return out;
 }
 
@@ -857,6 +933,9 @@ bool LooperInstance::load_state(const std::vector<uint8_t>& blob) {
       loop_beats_.store(0.0, std::memory_order_relaxed);
       int count_in = 0;
       if (read_pod(cursor, end, &count_in)) set_count_in(count_in != 0);
+      int sync_row = -1, sync_slot = -1;
+      if (read_pod(cursor, end, &sync_row) && read_pod(cursor, end, &sync_slot))
+        set_sync_target(sync_row, sync_slot);
       return true;
     }
 
@@ -879,6 +958,10 @@ bool LooperInstance::load_state(const std::vector<uint8_t>& blob) {
     if (after_audio + sizeof(int) <= end &&
         read_pod(after_audio, end, &count_in))
       set_count_in(count_in != 0);
+    int sync_row = -1, sync_slot = -1;
+    if (read_pod(after_audio, end, &sync_row) &&
+        read_pod(after_audio, end, &sync_slot))
+      set_sync_target(sync_row, sync_slot);
     return true;
   }
 
@@ -1125,6 +1208,8 @@ void LooperInstance::multiply() {
   if (n == 0 || n > capacity_frames_ / 2) return;
   if (buffer_.size() < n * 4) return;
   std::memcpy(buffer_.data() + n * 2, buffer_.data(), n * 2 * sizeof(float));
+  if (layer_.size() >= n * 2)
+    std::memcpy(layer_.data() + n, layer_.data(), n * sizeof(uint8_t));
   length_.store(n * 2, std::memory_order_relaxed);
   loop_beats_.store(loop_beats_.load(std::memory_order_relaxed) * 2.0,
                     std::memory_order_relaxed);

@@ -11,6 +11,11 @@ AbstractButton {
     property string pluginName: ""
     property bool bypassed: false
     property bool postFader: false
+    // A Looper insert's own state, so a live set reads at a glance whether
+    // something is armed without opening its editor to find out.
+    property bool looperRecording: false
+    property bool looperPlaying: false
+    property bool looperHasAudio: false
     readonly property bool empty: pluginName.length === 0
 
     signal menuRequested
@@ -61,6 +66,37 @@ AbstractButton {
             width: Px.px(3)
             radius: Skin.radiusS
             color: Skin.mute
+        }
+
+        // A Looper's own transport, at a glance: red while it is armed
+        // (the thing you must not miss walking into a room full of
+        // channels), green while it is audibly looping. Quiet when there
+        // is nothing to say - an empty or merely loaded Looper draws no dot.
+        Rectangle {
+            id: stateDot
+            visible: root.looperRecording ||
+                     (root.looperPlaying && root.looperHasAudio)
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: 4
+            width: Px.px(7)
+            height: Px.px(7)
+            radius: width / 2
+            color: root.looperRecording ? Skin.arm : Skin.meterLow
+            z: 2
+
+            // Pulses while armed - the one state worth catching out of the
+            // corner of an eye. A plain opacity binding stays untouched by
+            // this; only `pulse` is a value source, so the dot settles
+            // back to a steady 0.85 the moment recording stops.
+            property real pulse: 1.0
+            opacity: root.looperRecording ? stateDot.pulse : 0.85
+            SequentialAnimation on pulse {
+                running: root.looperRecording
+                loops: Animation.Infinite
+                NumberAnimation { from: 1.0; to: 0.35; duration: Skin.fast * 3 }
+                NumberAnimation { from: 0.35; to: 1.0; duration: Skin.fast * 3 }
+            }
         }
     }
 

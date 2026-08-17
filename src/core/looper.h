@@ -75,6 +75,35 @@ class LooperInstance : public PluginInstance {
     return length_.load(std::memory_order_relaxed) > 0;
   }
 
+  // Length's own setting, 0 free .. 5 = 8 bars, or kQuantizeSync to follow
+  // another Looper's cycle instead. Plain enough to poll from the host at
+  // UI rate to drive the sync push in set_sync_beats().
+  int quantize() const { return quantize_.load(std::memory_order_relaxed); }
+  // Length reading "Sync": follow another Looper's closed length instead of
+  // a fixed beat/bar count. The host (MixerModel) resolves which instance
+  // that is from sync_target_row/slot() and pushes its loop_beats() in here
+  // once a poll - this instance never reaches for another one itself, so it
+  // stays as ignorant of the graph around it as every other knob here.
+  static constexpr int kQuantizeSync = 6;
+  double sync_beats() const { return sync_beats_.load(std::memory_order_relaxed); }
+  void set_sync_beats(double beats) {
+    sync_beats_.store(std::max(0.0, beats), std::memory_order_relaxed);
+  }
+  // Which other insert to follow when Length reads Sync - opaque row/slot
+  // coordinates this instance never dereferences itself. -1 means none
+  // picked yet. Saved and restored with the rest of the state so the choice
+  // survives a reload.
+  int sync_target_row() const {
+    return sync_target_row_.load(std::memory_order_relaxed);
+  }
+  int sync_target_slot() const {
+    return sync_target_slot_.load(std::memory_order_relaxed);
+  }
+  void set_sync_target(int row, int slot) {
+    sync_target_row_.store(row, std::memory_order_relaxed);
+    sync_target_slot_.store(slot, std::memory_order_relaxed);
+  }
+
   // One peak per bucket, buckets spanning the closed loop start to end nose
   // to tail - an overview to draw, not the audio itself. Called from the UI
   // thread while the audio thread may still be writing into the same buffer;
@@ -82,6 +111,14 @@ class LooperInstance : public PluginInstance {
   // overview - worst case one refresh reads a torn sample and draws a single
   // stray peak, never a crash, and the next refresh corrects it.
   std::vector<float> waveform(int buckets) const;
+
+  // Which overdub pass most recently touched each bucket, 0 for the base
+  // take counting up once per Rec press after that - so the editor can tint
+  // fresh material differently from what has sat there since the first pass.
+  // Best-effort like waveform() above: Undo does not rewind this, so a peel
+  // can leave a bucket showing a newer layer than what is actually playing
+  // until the next overdub touches it.
+  std::vector<int> layer_map(int buckets) const;
 
   // 0..1 through the closed loop, or -1 while there is nothing playing to
   // show one for. A mirror updated once a block, the same pattern as
@@ -91,6 +128,12 @@ class LooperInstance : public PluginInstance {
   double position_fraction() const {
     return position_fraction_.load(std::memory_order_relaxed);
   }
+
+  // Peak of the loop's own wet signal in the last block processed - the tape
+  // played back plus whatever is being overdubbed onto it, not the dry
+  // pass-through. Lets the editor show whether the stack is getting hot
+  // separately from the channel's own meter, which is the sum of both.
+  float loop_peak() const { return loop_peak_.load(std::memory_order_relaxed); }
 
   // Beats in the closed loop at the tempo it was closed at, 0 if unknown.
   // The editor draws a bar grid from this and the time signature.
@@ -118,8 +161,8 @@ class LooperInstance : public PluginInstance {
   // What the audio thread is doing right now with the loop.
   enum class Stage { Empty, Defining, Playing, Overdubbing, Stopped };
 
-  // 0 free, 1 beat, 2 one bar, 3 two, 4 four, 5 eight.
-  static constexpr int kQuantizeMax = 5;
+  // 0 free, 1 beat, 2 one bar, 3 two, 4 four, 5 eight, 6 = kQuantizeSync.
+  static constexpr int kQuantizeMax = kQuantizeSync;
 
   bool at_boundary(uint32_t frames) const;
   void apply_requests(uint32_t frames);
@@ -170,7 +213,7 @@ class LooperInstance : public PluginInstance {
   std::atomic<bool> record_request_{false};
   std::atomic<bool> play_request_{true};
   std::atomic<bool> clear_request_{false};
-  std::atomic<int> quantize_{2};  // 0 free, 1 beat, 2..5 = 1/2/4/8 bars
+  std::atomic<int> quantize_{2};  // 0 free, 1 beat, 2..5 = 1/2/4/8 bars, 6 sync
   std::atomic<float> gain_{1.0f};
   std::atomic<float> pitch_{0.0f};  // semitones, -12..12
   std::atomic<float> tone_{1.0f};   // 0 dark .. 1 open
@@ -181,6 +224,24 @@ class LooperInstance : public PluginInstance {
   std::atomic<float> feedback_{1.0f};   // 0..1, applied on overdub
   std::atomic<bool> count_in_{false};
   std::atomic<int> count_beats_left_{0};
+
+  // Length reading Sync - see quantize()/kQuantizeSync above. sync_beats_ is
+  // pushed in from outside once a poll; sync_target_* is just carried for
+  // the host to read back, never touched by this instance itself.
+  std::atomic<double> sync_beats_{0.0};
+  std::atomic<int> sync_target_row_{-1};
+  std::atomic<int> sync_target_slot_{-1};
+
+  // Peak of the last block's wet loop signal - see loop_peak() above.
+  std::atomic<float> loop_peak_{0.0f};
+
+  // Which overdub pass is currently being written, audio thread only - see
+  // layer_map() above. 0 is the base take; a fresh Rec press past Empty
+  // starts a new one.
+  int current_layer_ = 0;
+  // One byte per frame, the layer that most recently wrote there. Sized in
+  // activate() with the tape so the audio thread never grows it.
+  std::vector<uint8_t> layer_;
 
   // Count-in, audio thread only. Own clock so Rec can count with Play off.
   bool counting_ = false;

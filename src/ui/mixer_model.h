@@ -264,6 +264,22 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE bool looperHasAudio(int row, int slot) const;
   Q_INVOKABLE bool looperLoopClosed(int row, int slot) const;
   Q_INVOKABLE qreal looperBeats(int row, int slot) const;
+  // Peak of the loop's own wet signal in the last block, 0..1ish - see
+  // LooperInstance::loop_peak(). For a meter separate from the channel's own,
+  // which is the loop plus whatever is passing through live.
+  Q_INVOKABLE qreal looperLevel(int row, int slot) const;
+  // Which overdub pass most recently touched each bucket - see
+  // LooperInstance::layer_map().
+  Q_INVOKABLE QVariantList looperLayers(int row, int slot, int buckets) const;
+  // Length reading Sync: which other Looper this one follows, and the list
+  // to pick one from. targetRow/Slot -1 means none chosen yet.
+  Q_INVOKABLE void setLooperSyncTarget(int row, int slot, int targetRow,
+                                       int targetSlot);
+  Q_INVOKABLE int looperSyncTargetRow(int row, int slot) const;
+  Q_INVOKABLE int looperSyncTargetSlot(int row, int slot) const;
+  // Every other Looper in the session this one could sync to, as
+  // [{row, slot, label}] - never itself.
+  Q_INVOKABLE QVariantList looperSyncCandidates(int row, int slot) const;
   Q_INVOKABLE int timeNumerator() const {
     const int n = engine_.time_numerator();
     return n > 0 ? n : 1;

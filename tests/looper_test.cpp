@@ -695,6 +695,119 @@ int main() {
            " later " + std::to_string(later) + ")");
   }
 
+  // --- loop level meter ---------------------------------------------------
+  {
+    nirbija::LooperInstance meter;
+    meter.set_channel_layout(2);
+    meter.activate(kRate, kBlock);
+    meter.set_parameter(3, 0.0);  // quantise off
+
+    if (meter.loop_peak() > 1e-6f) fail("loop_peak was hot before anything played");
+
+    meter.set_parameter(0, 1.0);
+    for (int i = 0; i < 8; ++i) run_block(meter, 0.7f);
+    meter.set_parameter(0, 0.0);
+
+    float meter_peak = 0.0f;
+    for (int i = 0; i < 16; ++i) {
+      run_block(meter, 0.0f);
+      meter_peak = std::max(meter_peak, meter.loop_peak());
+    }
+    if (meter_peak < 0.4f) fail("loop_peak did not track the closed loop");
+
+    // Play off silences the loop's own contribution, dry pass-through aside.
+    meter.set_parameter(1, 0.0);
+    run_block(meter, 0.0f);
+    if (meter.loop_peak() > 1e-6f) fail("loop_peak stayed hot with Play off");
+  }
+
+  // --- layer map -----------------------------------------------------------
+  {
+    nirbija::LooperInstance layers;
+    layers.set_channel_layout(2);
+    layers.activate(kRate, kBlock);
+    layers.set_parameter(3, 0.0);  // quantise off
+
+    // Base take: 16 blocks, all layer 0.
+    layers.set_parameter(0, 1.0);
+    for (int i = 0; i < 16; ++i) run_block(layers, 0.6f);
+    layers.set_parameter(0, 0.0);
+    run_block(layers, 0.0f);
+    if (!layers.loop_closed()) fail("layer map test take did not close");
+
+    auto base_map = layers.layer_map(8);
+    for (int layer : base_map)
+      if (layer != 0) fail("base take showed a layer above 0 before any overdub");
+
+    // Overdub loudly over roughly the first half only.
+    layers.set_parameter(0, 1.0);
+    for (int i = 0; i < 8; ++i) run_block(layers, 0.8f);
+    layers.set_parameter(0, 0.0);
+    run_block(layers, 0.0f);
+
+    auto dubbed_map = layers.layer_map(8);
+    bool saw_layer_one = false;
+    bool saw_layer_zero = false;
+    for (int layer : dubbed_map) {
+      if (layer >= 1) saw_layer_one = true;
+      if (layer == 0) saw_layer_zero = true;
+    }
+    if (!saw_layer_one) fail("layer_map never showed the overdub pass");
+    if (!saw_layer_zero) fail("layer_map lost the base take everywhere");
+  }
+
+  // --- sync to another looper's length -------------------------------------
+  {
+    nirbija::LooperInstance source;
+    source.set_channel_layout(2);
+    source.activate(kRate, kBlock);
+    source.set_parameter(3, 3.0);  // Length: 2 bars
+    nirbija::TransportInfo transport;
+    transport.playing = true;
+    transport.rolling = true;
+    transport.tempo_bpm = 120.0;
+    transport.numerator = 4;
+    source.set_transport(transport);
+    source.set_parameter(0, 1.0);
+    const int bar_blocks =
+        static_cast<int>(kRate * 60.0 / 120.0 * 4.0 / kBlock);
+    for (int i = 0; i < bar_blocks * 3; ++i) run_block(source, 0.5f, 120.0);
+    if (!source.loop_closed()) fail("sync source take did not close at 2 bars");
+    if (std::fabs(source.loop_beats() - 8.0) > 0.5)
+      fail("sync source did not close at 8 beats (2 bars of 4/4)");
+
+    nirbija::LooperInstance follower;
+    follower.set_channel_layout(2);
+    follower.activate(kRate, kBlock);
+    follower.set_parameter(3,
+                           static_cast<double>(nirbija::LooperInstance::kQuantizeSync));
+    if (follower.quantize() != nirbija::LooperInstance::kQuantizeSync)
+      fail("Quantize did not accept kQuantizeSync");
+
+    // Nothing pushed in yet: Sync behaves like free length.
+    if (follower.sync_beats() != 0.0) fail("sync_beats was not 0 before anyone pushed one");
+
+    // Mimic what MixerModel's poll does: copy the source's closed length in.
+    follower.set_sync_beats(source.loop_beats());
+    follower.set_transport(transport);
+    follower.set_parameter(0, 1.0);
+    for (int i = 0; i < bar_blocks * 3; ++i) run_block(follower, 0.5f, 120.0);
+    if (!follower.loop_closed()) fail("synced take never closed");
+    if (std::fabs(follower.loop_beats() - source.loop_beats()) > 0.5)
+      fail("synced take did not land on the source's own length (got " +
+           std::to_string(follower.loop_beats()) + " wanted " +
+           std::to_string(source.loop_beats()) + ")");
+
+    // The target choice round-trips through save/load, even with no audio.
+    follower.set_sync_target(2, 1);
+    const auto blob = follower.save_state();
+    nirbija::LooperInstance restored;
+    restored.set_channel_layout(2);
+    if (!restored.load_state(blob)) fail("sync target blob was refused");
+    if (restored.sync_target_row() != 2 || restored.sync_target_slot() != 1)
+      fail("sync target did not survive save/load");
+  }
+
   if (failures > 0) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return 1;
