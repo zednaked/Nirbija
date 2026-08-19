@@ -5,12 +5,16 @@
 #include "core/file_player.h"
 #include "core/looper.h"
 #include "core/fx_pad.h"
+#include "core/keyboard_instrument.h"
 
 #include <unistd.h>
 
 #include <QDateTime>
 #include <QDir>
+#include <QEvent>
 #include <QFile>
+#include <QGuiApplication>
+#include <QKeyEvent>
 #include <QUrl>
 #include <QStandardPaths>
 #include <QtMath>
@@ -70,9 +74,18 @@ MixerModel::MixerModel(QObject* parent) : QAbstractListModel(parent) {
     status_ += tr(" · session read-only (another Nirbija has it)");
     emit statusChanged();
   }
+
+  // A live-played source, unlike everything else here, cannot afford to go
+  // quiet just because a fader took the keyboard focus away from its editor -
+  // installed on the application rather than any one item so it keeps
+  // seeing keys with that editor closed, same as a looper keeps looping
+  // with its own editor closed.
+  qApp->installEventFilter(this);
 }
 
 MixerModel::~MixerModel() {
+  qApp->removeEventFilter(this);
+
   // The debounced save may still be pending, and closing the window is exactly
   // when the session matters most.
   saveSession();
@@ -85,6 +98,25 @@ MixerModel::~MixerModel() {
     ::close(session_fd_);
     session_fd_ = -1;
   }
+}
+
+bool MixerModel::eventFilter(QObject* watched, QEvent* event) {
+  if (event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease) {
+    // A text field, a rename box, the Lua editor - anything actually taking
+    // dictation - keeps every key exactly as it always has. This only
+    // steps in when nothing is claiming the letter for itself, which a
+    // class name is a cheap enough way to tell without a private header.
+    QObject* focus = qApp->focusObject();
+    const bool text_input = focus != nullptr &&
+        (QByteArray(focus->metaObject()->className()).contains("TextInput") ||
+         QByteArray(focus->metaObject()->className()).contains("TextEdit"));
+    if (!text_input) {
+      auto* key_event = static_cast<QKeyEvent*>(event);
+      emit globalKeyEvent(key_event->key(), event->type() == QEvent::KeyPress,
+                          key_event->isAutoRepeat());
+    }
+  }
+  return QAbstractListModel::eventFilter(watched, event);
 }
 
 int MixerModel::rowCount(const QModelIndex& parent) const {
@@ -864,6 +896,23 @@ bool MixerModel::insertIsStepSequencer(int row, int slot) const {
 bool MixerModel::insertIsScript(int row, int slot) const {
   PluginInstance* insert = insertFor(row, slot);
   return insert != nullptr && insert->descriptor().uid == "nirbija.script";
+}
+
+bool MixerModel::insertIsKeyboardInstrument(int row, int slot) const {
+  PluginInstance* insert = insertFor(row, slot);
+  return insert != nullptr && insert->descriptor().uid == "nirbija.keyboard";
+}
+
+void MixerModel::pressComputerKey(int row, int slot, int note, int velocity) {
+  auto* keyboard = dynamic_cast<KeyboardInstrumentInstance*>(insertFor(row, slot));
+  if (keyboard == nullptr) return;
+  keyboard->key_down(note, velocity);
+}
+
+void MixerModel::releaseComputerKey(int row, int slot, int note) {
+  auto* keyboard = dynamic_cast<KeyboardInstrumentInstance*>(insertFor(row, slot));
+  if (keyboard == nullptr) return;
+  keyboard->key_up(note);
 }
 
 QString MixerModel::insertScript(int row, int slot) const {

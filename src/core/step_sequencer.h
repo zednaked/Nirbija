@@ -21,6 +21,14 @@ namespace nirbija {
 //
 // Everything the audio thread reads is an atomic scalar in a fixed array. No
 // step is ever added or removed, so there is nothing here to allocate.
+//
+// Record turns queued input into the pattern instead of merely passing it
+// through: each incoming note snaps to the nearest step, its velocity comes
+// along, and a note still held when the next step arrives becomes a tie
+// across the steps it spanned instead of a retrigger. The sequencer's own
+// steps go quiet while armed, so there is only ever one source of truth for
+// what is sounding — what you played passes straight through underneath,
+// unchanged, the same as always.
 class StepSequencerInstance : public PluginInstance {
  public:
   StepSequencerInstance();
@@ -88,6 +96,10 @@ class StepSequencerInstance : public PluginInstance {
   void randomize_notes();
   void clear_hits();
   void fill_euclidean(int pulses);
+  void capture_events(size_t incoming_count, double start_beat,
+                      double block_beats, uint32_t frames, double step_beats,
+                      int length);
+  void close_capture(int64_t release_index, int length);
 
   PluginDescriptor descriptor_;
   double sample_rate_ = 48000.0;
@@ -110,6 +122,7 @@ class StepSequencerInstance : public PluginInstance {
   std::atomic<int> scale_{Chromatic};
   std::atomic<int> root_{0};
   std::atomic<int> euclid_{0};
+  std::atomic<bool> record_armed_{false};
 
   // --- audio thread only -----------------------------------------------------
   int sounding_note_ = -1;    // -1 when nothing is held
@@ -120,6 +133,16 @@ class StepSequencerInstance : public PluginInstance {
   double last_step_beat_ = -1.0;
   uint32_t rng_ = 0xC0FFEEu;
   uint32_t ui_rng_ = 0xBADC0DEu;
+
+  // The armed state process() last acted on, to spot the edge where a fresh
+  // arm has to cut off whatever the pattern itself was sounding.
+  bool record_active_ = false;
+  // The note capture currently has open, waiting for its release to know how
+  // many steps it spanned. -1 pitch means nothing is open.
+  bool capture_open_ = false;
+  int64_t capture_index_ = 0;
+  int capture_pitch_ = 0;
+  int capture_velocity_ = 100;
 
   std::atomic<int> playhead_{-1};
 

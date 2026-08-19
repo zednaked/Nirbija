@@ -70,6 +70,7 @@ the host and need nothing installed at all:
 | **Looper** | quantised launch, reverse, half/double, multiply, replace, once |
 | **FX Pad** | sixteen graduated effects; pitch, filter, comb and ring go both ways |
 | **File Player** | a file into a strip |
+| **Computer Keyboard** | GarageBand-style typing keyboard; no MIDI hardware needed |
 
 They sit in the picker's **midi** bucket alongside everything else. A
 sequencer above a synth in the same strip plays it: the MIDI a plugin makes

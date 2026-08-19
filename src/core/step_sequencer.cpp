@@ -35,6 +35,7 @@ enum Params : uint32_t {
   kRandomNotes = 12,
   kClearHits = 13,
   kEuclid = 14,
+  kRecordArm = 15,
 
   // One block of ids per column of the grid, so a step's values are
   // kStepNote + i, kStepVelocity + i, and so on.
@@ -232,6 +233,20 @@ void StepSequencerInstance::process(const float* const*, float* const*,
                                     uint32_t frames) {
   if (frames == 0) return;
 
+  // Snapshot before this block adds anything of its own: everything at these
+  // indices arrived through queue_midi() and is what Record has to listen to.
+  const size_t incoming_count = event_count_;
+  const bool armed = record_armed_.load(std::memory_order_relaxed);
+  if (armed != record_active_) {
+    // Arming cuts whatever the pattern itself was sounding, so a note it
+    // triggered a moment ago does not ring on underneath a live take.
+    if (armed) {
+      stop_sounding(0);
+      capture_open_ = false;
+    }
+    record_active_ = armed;
+  }
+
   // Play starts the figure. The metronome may be walking the same grid so a
   // looper can punch to the click, but that is not a reason to fire notes —
   // turning the click on used to start the sequencer as if Play had been hit.
@@ -262,6 +277,10 @@ void StepSequencerInstance::process(const float* const*, float* const*,
   const double gate =
       std::clamp(gate_.load(std::memory_order_relaxed), 0.05, 1.0);
 
+  if (armed)
+    capture_events(incoming_count, start_beat, block_beats, frames,
+                   step_beats, length);
+
   const auto frame_for = [&](double beat) {
     const double offset = (beat - start_beat) / block_beats * frames;
     return static_cast<uint32_t>(
@@ -286,6 +305,11 @@ void StepSequencerInstance::process(const float* const*, float* const*,
     const int step = map_step(static_cast<int>(std::floor(index)), length);
     const uint32_t frame = frame_for(beat);
     playhead_.store(step, std::memory_order_relaxed);
+
+    // The light keeps walking so Record still has a playhead to show, but
+    // nothing here fires: a live take is the only source of notes while
+    // it's running.
+    if (armed) continue;
 
     const bool on = active_[step].load(std::memory_order_relaxed);
     const float p = std::clamp(probability_[step].load(std::memory_order_relaxed),
@@ -319,8 +343,75 @@ void StepSequencerInstance::process(const float* const*, float* const*,
     last_tied_ = tie;
   }
 
-  if (sounding_note_ >= 0 && sounding_off_ < end_beat)
+  if (!armed && sounding_note_ >= 0 && sounding_off_ < end_beat)
     stop_sounding(frame_for(std::max(sounding_off_, start_beat)));
+}
+
+void StepSequencerInstance::capture_events(size_t incoming_count,
+                                           double start_beat,
+                                           double block_beats, uint32_t frames,
+                                           double step_beats, int length) {
+  for (size_t i = 0; i < incoming_count; ++i) {
+    const MidiEvent& event = events_[i];
+    if (event.size < 3) continue;
+    const uint8_t status = event.data[0] & 0xF0u;
+    const int note = event.data[1];
+    const int velocity = event.data[2];
+    const bool is_on = status == kNoteOn && velocity > 0;
+    const bool is_off = status == kNoteOff || (status == kNoteOn && velocity == 0);
+    if (!is_on && !is_off) continue;
+
+    // Where this event actually landed, in the same beat clock the pattern
+    // itself walks — then snapped to whichever step it fell closest to.
+    const double event_beat =
+        start_beat + static_cast<double>(event.frame) / frames * block_beats;
+    const int64_t raw_index =
+        static_cast<int64_t>(std::llround(event_beat / step_beats));
+    const int step = static_cast<int>(((raw_index % length) + length) % length);
+
+    if (is_on) {
+      // A new note while one is still open — overlapping input, or a missed
+      // note-off — closes the old one right here instead of leaving it to
+      // ring forever.
+      if (capture_open_) close_capture(raw_index, length);
+      note_[step].store(note, std::memory_order_relaxed);
+      velocity_[step].store(std::clamp(velocity, 1, 127), std::memory_order_relaxed);
+      active_[step].store(true, std::memory_order_relaxed);
+      probability_[step].store(1.0f, std::memory_order_relaxed);
+      accent_[step].store(false, std::memory_order_relaxed);
+      tie_[step].store(false, std::memory_order_relaxed);
+      capture_open_ = true;
+      capture_index_ = raw_index;
+      capture_pitch_ = note;
+      capture_velocity_ = std::clamp(velocity, 1, 127);
+    } else if (capture_open_ && note == capture_pitch_) {
+      close_capture(raw_index, length);
+    }
+  }
+}
+
+// Fills every step the open note actually rang through with a tie, so
+// playback holds the same length rather than retriggering at each one — a
+// hit that never made it past its own step is left with no tie at all, which
+// is what leaves the gate knob free to shape it as usual.
+void StepSequencerInstance::close_capture(int64_t release_index, int length) {
+  int64_t span = release_index - capture_index_;
+  if (span > 0) {
+    span = std::min<int64_t>(span, length);
+    for (int64_t i = 0; i < span; ++i) {
+      const int step = static_cast<int>(
+          ((capture_index_ + i) % length + length) % length);
+      if (i > 0) {
+        note_[step].store(capture_pitch_, std::memory_order_relaxed);
+        velocity_[step].store(capture_velocity_, std::memory_order_relaxed);
+        active_[step].store(true, std::memory_order_relaxed);
+        probability_[step].store(1.0f, std::memory_order_relaxed);
+        accent_[step].store(false, std::memory_order_relaxed);
+      }
+      tie_[step].store(true, std::memory_order_relaxed);
+    }
+  }
+  capture_open_ = false;
 }
 
 size_t StepSequencerInstance::take_midi_output(MidiEvent* out, size_t capacity) {
@@ -410,6 +501,7 @@ std::vector<ParameterInfo> StepSequencerInstance::parameters() const {
       {kRandomNotes, "Randomize notes", 0.0, 1.0, 0.0},
       {kClearHits, "Clear hits", 0.0, 1.0, 0.0},
       {kEuclid, "Euclid hits", 0.0, kSteps, 0.0},
+      {kRecordArm, "Record (capture live input into steps)", 0.0, 1.0, 0.0},
   };
   info.reserve(info.size() + kSteps * 6);
   for (int i = 0; i < kSteps; ++i) {
@@ -463,6 +555,8 @@ double StepSequencerInstance::parameter_value(uint32_t id) const {
     case kClearHits:
       return 0.0;
     case kEuclid: return euclid_.load(std::memory_order_relaxed);
+    case kRecordArm:
+      return record_armed_.load(std::memory_order_relaxed) ? 1.0 : 0.0;
     default: break;
   }
   if (id >= kStepNote && id < kStepNote + kSteps)
@@ -530,6 +624,9 @@ void StepSequencerInstance::set_parameter(uint32_t id, double value) {
       return;
     case kEuclid:
       fill_euclidean(clamp_int(value, 0, kSteps));
+      return;
+    case kRecordArm:
+      record_armed_.store(value >= 0.5, std::memory_order_relaxed);
       return;
     default:
       break;

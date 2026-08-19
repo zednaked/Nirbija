@@ -64,6 +64,9 @@ Popup {
     property bool mapping: false
     property int waitingParam: -1
     property var mapped: ({})
+    // Set once, the first time this ever opens - after that the popup stays
+    // wherever it was last dragged, the same as a real tool window would.
+    property bool positioned: false
     readonly property string stageLabel:
         root.countBeats > 0 ? qsTr("%1").arg(root.countBeats)
         : root.recording
@@ -86,42 +89,15 @@ Popup {
     // A row that outgrows this width again should look cramped, not spill
     // buttons out past the panel and over the mixer behind it.
     clip: true
-    modal: true
-    anchors.centerIn: Overlay.overlay
+    // Not modal: the mixer behind it stays live, so a fader or the transport
+    // is still reachable with this open - the whole point of it being a tool
+    // window rather than a dialog. Dragging the empty background moves it;
+    // see the DragHandler below.
+    modal: false
     padding: Skin.spacingL
     closePolicy: (root.mapping || Mixer.learning)
                  ? Popup.NoAutoClose
-                 : Popup.CloseOnEscape | Popup.CloseOnPressOutside
-
-    // The default modal dimmer is a MouseArea. Pointer handlers on the
-    // mixer (faders, strip hover, the sideways flick) do not care about
-    // MouseAreas and keep seeing the pointer through the glass. A handler
-    // on the dimmer is what actually stops a drag on the waveform from
-    // grabbing a fader that happens to sit underneath.
-    Overlay.modal: Rectangle {
-        color: Qt.rgba(0, 0, 0, 0.45)
-
-        HoverHandler {}
-        TapHandler {
-            onTapped: {
-                if (root.mapping || Mixer.learning) return
-                if (root.closePolicy & Popup.CloseOnPressOutside)
-                    root.close()
-            }
-        }
-        DragHandler {
-            target: null
-            grabPermissions: PointerHandler.TakeOverForbidden
-        }
-        WheelHandler {
-            acceptedModifiers: Qt.NoModifier
-            onWheel: event => event.accepted = true
-        }
-        WheelHandler {
-            acceptedModifiers: Qt.ShiftModifier
-            onWheel: event => event.accepted = true
-        }
-    }
+                 : Popup.CloseOnEscape
 
     background: Rectangle {
         color: Skin.popup
@@ -129,13 +105,24 @@ Popup {
         border.color: Skin.border
         radius: Skin.radiusL
 
-        // Same leak, inside the popup: empty chrome is not a handler, so a
-        // press on the padding or the graph falls through onto the strip.
+        // Empty chrome is not a handler on its own, so without this a press
+        // on the padding or the graph falls through onto the strip behind -
+        // and, now that the popup can sit anywhere, doubles as how it moves.
         HoverHandler {}
         TapHandler {}
         DragHandler {
             target: null
             grabPermissions: PointerHandler.TakeOverForbidden
+            onCentroidChanged: if (active) {
+                const nx = root.x + centroid.position.x - centroid.pressPosition.x
+                const ny = root.y + centroid.position.y - centroid.pressPosition.y
+                const maxX = Overlay.overlay
+                    ? Math.max(0, Overlay.overlay.width - root.width) : nx
+                const maxY = Overlay.overlay
+                    ? Math.max(0, Overlay.overlay.height - root.height) : ny
+                root.x = Math.max(0, Math.min(nx, maxX))
+                root.y = Math.max(0, Math.min(ny, maxY))
+            }
         }
         WheelHandler {
             acceptedModifiers: Qt.NoModifier
@@ -155,6 +142,11 @@ Popup {
         root.targetRow = row
         root.targetSlot = slot
         root.refreshAll()
+        if (!root.positioned) {
+            root.x = Math.round((Overlay.overlay.width - root.width) / 2)
+            root.y = Math.round((Overlay.overlay.height - root.height) / 2)
+            root.positioned = true
+        }
         root.open()
     }
 

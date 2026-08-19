@@ -35,6 +35,62 @@ layers, and unity feedback no longer scales the old layer at all.
 A tap on the Feedback label no longer jumps the value to nearly zero, which
 is what then ate the take on every pass.
 
+### The step sequencer can record
+
+**Rec**, in the step editor: play a MIDI instrument into the same slot and
+what you play lands on the nearest step instead of only passing through —
+pitch, velocity and how long you held it, a hold that crosses a step
+boundary becoming a tie across however many steps it spanned rather than a
+retrigger. The pattern itself goes quiet while it's armed, so a live take
+and sixteen already-programmed steps are never fighting for the same
+output. A step you didn't touch keeps what it had, so a second pass can fix
+just the ones that landed wrong without redoing the rest.
+
+### The computer keyboard is an instrument now
+
+**Computer Keyboard**, a fourth built-in MIDI source: A W S E D F T G Y H U
+J K O L P ; play an octave and a half, GarageBand's own "Musical Typing"
+layout, so anyone who has used one before needs no explanation. Z/X shift
+the octave, C/V the velocity, both work whether or not a key is held.
+Chords are polyphonic, OS key-repeat does not retrigger the same note held
+down, and it passes through whatever arrives from earlier in the chain the
+same way the sequencer does — feed it into the step sequencer's new Record
+and a bassline typed on a laptop lands quantised on the grid with no MIDI
+hardware anywhere in the room.
+
+### The editors stay out of the way now
+
+Step Sequencer, Looper, FX Pad, Script and Computer Keyboard open as tool
+windows, not dialogs: the mixer behind stays live, so a fader, another
+strip, or Play is still reachable with one of these open. Drag the empty
+background to put it wherever it's out of the way — it stays there the
+next time that same editor opens, the way a real window remembers where it
+was left. A hosted plugin's own editor — Odin, anything else with a native
+GUI — already worked this way; ours were the odd ones out.
+
+A second click on the same chip now closes its editor instead of just
+reopening it in place — the toggle a chip is expected to have, once the
+editor is not modal and the chip is reachable again while it's open.
+
+The Computer Keyboard listens regardless of focus, not just regardless of
+whether its editor is open: clicking a fader, dragging a knob, anything
+elsewhere in the window, no longer costs it the keys. A text field, the
+rename box, the Lua editor still get every letter untouched — this only
+ever adds a second listener, never steals from the first. A live source
+going quiet because something else got clicked never made sense, and nothing
+else built in here worked that way either.
+
+Step Sequencer, Looper and FX Pad no longer disable the whole mixer the
+moment they open. That switch was a leftover from when they were modal —
+pointer handlers on a fader ignore a modal dimmer's MouseArea, so the mixer
+had to be switched off by hand to keep a drag on the editor from also
+grabbing whatever sat underneath it. Going non-modal never touched that
+switch, so it kept firing: opening any of the three still turned off every
+fader, every chip, everything, including the chip that would have closed
+it again. Each editor's own background already eats a stray press the same
+way — that was always enough on its own — so the switch was not just
+stale, it was actively wrong.
+
 ### Also
 
 - The landing page says what the mixer does now: eight entries rather than

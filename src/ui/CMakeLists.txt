@@ -45,6 +45,7 @@ set(nirbija_qml
   qml/LooperEditor.qml
   qml/FxPad.qml
   qml/StepGrid.qml
+  qml/KeyboardEditor.qml
   qml/RenameDialog.qml
   qml/PanControl.qml
   qml/ValueTrack.qml

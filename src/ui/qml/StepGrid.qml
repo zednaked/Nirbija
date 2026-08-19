@@ -33,6 +33,7 @@ Popup {
     readonly property int idRandomNotes: 12
     readonly property int idClearHits: 13
     readonly property int idEuclid: 14
+    readonly property int idRecordArm: 15
     readonly property int idStepNote: 16
     readonly property int idStepVelocity: 48
     readonly property int idStepActive: 80
@@ -68,36 +69,20 @@ Popup {
     property int root: 0
     property int euclid: 0
     property int playhead: -1
+    property bool recording: false
+    // Set once, the first time this ever opens - after that the popup stays
+    // wherever it was last dragged, the same as a real tool window would.
+    property bool positioned: false
 
     width: Px.px(640)
     height: Px.px(540)
-    modal: true
-    anchors.centerIn: Overlay.overlay
+    // Not modal: the mixer behind it stays live, so a fader or the transport
+    // is still reachable with this open - the whole point of it being a tool
+    // window rather than a dialog. Dragging the empty background moves it;
+    // see the DragHandler below.
+    modal: false
     padding: Skin.spacingL
-    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
-
-    Overlay.modal: Rectangle {
-        color: Qt.rgba(0, 0, 0, 0.45)
-        HoverHandler {}
-        TapHandler {
-            onTapped: {
-                if (root.closePolicy & Popup.CloseOnPressOutside)
-                    root.close()
-            }
-        }
-        DragHandler {
-            target: null
-            grabPermissions: PointerHandler.TakeOverForbidden
-        }
-        WheelHandler {
-            acceptedModifiers: Qt.NoModifier
-            onWheel: event => event.accepted = true
-        }
-        WheelHandler {
-            acceptedModifiers: Qt.ShiftModifier
-            onWheel: event => event.accepted = true
-        }
-    }
+    closePolicy: Popup.CloseOnEscape
 
     background: Rectangle {
         color: Skin.popup
@@ -107,9 +92,22 @@ Popup {
 
         HoverHandler {}
         TapHandler {}
+        // Empty chrome is not a handler on its own, so without this a press
+        // on the padding falls through onto whatever strip sits underneath -
+        // and, now that the popup can sit anywhere, doubles as how it moves.
         DragHandler {
             target: null
             grabPermissions: PointerHandler.TakeOverForbidden
+            onCentroidChanged: if (active) {
+                const nx = root.x + centroid.position.x - centroid.pressPosition.x
+                const ny = root.y + centroid.position.y - centroid.pressPosition.y
+                const maxX = Overlay.overlay
+                    ? Math.max(0, Overlay.overlay.width - root.width) : nx
+                const maxY = Overlay.overlay
+                    ? Math.max(0, Overlay.overlay.height - root.height) : ny
+                root.x = Math.max(0, Math.min(nx, maxX))
+                root.y = Math.max(0, Math.min(ny, maxY))
+            }
         }
         WheelHandler {
             acceptedModifiers: Qt.NoModifier
@@ -161,6 +159,7 @@ Popup {
         root.scaleId = byId[root.idScale] ?? 0
         root.root = byId[root.idRoot] ?? 0
         root.euclid = byId[root.idEuclid] ?? 0
+        root.recording = (byId[root.idRecordArm] ?? 0) >= 0.5
     }
 
     function openFor(row, slot) {
@@ -168,6 +167,11 @@ Popup {
         root.targetSlot = slot
         root.pluginName = Mixer.insertName(row, slot)
         root.readAll()
+        if (!root.positioned) {
+            root.x = Math.round((Overlay.overlay.width - root.width) / 2)
+            root.y = Math.round((Overlay.overlay.height - root.height) / 2)
+            root.positioned = true
+        }
         root.open()
     }
 
@@ -227,12 +231,45 @@ Popup {
         return root.snapNote(midi + root.transpose)
     }
 
+    // A click's y within a column, straight to the note under it - no more
+    // clicking, holding, and dragging up by however far the old note
+    // happened to be from wherever the press landed.
+    function pitchFromY(y, span) {
+        const fraction = 1 - Math.max(0, Math.min(span, y)) / Math.max(1, span)
+        const midi = root.lowNote + fraction * (root.highNote - root.lowNote)
+        return root.snapNote(Math.round(
+            Math.max(root.lowNote, Math.min(root.highNote, midi))))
+    }
+
+    function armNote(index, value) {
+        root.notes = root.setStep(root.notes, index, value)
+        root.actives = root.setStep(root.actives, index, true)
+        root.setParam(root.idStepNote + index, value)
+        root.setParam(root.idStepActive + index, 1)
+    }
+
+    // Holding the first step and pulling sideways stamps every step the
+    // pointer crosses with that same note, on the way to painting a
+    // baseline in one pass instead of one drag per step.
+    function paintNotes(fromIndex, toIndex, value) {
+        const lo = Math.min(fromIndex, toIndex)
+        const hi = Math.max(fromIndex, toIndex)
+        for (let i = lo; i <= hi; ++i) root.armNote(i, value)
+    }
+
     Timer {
         running: root.visible
         interval: 50
         repeat: true
-        onTriggered: root.playhead = Mixer.insertPlayhead(root.targetRow,
-                                                          root.targetSlot)
+        onTriggered: {
+            root.playhead = Mixer.insertPlayhead(root.targetRow, root.targetSlot)
+            // While Record is running the steps themselves are what's
+            // changing, so a plain playhead poll would leave the grid
+            // looking stale - the full fetch only runs when it's worth its
+            // cost. Toggling Rec itself already calls readAll() directly,
+            // so this does not need to poll just to notice that edge.
+            if (root.recording) root.readAll()
+        }
     }
 
     contentItem: ColumnLayout {
@@ -290,6 +327,20 @@ Popup {
                 danger: true
                 tip: qsTr("Turn every step off. The pitches stay.")
                 onClicked: root.fire(root.idClearHits)
+            }
+
+            Item { Layout.preferredWidth: Skin.spacingS }
+
+            StripButton {
+                Layout.preferredWidth: Px.px(60)
+                label: qsTr("Rec")
+                active: root.recording
+                activeColor: Skin.mute
+                tip: qsTr("Play your MIDI input and it lands on the nearest step, with its velocity and how long you held it. The pattern itself goes quiet while this is on, so only what you play sounds.")
+                onClicked: {
+                    root.setParam(root.idRecordArm, root.recording ? 0 : 1)
+                    root.readAll()
+                }
             }
         }
 
@@ -370,11 +421,22 @@ Popup {
                             }
                         }
 
+                        // The track spans the whole cell so every step reads
+                        // at the same floor and ceiling, on or off - the
+                        // pitch is what the fill's height does inside it,
+                        // not a color the fill shares with its own
+                        // background. That sharing was the bug: an "on" fill
+                        // used to paint the same color as the "on" track
+                        // behind it, so every armed step looked like one
+                        // solid block top to bottom and the melody's actual
+                        // shape - the skyline the layout was meant to show -
+                        // never showed at all.
                         Rectangle {
                             id: bar
                             readonly property real fraction:
-                                (root.heardNote(column.note) - root.lowNote) /
-                                (root.highNote - root.lowNote)
+                                Math.min(1, Math.max(0,
+                                    (root.heardNote(column.note) - root.lowNote) /
+                                    (root.highNote - root.lowNote)))
 
                             anchors.left: parent.left
                             anchors.right: parent.right
@@ -384,36 +446,37 @@ Popup {
                             anchors.bottom: chanceStrip.top
                             anchors.bottomMargin: Px.px(2)
                             radius: Skin.radiusS
-                            color: column.on ? Skin.accent : Skin.slot
-                            opacity: column.on
-                                     ? 0.45 + 0.55 * (column.velocity / 127)
-                                     : 0.45
+                            color: Skin.slot
+                            opacity: 0.35
 
-                            // The fill is the pitch, sitting on the floor of
-                            // the cell so a melody is still a skyline.
                             Rectangle {
+                                id: pitchFill
                                 anchors.left: parent.left
                                 anchors.right: parent.right
                                 anchors.bottom: parent.bottom
-                                height: Math.max(Px.px(4),
-                                                 Math.min(1, Math.max(0, bar.fraction))
-                                                 * parent.height)
+                                height: Math.max(Px.px(4), bar.fraction * parent.height)
                                 radius: Skin.radiusS
                                 color: column.on ? Skin.accent : Skin.slotHover
-                            }
+                                opacity: column.on
+                                         ? 0.55 + 0.45 * (column.velocity / 127)
+                                         : 0.5
 
-                            Behavior on color {
-                                ColorAnimation { duration: Skin.fast }
+                                Behavior on color {
+                                    ColorAnimation { duration: Skin.fast }
+                                }
+                                Behavior on height {
+                                    NumberAnimation { duration: Skin.fast }
+                                }
                             }
                         }
 
                         Text {
                             anchors.horizontalCenter: parent.horizontalCenter
-                            anchors.bottom: bar.bottom
+                            anchors.bottom: pitchFill.top
                             anchors.bottomMargin: Px.px(2)
                             visible: column.on && column.width > Px.px(22)
                             text: root.noteName(root.heardNote(column.note))
-                            color: Skin.onAccent
+                            color: Skin.text
                             font.pixelSize: Skin.fontXS
                         }
 
@@ -510,40 +573,51 @@ Popup {
                             }
                         }
 
+                        // A plain click: off becomes on, placed exactly where
+                        // the click landed. On becomes off, same as always -
+                        // a real drag never reaches this, so painting a run
+                        // of steps below never fights with it.
                         TapHandler {
-                            onSingleTapped: {
-                                const now = !column.on
-                                root.actives = root.setStep(root.actives,
-                                                            column.index, now)
-                                root.setParam(root.idStepActive + column.index,
-                                              now ? 1 : 0)
+                            onSingleTapped: eventPoint => {
+                                if (column.on) {
+                                    root.actives = root.setStep(root.actives,
+                                                                column.index, false)
+                                    root.setParam(root.idStepActive + column.index, 0)
+                                } else {
+                                    root.armNote(column.index, root.pitchFromY(
+                                        eventPoint.position.y, column.height))
+                                }
                             }
                         }
 
+                        // A real drag: the note tracks the pointer's height
+                        // directly while it stays over this step, and the
+                        // moment it crosses into a neighbour that step - and
+                        // every one between here and there - gets stamped
+                        // with whatever note this one last held, armed
+                        // whether or not it already was.
                         DragHandler {
                             id: pitchDrag
                             target: null
+                            xAxis.enabled: true
                             yAxis.enabled: true
-                            xAxis.enabled: false
 
-                            property real startNote: 60
+                            property int paintNote: 60
 
-                            onActiveChanged: {
-                                if (active) pitchDrag.startNote = column.note
+                            function updatePaint() {
+                                const step = column.width + Px.px(2)
+                                const globalX = column.x + pitchDrag.centroid.position.x
+                                const targetIndex = Math.max(0, Math.min(
+                                    root.stepCount - 1, Math.floor(globalX / step)))
+                                if (targetIndex === column.index)
+                                    pitchDrag.paintNote = root.pitchFromY(
+                                        pitchDrag.centroid.position.y, column.height)
+                                root.paintNotes(column.index, targetIndex,
+                                                pitchDrag.paintNote)
                             }
-                            onTranslationChanged: {
-                                if (!pitchDrag.active) return
-                                const span = root.highNote - root.lowNote
-                                const moved = -pitchDrag.translation.y
-                                              / column.height * span
-                                const value = root.snapNote(Math.max(
-                                    root.lowNote,
-                                    Math.min(root.highNote,
-                                             pitchDrag.startNote + moved)))
-                                root.notes = root.setStep(root.notes,
-                                                          column.index, value)
-                                root.setParam(root.idStepNote + column.index, value)
-                            }
+
+                            onActiveChanged: if (pitchDrag.active) pitchDrag.updatePaint()
+                            onCentroidChanged: if (pitchDrag.active) pitchDrag.updatePaint()
                         }
                     }
                 }
@@ -552,7 +626,7 @@ Popup {
 
         Text {
             Layout.fillWidth: true
-            text: qsTr("Tap a step to arm it · drag to pitch · gold tick is accent · green notch is a tie · yellow strip is chance")
+            text: qsTr("Tap a step to arm it right where you clicked · drag sideways to paint that note across the steps you cross · gold tick is accent · green notch is a tie · yellow strip is chance")
             color: Skin.textDim
             font.pixelSize: Skin.fontXS
             wrapMode: Text.WordWrap

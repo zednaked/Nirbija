@@ -17,6 +17,9 @@ Popup {
     property int targetSlot: -1
     property string message: ""
     property bool failed: false
+    // Set once, the first time this ever opens - after that the popup stays
+    // wherever it was last dragged, the same as a real tool window would.
+    property bool positioned: false
 
     // 680x560 is bigger than the window's own minimum (660x520), so at a high
     // UI scale, or a window resized down toward that minimum, this popup
@@ -27,8 +30,11 @@ Popup {
     height: Math.min(Px.px(560),
                      Overlay.overlay ? Overlay.overlay.height - Px.px(24)
                                       : Px.px(560))
-    modal: true
-    anchors.centerIn: Overlay.overlay
+    // Not modal: the mixer behind it stays live, so a fader or the transport
+    // is still reachable with this open - the whole point of it being a tool
+    // window rather than a dialog. Dragging the empty background moves it;
+    // see the DragHandler below.
+    modal: false
     padding: Skin.spacingL
     closePolicy: Popup.CloseOnEscape
 
@@ -37,6 +43,26 @@ Popup {
         border.width: 1
         border.color: Skin.border
         radius: Skin.radiusL
+
+        // Empty chrome is not a handler on its own, so without this a press
+        // on the padding falls through onto the strip behind - and, now
+        // that the popup can sit anywhere, doubles as how it moves.
+        HoverHandler {}
+        TapHandler {}
+        DragHandler {
+            target: null
+            grabPermissions: PointerHandler.TakeOverForbidden
+            onCentroidChanged: if (active) {
+                const nx = root.x + centroid.position.x - centroid.pressPosition.x
+                const ny = root.y + centroid.position.y - centroid.pressPosition.y
+                const maxX = Overlay.overlay
+                    ? Math.max(0, Overlay.overlay.width - root.width) : nx
+                const maxY = Overlay.overlay
+                    ? Math.max(0, Overlay.overlay.height - root.height) : ny
+                root.x = Math.max(0, Math.min(nx, maxX))
+                root.y = Math.max(0, Math.min(ny, maxY))
+            }
+        }
     }
 
     enter: Transition {
@@ -50,6 +76,11 @@ Popup {
         const failure = Mixer.insertScriptError(row, slot)
         root.failed = failure.length > 0
         root.message = failure.length > 0 ? failure : qsTr("running")
+        if (!root.positioned) {
+            root.x = Math.round((Overlay.overlay.width - root.width) / 2)
+            root.y = Math.round((Overlay.overlay.height - root.height) / 2)
+            root.positioned = true
+        }
         root.open()
     }
 

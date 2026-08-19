@@ -333,6 +333,12 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE bool insertIsFilePlayer(int row, int slot) const;
   Q_INVOKABLE bool insertIsStepSequencer(int row, int slot) const;
   Q_INVOKABLE bool insertIsScript(int row, int slot) const;
+  Q_INVOKABLE bool insertIsKeyboardInstrument(int row, int slot) const;
+  // A physical key going down or up, aimed at one insert rather than a whole
+  // channel - see sendNote() above for the channel-wide equivalent. `note`
+  // is already absolute; octave and velocity are the caller's own business.
+  Q_INVOKABLE void pressComputerKey(int row, int slot, int note, int velocity);
+  Q_INVOKABLE void releaseComputerKey(int row, int slot, int note);
   // The Lua a Script insert is running, what it said when it last failed, and
   // the way to hand it a new one. Compiling happens here, on the UI thread,
   // which is the whole point of how that plugin is built.
@@ -398,6 +404,15 @@ class MixerModel : public QAbstractListModel {
   void errorOccurred(const QString& message);
   void dirtyChanged();
   void metersActiveChanged();
+  // A key going down or up anywhere in the window, seen ahead of whichever
+  // QML item happens to have focus - see eventFilter() below. A control
+  // that wants the letters for itself (a text field, the Lua editor) still
+  // gets every one of them untouched; this is only ever a second listener,
+  // never a thief.
+  void globalKeyEvent(int key, bool pressed, bool autoRepeat);
+
+ protected:
+  bool eventFilter(QObject* watched, QEvent* event) override;
 
  private:
   struct ChannelUi {

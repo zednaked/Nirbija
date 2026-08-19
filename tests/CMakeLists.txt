@@ -86,6 +86,10 @@ add_executable(nirbija_arpeggiator arpeggiator_test.cpp)
 target_link_libraries(nirbija_arpeggiator PRIVATE nirbija_core)
 add_test(NAME arpeggiator COMMAND nirbija_arpeggiator)
 
+add_executable(nirbija_keyboard_instrument keyboard_instrument_test.cpp)
+target_link_libraries(nirbija_keyboard_instrument PRIVATE nirbija_core)
+add_test(NAME keyboard_instrument COMMAND nirbija_keyboard_instrument)
+
 add_executable(nirbija_script_plugin script_plugin_test.cpp)
 target_link_libraries(nirbija_script_plugin PRIVATE nirbija_core)
 add_test(NAME script_plugin COMMAND nirbija_script_plugin)

@@ -10,6 +10,7 @@ add_library(nirbija_core
   core/step_sequencer.cpp
   core/arpeggiator.cpp
   core/script_plugin.cpp
+  core/keyboard_instrument.cpp
 )
 target_include_directories(nirbija_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(nirbija_core PUBLIC PkgConfig::JACK

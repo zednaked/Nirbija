@@ -248,33 +248,47 @@ ApplicationWindow {
         pickerLoader.item.open()
     }
 
+    // Opens the loader's editor for (row, slot) - or, if that same editor is
+    // already open and pointed at that same slot, closes it instead. The
+    // chip that opened it is reachable again now that none of these are
+    // modal, so a second click on it is expected to work as the toggle it
+    // looks like.
+    function openOrToggle(loader, row, slot) {
+        if (loader.active && loader.item.visible
+                && loader.item.targetRow === row && loader.item.targetSlot === slot) {
+            loader.item.close()
+            return
+        }
+        loader.active = true
+        loader.item.openFor(row, slot)
+    }
+
     function openEditor(row, slot) {
         // The plugin's own editor when it has one; sliders built from its
         // parameters when it does not. The step sequencer is neither: it is
         // ours, so it gets a grid rather than eighty-five rows.
         if (Mixer.insertIsStepSequencer(row, slot)) {
-            stepLoader.active = true
-            stepLoader.item.openFor(row, slot)
+            window.openOrToggle(stepLoader, row, slot)
             return
         }
         if (Mixer.insertIsScript(row, slot)) {
-            scriptLoader.active = true
-            scriptLoader.item.openFor(row, slot)
+            window.openOrToggle(scriptLoader, row, slot)
             return
         }
         if (Mixer.insertIsLooper(row, slot)) {
-            looperEditorLoader.active = true
-            looperEditorLoader.item.openFor(row, slot)
+            window.openOrToggle(looperEditorLoader, row, slot)
             return
         }
         if (Mixer.insertIsFxPad(row, slot)) {
-            fxPadLoader.active = true
-            fxPadLoader.item.openFor(row, slot)
+            window.openOrToggle(fxPadLoader, row, slot)
+            return
+        }
+        if (Mixer.insertIsKeyboardInstrument(row, slot)) {
+            window.openOrToggle(keyboardLoader, row, slot)
             return
         }
         if (Mixer.openInsertEditor(row, slot)) return
-        paramLoader.active = true
-        paramLoader.item.openFor(row, slot)
+        window.openOrToggle(paramLoader, row, slot)
     }
 
     // Which strip the save dialog is about, since a FileDialog answers later.
@@ -346,7 +360,6 @@ ApplicationWindow {
         anchors.top: topBar.bottom
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        enabled: !window.looperOpen && !window.fxPadOpen && !window.stepOpen
         gain: Mixer.masterGain
         positionLeft: Mixer.masterPositionLeft
         positionRight: Mixer.masterPositionRight
@@ -356,15 +369,6 @@ ApplicationWindow {
         onOutputClicked: window.openPortPicker("sink", -1, masterStrip)
     }
 
-    // Pointer handlers on the strips ignore the popup's MouseArea dimmer.
-    // While the looper editor is up they have to be switched off, or a
-    // drag on the waveform still grabs the fader that happens to sit under it.
-    readonly property bool looperOpen: looperEditorLoader.item
-                                       && looperEditorLoader.item.opened
-    readonly property bool fxPadOpen: fxPadLoader.item
-                                      && fxPadLoader.item.opened
-    readonly property bool stepOpen: stepLoader.item && stepLoader.item.opened
-
     Flickable {
         id: mixerArea
         anchors.top: topBar.bottom
@@ -372,7 +376,6 @@ ApplicationWindow {
         anchors.right: masterStrip.left
         anchors.bottom: parent.bottom
         anchors.margins: Skin.spacing
-        enabled: !window.looperOpen && !window.fxPadOpen && !window.stepOpen
         contentWidth: stripRow.width
         contentHeight: height
         flickableDirection: Flickable.HorizontalFlick
@@ -588,6 +591,12 @@ ApplicationWindow {
         id: fxPadLoader
         active: false
         sourceComponent: FxPad {}
+    }
+
+    Loader {
+        id: keyboardLoader
+        active: false
+        sourceComponent: KeyboardEditor {}
     }
 
     Loader {

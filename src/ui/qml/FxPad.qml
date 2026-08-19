@@ -23,6 +23,9 @@ Popup {
     property var mapped: [false, false, false, false, false, false, false, false,
                           false, false, false, false, false, false, false, false]
     property bool holdMapped: false
+    // Set once, the first time this ever opens - after that the popup stays
+    // wherever it was last dragged, the same as a real tool window would.
+    property bool positioned: false
 
     readonly property var names: [
         "CRUSH", "PITCH", "COMB", "RING",
@@ -52,32 +55,15 @@ Popup {
 
     width: Px.px(760)
     height: Px.px(440)
-    modal: true
-    anchors.centerIn: Overlay.overlay
+    // Not modal: the mixer behind it stays live, so a fader or the transport
+    // is still reachable with this open - the whole point of it being a tool
+    // window rather than a dialog. Dragging the empty background moves it;
+    // see the DragHandler below.
+    modal: false
     padding: Skin.spacingL
-    // While MAP is armed a tap on a pad must not count as "outside". The
-    // pads are pointer handlers, not MouseAreas, and CloseOnPressOutside
-    // treats those presses as misses — which closed the editor the moment
-    // you picked what to bind.
     closePolicy: (root.mapping || Mixer.learning)
                  ? Popup.NoAutoClose
-                 : Popup.CloseOnEscape | Popup.CloseOnPressOutside
-
-    Overlay.modal: Rectangle {
-        color: Qt.rgba(0, 0, 0, 0.45)
-        HoverHandler {}
-        TapHandler {
-            onTapped: {
-                if (root.mapping || Mixer.learning) return
-                if (root.closePolicy & Popup.CloseOnPressOutside)
-                    root.close()
-            }
-        }
-        DragHandler {
-            target: null
-            grabPermissions: PointerHandler.TakeOverForbidden
-        }
-    }
+                 : Popup.CloseOnEscape
 
     background: Rectangle {
         color: Skin.popup
@@ -86,12 +72,34 @@ Popup {
         radius: Skin.radiusL
         HoverHandler {}
         TapHandler {}
+        // Empty chrome is not a handler on its own, so without this a press
+        // on the padding falls through onto the strip behind - and, now
+        // that the popup can sit anywhere, doubles as how it moves.
+        DragHandler {
+            target: null
+            grabPermissions: PointerHandler.TakeOverForbidden
+            onCentroidChanged: if (active) {
+                const nx = root.x + centroid.position.x - centroid.pressPosition.x
+                const ny = root.y + centroid.position.y - centroid.pressPosition.y
+                const maxX = Overlay.overlay
+                    ? Math.max(0, Overlay.overlay.width - root.width) : nx
+                const maxY = Overlay.overlay
+                    ? Math.max(0, Overlay.overlay.height - root.height) : ny
+                root.x = Math.max(0, Math.min(nx, maxX))
+                root.y = Math.max(0, Math.min(ny, maxY))
+            }
+        }
     }
 
     function openFor(row, slot) {
         root.targetRow = row
         root.targetSlot = slot
         root.refresh()
+        if (!root.positioned) {
+            root.x = Math.round((Overlay.overlay.width - root.width) / 2)
+            root.y = Math.round((Overlay.overlay.height - root.height) / 2)
+            root.positioned = true
+        }
         root.open()
     }
 

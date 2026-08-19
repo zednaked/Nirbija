@@ -546,6 +546,133 @@ int main() {
       fail("a legacy step did not default to chance 1");
   }
 
+  // --- Record snaps a live note to the nearest step, velocity and all ------
+  {
+    nirbija::StepSequencerInstance seq;
+    seq.activate(kRate, kBlock);
+    seq.set_parameter(15, 1.0);  // arm
+
+    nirbija::TransportInfo transport;
+    transport.playing = true;
+    transport.tempo_bpm = kTempo;
+    transport.beats = 0.0;
+    seq.set_transport(transport);
+
+    nirbija::MidiEvent on{};
+    on.frame = 5;
+    on.size = 3;
+    on.data[0] = 0x90;
+    on.data[1] = 66;
+    on.data[2] = 77;
+    seq.queue_midi(on);
+    nirbija::MidiEvent off{};
+    off.frame = 200;
+    off.size = 3;
+    off.data[0] = 0x80;
+    off.data[1] = 66;
+    seq.queue_midi(off);
+
+    seq.process(nullptr, nullptr, kBlock);
+
+    if (seq.parameter_value(16 + 0) != 66.0)
+      fail("a captured note did not land on the nearest step");
+    if (seq.parameter_value(48 + 0) != 77.0)
+      fail("a captured note lost its velocity");
+    if (seq.parameter_value(80 + 0) < 0.5)
+      fail("a captured note did not arm its step");
+    if (seq.parameter_value(176 + 0) >= 0.5)
+      fail("a hit that never left its own step should not be tied");
+  }
+
+  // --- Record goes quiet itself; what you play still passes through --------
+  {
+    nirbija::StepSequencerInstance seq;
+    seq.activate(kRate, kBlock);
+    seq.set_parameter(15, 1.0);  // arm
+    for (int i = 0; i < nirbija::StepSequencerInstance::kSteps; ++i)
+      seq.set_parameter(80 + i, 1.0);  // every step on, so silence proves it
+
+    nirbija::TransportInfo transport;
+    transport.playing = true;
+    transport.tempo_bpm = kTempo;
+    transport.beats = 0.0;
+    seq.set_transport(transport);
+
+    nirbija::MidiEvent on{};
+    on.frame = 5;
+    on.size = 3;
+    on.data[0] = 0x90;
+    on.data[1] = 72;
+    on.data[2] = 90;
+    seq.queue_midi(on);
+
+    seq.process(nullptr, nullptr, kBlock);
+
+    nirbija::MidiEvent buffer[64];
+    const size_t count = seq.take_midi_output(buffer, 64);
+    int ons = 0;
+    bool passed = false;
+    for (size_t e = 0; e < count; ++e) {
+      if ((buffer[e].data[0] & 0xf0) == 0x90 && buffer[e].data[2] > 0) ++ons;
+      if (buffer[e].data[1] == 72 && buffer[e].frame == 5) passed = true;
+    }
+    expect(passed, "input did not pass through while Record was armed");
+    expect(ons == 1, "the pattern itself sounded while Record was armed, got " +
+                          std::to_string(ons) + " note-ons");
+  }
+
+  // --- a note held across steps ties through them, not just the first ------
+  {
+    nirbija::StepSequencerInstance seq;
+    seq.activate(kRate, kBlock);
+    seq.set_parameter(15, 1.0);  // arm
+
+    const double block_beats_local = kBlock / kRate * kTempo / 60.0;
+    const int blocks_per_step =
+        static_cast<int>(std::ceil(0.25 / block_beats_local));
+    const int release_block = blocks_per_step * 3;  // held through 3 steps
+
+    nirbija::MidiEvent buffer[64];
+    for (int i = 0; i <= release_block; ++i) {
+      nirbija::TransportInfo transport;
+      transport.playing = true;
+      transport.tempo_bpm = kTempo;
+      transport.beats = i * block_beats_local;
+      seq.set_transport(transport);
+
+      if (i == 0) {
+        nirbija::MidiEvent on{};
+        on.frame = 1;
+        on.size = 3;
+        on.data[0] = 0x90;
+        on.data[1] = 50;
+        on.data[2] = 100;
+        seq.queue_midi(on);
+      }
+      if (i == release_block) {
+        nirbija::MidiEvent off{};
+        off.frame = 1;
+        off.size = 3;
+        off.data[0] = 0x80;
+        off.data[1] = 50;
+        seq.queue_midi(off);
+      }
+
+      seq.process(nullptr, nullptr, kBlock);
+      seq.take_midi_output(buffer, 64);
+    }
+
+    for (int step = 0; step < 3; ++step) {
+      if (seq.parameter_value(16 + step) != 50.0)
+        fail("held note step " + std::to_string(step) + " lost its pitch");
+      if (seq.parameter_value(80 + step) < 0.5)
+        fail("held note step " + std::to_string(step) + " was not turned on");
+      if (seq.parameter_value(176 + step) < 0.5)
+        fail("held note step " + std::to_string(step) +
+             " should have tied into the next");
+    }
+  }
+
   if (failures > 0) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return 1;
