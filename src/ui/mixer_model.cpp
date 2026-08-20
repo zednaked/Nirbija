@@ -1,3 +1,4 @@
+// before Qt: emit() is a method, not the Qt macro
 #include "core/step_sequencer.h"
 
 #include "mixer_model.h"
