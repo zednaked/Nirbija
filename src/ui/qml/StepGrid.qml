@@ -357,6 +357,25 @@ Popup {
         return names[((n % 12) + 12) % 12] + (Math.floor(n / 12) - 1)
     }
 
+    // GM percussion, the names a kit row actually is. Anything outside the
+    // drum map keeps the chromatic name, so a bassline lane is still A3.
+    function padName(midi) {
+        const n = Math.round(midi)
+        const drums = {
+            35: qsTr("kick"), 36: qsTr("kick"), 37: qsTr("stick"),
+            38: qsTr("snare"), 39: qsTr("clap"), 40: qsTr("snare"),
+            41: qsTr("tom"), 42: qsTr("chh"), 43: qsTr("tom"),
+            44: qsTr("hh"), 45: qsTr("tom"), 46: qsTr("ohh"),
+            47: qsTr("tom"), 48: qsTr("tom"), 49: qsTr("crash"),
+            50: qsTr("tom"), 51: qsTr("ride"), 52: qsTr("china"),
+            53: qsTr("bell"), 54: qsTr("tamb"), 55: qsTr("splash"),
+            56: qsTr("cow")
+        }
+        return drums[n] || root.noteName(n)
+    }
+
+    readonly property bool kitView: root.viewMode === 1
+
     // Same degrees the engine uses, so a drag lands on what will actually play.
     function snapNote(midi) {
         const tables = [
@@ -545,7 +564,7 @@ Popup {
                 Layout.minimumWidth: 0
                 label: qsTr("Grid")
                 active: root.viewMode === 1
-                tip: qsTr("All eight lanes as pads. The instrument for a kit.")
+                tip: qsTr("Kit view: eight drum pads. Hits, Euclid, Fill and mute are the beat tools — scale and Notes hide.")
                 onClicked: { root.setParam(root.idView, 1); root.page = 0; root.readAll() }
             }
 
@@ -569,10 +588,13 @@ Popup {
                 Layout.preferredWidth: Px.px(40)
                 Layout.minimumWidth: 0
                 label: qsTr("Hits")
-                tip: qsTr("Randomize which steps are on. Notes stay.")
+                tip: root.kitView
+                    ? qsTr("Randomize which pads fire. The drum notes stay.")
+                    : qsTr("Randomize which steps are on. Notes stay.")
                 onClicked: root.fire(root.idRandomHits)
             }
             StripButton {
+                visible: !root.kitView
                 Layout.preferredWidth: Px.px(44)
                 Layout.minimumWidth: 0
                 label: qsTr("Notes")
@@ -591,16 +613,36 @@ Popup {
                 Layout.preferredWidth: Px.px(48)
                 Layout.minimumWidth: 0
                 label: qsTr("Mutate")
-                tip: qsTr("Nudge the current pattern: a few hits flip, locked pitches walk a scale degree.")
+                tip: root.kitView
+                    ? qsTr("Flip a few hits on this pattern. Pad pitches stay.")
+                    : qsTr("Nudge the current pattern: a few hits flip, locked pitches walk a scale degree.")
                 onClicked: root.fire(root.idMutate)
             }
 
             Item { Layout.fillWidth: true }
+
+            ValueTrack {
+                visible: root.kitView
+                Layout.fillWidth: true
+                Layout.preferredWidth: Px.px(140)
+                Layout.preferredHeight: Px.px(22)
+                label: qsTr("euclid")
+                valueText: root.laneEuclid(root.focusedLane)
+                value: root.laneEuclid(root.focusedLane) / root.maxSteps
+                step: 1 / root.maxSteps
+                fineStep: 1 / root.maxSteps
+                tip: qsTr("Spread this many hits evenly across the focused lane — a beat, not a scale.")
+                onMoved: v => {
+                    root.setParam(root.idEuclid, Math.round(v * root.maxSteps))
+                    root.readAll()
+                }
+            }
         }
 
         RowLayout {
             Layout.fillWidth: true
             spacing: Skin.spacingXS
+            visible: !root.kitView
 
             component DirButton: StripButton {
                 required property int forValue
@@ -712,11 +754,17 @@ Popup {
                                 Layout.fillWidth: true
                                 spacing: 0
                                 Text {
-                                    text: qsTr("Lane %1").arg(laneRow.index + 1)
+                                    text: root.kitView
+                                        ? root.padName(root.laneNote(laneRow.index))
+                                        : qsTr("Lane %1").arg(laneRow.index + 1)
                                     color: laneRow.focused ? Skin.text : Skin.textDim
                                     font.pixelSize: Skin.fontXS
+                                    font.bold: root.kitView
+                                    elide: Text.ElideRight
+                                    Layout.fillWidth: true
                                 }
                                 Text {
+                                    visible: !root.kitView
                                     text: root.noteName(root.laneNote(laneRow.index))
                                     color: laneRow.focused ? Skin.text : Skin.textDim
                                     font.pixelSize: Skin.fontXS
@@ -731,7 +779,9 @@ Popup {
                                     Layout.preferredHeight: Px.px(12)
                                     flat: true
                                     label: "+"
-                                    tip: qsTr("This lane's own pitch, up a semitone. What an unlocked step plays.")
+                                    tip: root.kitView
+                                        ? qsTr("This pad's drum note, up a semitone (kick, snare, hat…).")
+                                        : qsTr("This lane's own pitch, up a semitone. What an unlocked step plays.")
                                     onClicked: {
                                         Mixer.setSequencerLane(
                                             root.targetRow, root.targetSlot, laneRow.index,
@@ -1272,6 +1322,7 @@ Popup {
             }
 
             ValueTrack {
+                visible: !root.kitView
                 Layout.fillWidth: true
                 Layout.preferredHeight: Px.px(22)
                 label: qsTr("transpose")
@@ -1284,6 +1335,7 @@ Popup {
             }
 
             ValueTrack {
+                visible: !root.kitView
                 Layout.fillWidth: true
                 Layout.preferredHeight: Px.px(22)
                 label: qsTr("euclid")
