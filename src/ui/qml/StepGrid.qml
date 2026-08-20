@@ -34,12 +34,6 @@ Popup {
     readonly property int idClearHits: 13
     readonly property int idEuclid: 14
     readonly property int idRecordArm: 15
-    readonly property int idStepNote: 16
-    readonly property int idStepVelocity: 48
-    readonly property int idStepActive: 80
-    readonly property int idStepProb: 112
-    readonly property int idStepAccent: 144
-    readonly property int idStepTie: 176
     readonly property int stepCount: 16
 
     readonly property int lowNote: 36
@@ -126,23 +120,26 @@ Popup {
     onClosed: playhead = -1
 
     function readAll() {
-        const values = Mixer.insertParameters(root.targetRow, root.targetSlot)
-        const byId = {}
-        for (const entry of values) byId[entry.id] = entry.value
-
+        const snap = Mixer.insertSequencerSnapshot(root.targetRow, root.targetSlot)
         const notes = []
         const velocities = []
         const actives = []
         const chances = []
         const accents = []
         const ties = []
+        const note = snap.note || []
+        const vel = snap.vel || []
+        const on = snap.on || []
+        const chance = snap.chance || []
+        const accent = snap.accent || []
+        const tie = snap.tie || []
         for (let i = 0; i < root.stepCount; ++i) {
-            notes.push(byId[root.idStepNote + i])
-            velocities.push(byId[root.idStepVelocity + i])
-            actives.push(byId[root.idStepActive + i] >= 0.5)
-            chances.push(byId[root.idStepProb + i] ?? 1)
-            accents.push(byId[root.idStepAccent + i] >= 0.5)
-            ties.push(byId[root.idStepTie + i] >= 0.5)
+            notes.push(note[i] ?? 60)
+            velocities.push(vel[i] ?? 100)
+            actives.push((on[i] ?? 0) !== 0)
+            chances.push(chance[i] ?? 1)
+            accents.push((accent[i] ?? 0) !== 0)
+            ties.push((tie[i] ?? 0) !== 0)
         }
         root.notes = notes
         root.velocities = velocities
@@ -150,16 +147,21 @@ Popup {
         root.chances = chances
         root.accents = accents
         root.ties = ties
-        root.division = byId[root.idDivision]
-        root.length = byId[root.idLength]
-        root.gate = byId[root.idGate]
-        root.transpose = byId[root.idTranspose]
-        root.swing = byId[root.idSwing] ?? 0
-        root.direction = byId[root.idDirection] ?? 0
-        root.scaleId = byId[root.idScale] ?? 0
-        root.root = byId[root.idRoot] ?? 0
-        root.euclid = byId[root.idEuclid] ?? 0
-        root.recording = (byId[root.idRecordArm] ?? 0) >= 0.5
+
+        const focused = snap.focusedLane ?? 0
+        const lanes = snap.lanes || []
+        const gates = snap.gates || []
+        const base = focused * 7
+        root.division = lanes[base + 4] ?? 2
+        root.length = lanes[base + 1] ?? 16
+        root.gate = gates[focused] ?? 0.5
+        root.transpose = snap.transpose ?? 0
+        root.swing = snap.swing ?? 0
+        root.direction = lanes[base + 5] ?? 0
+        root.scaleId = snap.scale ?? 0
+        root.root = snap.root ?? 0
+        root.euclid = lanes[base + 6] ?? 0
+        root.recording = snap.recording === true || snap.recording === 1
     }
 
     function openFor(row, slot) {
@@ -177,6 +179,17 @@ Popup {
 
     function setParam(id, value) {
         Mixer.setInsertParameter(root.targetRow, root.targetSlot, id, value)
+    }
+
+    function writeCell(index) {
+        Mixer.setSequencerCell(
+            root.targetRow, root.targetSlot, 0, 0, index,
+            Math.round(root.notes[index] || 60),
+            Math.round(root.velocities[index] || 100),
+            root.actives[index] === true,
+            root.chances[index] ?? 1,
+            root.accents[index] === true,
+            root.ties[index] === true)
     }
 
     function fire(id) {
@@ -244,8 +257,7 @@ Popup {
     function armNote(index, value) {
         root.notes = root.setStep(root.notes, index, value)
         root.actives = root.setStep(root.actives, index, true)
-        root.setParam(root.idStepNote + index, value)
-        root.setParam(root.idStepActive + index, 1)
+        root.writeCell(index)
     }
 
     // Holding the first step and pulling sideways stamps every step the
@@ -415,8 +427,7 @@ Popup {
                                     const now = !column.accented
                                     root.accents = root.setStep(root.accents,
                                                                 column.index, now)
-                                    root.setParam(root.idStepAccent + column.index,
-                                                  now ? 1 : 0)
+                                    root.writeCell(column.index)
                                 }
                             }
                         }
@@ -497,8 +508,7 @@ Popup {
                                     const now = !column.tied
                                     root.ties = root.setStep(root.ties,
                                                              column.index, now)
-                                    root.setParam(root.idStepTie + column.index,
-                                                  now ? 1 : 0)
+                                    root.writeCell(column.index)
                                 }
                             }
                         }
@@ -531,8 +541,7 @@ Popup {
                                         mouse.x / Math.max(1, width)))
                                     root.chances = root.setStep(
                                         root.chances, column.index, value)
-                                    root.setParam(root.idStepProb + column.index,
-                                                  value)
+                                    root.writeCell(column.index)
                                 }
                                 onPressed: mouse => positionChanged(mouse)
                             }
@@ -566,8 +575,7 @@ Popup {
                                             mouse.x / width * 127)))
                                     root.velocities = root.setStep(
                                         root.velocities, column.index, value)
-                                    root.setParam(root.idStepVelocity + column.index,
-                                                  value)
+                                    root.writeCell(column.index)
                                 }
                                 onPressed: mouse => positionChanged(mouse)
                             }
@@ -582,7 +590,7 @@ Popup {
                                 if (column.on) {
                                     root.actives = root.setStep(root.actives,
                                                                 column.index, false)
-                                    root.setParam(root.idStepActive + column.index, 0)
+                                    root.writeCell(column.index)
                                 } else {
                                     root.armNote(column.index, root.pitchFromY(
                                         eventPoint.position.y, column.height))

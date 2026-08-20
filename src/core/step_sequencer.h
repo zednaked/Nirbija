@@ -96,18 +96,58 @@ class StepSequencerInstance : public PluginInstance {
 
   static int snap_to_scale(int note, int scale, int root);
 
-  // Cells the 16-wide parameter shim cannot reach.
+  // Mixer (and tests) write without parameter IDs. Out of range is a no-op.
   void set_cell(int pattern, int lane, int step, int note, int velocity, bool on,
                 float probability);
+  void set_cell(int pattern, int lane, int step, int note, int velocity, bool on,
+                float probability, bool accent, bool tie);
+  void set_trig(int pattern, int lane, int step, float micro, int ratchet,
+                int cond, int cond_arg);
   int cell_note(int pattern, int lane, int step) const;
   int cell_velocity(int pattern, int lane, int step) const;
   bool cell_active(int pattern, int lane, int step) const;
   float cell_probability(int pattern, int lane, int step) const;
+  bool cell_accent(int pattern, int lane, int step) const;
+  bool cell_tie(int pattern, int lane, int step) const;
+  float cell_microtiming(int pattern, int lane, int step) const;
+  int cell_ratchet(int pattern, int lane, int step) const;
+  int cell_condition(int pattern, int lane, int step) const;
+  int cell_cond_arg(int pattern, int lane, int step) const;
   bool lane_muted(int lane) const;
   void set_lane_mute(int lane, bool mute);
   int lane_note(int lane) const;
+  int lane_length(int lane) const;
+  int lane_division(int lane) const;
+  int lane_direction(int lane) const;
+  int lane_channel(int lane) const;
+  double lane_gate(int lane) const;
+  int lane_euclid(int lane) const;
+  // Euclid is a bang — mute/channel here must not repaint Toussaint.
+  void set_lane(int lane, int note, int length, int division, int direction,
+                int channel, bool mute, double gate);
+  void set_lane_euclid(int lane, int pulses);
+  void set_extra_head(int extra, int lane, int rate, int direction, int start,
+                      int length, int transpose, bool mute);
+  int extra_head_lane(int extra) const;
+  int extra_head_rate(int extra) const;
+  int extra_head_direction(int extra) const;
+  int extra_head_start(int extra) const;
+  int extra_head_length(int extra) const;
+  int extra_head_transpose(int extra) const;
+  bool extra_head_muted(int extra) const;
+  int native_head_step(int lane) const;
   void set_focus(int lane);
   int focus() const;
+  int pattern() const;
+  int next_pattern() const;
+  bool fill() const;
+  bool recording() const;
+  int view() const;
+  int transpose() const;
+  float swing() const;
+  int scale() const;
+  int root() const;
+  float macro(int index) const;
 
  private:
   static constexpr size_t kMaxEvents = 128;
@@ -216,6 +256,8 @@ class StepSequencerInstance : public PluginInstance {
   int capture_velocity_ = 100;
 
   std::atomic<int> playhead_{-1};
+  // Last mapped step per native head, so the snapshot can light all eight.
+  std::array<std::atomic<int>, kLanes> head_steps_{};
 
   std::array<MidiEvent, kMaxEvents> events_{};
   size_t event_count_ = 0;

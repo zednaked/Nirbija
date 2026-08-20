@@ -184,6 +184,7 @@ void StepSequencerInstance::reset_blank() {
     lane.mute.store(l != 0, std::memory_order_relaxed);
     lane.gate.store(0.5, std::memory_order_relaxed);
     lane.euclid.store(0, std::memory_order_relaxed);
+    head_steps_[static_cast<size_t>(l)].store(0, std::memory_order_relaxed);
   }
 
   for (int h = 0; h < kExtraHeads; ++h) {
@@ -255,6 +256,29 @@ void StepSequencerInstance::set_cell(int pattern, int lane, int step, int note,
                          std::memory_order_relaxed);
 }
 
+void StepSequencerInstance::set_cell(int pattern, int lane, int step, int note,
+                                     int velocity, bool on, float probability,
+                                     bool accent, bool tie) {
+  set_cell(pattern, lane, step, note, velocity, on, probability);
+  if (!cell_in_range(pattern, lane, step)) return;
+  StepCell& cell = cell_at(pattern, lane, step);
+  cell.accent.store(accent, std::memory_order_relaxed);
+  cell.tie.store(tie, std::memory_order_relaxed);
+}
+
+void StepSequencerInstance::set_trig(int pattern, int lane, int step, float micro,
+                                     int ratchet, int cond, int cond_arg) {
+  if (!cell_in_range(pattern, lane, step)) return;
+  StepCell& cell = cell_at(pattern, lane, step);
+  cell.microtiming.store(std::clamp(micro, -0.5f, 0.5f),
+                         std::memory_order_relaxed);
+  cell.ratchet.store(std::clamp(ratchet, 0, 8), std::memory_order_relaxed);
+  cell.condition.store(static_cast<uint8_t>(std::clamp(cond, 0, 6)),
+                       std::memory_order_relaxed);
+  cell.cond_arg.store(static_cast<uint8_t>(std::clamp(cond_arg, 0, 255)),
+                      std::memory_order_relaxed);
+}
+
 int StepSequencerInstance::cell_note(int pattern, int lane, int step) const {
   if (!cell_in_range(pattern, lane, step)) return 0;
   return cell_at(pattern, lane, step).note.load(std::memory_order_relaxed);
@@ -276,6 +300,37 @@ float StepSequencerInstance::cell_probability(int pattern, int lane,
   return cell_at(pattern, lane, step).probability.load(std::memory_order_relaxed);
 }
 
+bool StepSequencerInstance::cell_accent(int pattern, int lane, int step) const {
+  if (!cell_in_range(pattern, lane, step)) return false;
+  return cell_at(pattern, lane, step).accent.load(std::memory_order_relaxed);
+}
+
+bool StepSequencerInstance::cell_tie(int pattern, int lane, int step) const {
+  if (!cell_in_range(pattern, lane, step)) return false;
+  return cell_at(pattern, lane, step).tie.load(std::memory_order_relaxed);
+}
+
+float StepSequencerInstance::cell_microtiming(int pattern, int lane,
+                                              int step) const {
+  if (!cell_in_range(pattern, lane, step)) return 0.0f;
+  return cell_at(pattern, lane, step).microtiming.load(std::memory_order_relaxed);
+}
+
+int StepSequencerInstance::cell_ratchet(int pattern, int lane, int step) const {
+  if (!cell_in_range(pattern, lane, step)) return 0;
+  return cell_at(pattern, lane, step).ratchet.load(std::memory_order_relaxed);
+}
+
+int StepSequencerInstance::cell_condition(int pattern, int lane, int step) const {
+  if (!cell_in_range(pattern, lane, step)) return Always;
+  return cell_at(pattern, lane, step).condition.load(std::memory_order_relaxed);
+}
+
+int StepSequencerInstance::cell_cond_arg(int pattern, int lane, int step) const {
+  if (!cell_in_range(pattern, lane, step)) return 0;
+  return cell_at(pattern, lane, step).cond_arg.load(std::memory_order_relaxed);
+}
+
 bool StepSequencerInstance::lane_muted(int lane) const {
   if (lane < 0 || lane >= kLanes) return true;
   return lanes_[static_cast<size_t>(lane)].mute.load(std::memory_order_relaxed);
@@ -291,6 +346,130 @@ int StepSequencerInstance::lane_note(int lane) const {
   return lanes_[static_cast<size_t>(lane)].note.load(std::memory_order_relaxed);
 }
 
+int StepSequencerInstance::lane_length(int lane) const {
+  if (lane < 0 || lane >= kLanes) return 0;
+  return lanes_[static_cast<size_t>(lane)].length.load(std::memory_order_relaxed);
+}
+
+int StepSequencerInstance::lane_division(int lane) const {
+  if (lane < 0 || lane >= kLanes) return 0;
+  return lanes_[static_cast<size_t>(lane)].division.load(std::memory_order_relaxed);
+}
+
+int StepSequencerInstance::lane_direction(int lane) const {
+  if (lane < 0 || lane >= kLanes) return Forward;
+  return lanes_[static_cast<size_t>(lane)].direction.load(
+      std::memory_order_relaxed);
+}
+
+int StepSequencerInstance::lane_channel(int lane) const {
+  if (lane < 0 || lane >= kLanes) return 0;
+  return lanes_[static_cast<size_t>(lane)].channel.load(std::memory_order_relaxed);
+}
+
+double StepSequencerInstance::lane_gate(int lane) const {
+  if (lane < 0 || lane >= kLanes) return 0.5;
+  return lanes_[static_cast<size_t>(lane)].gate.load(std::memory_order_relaxed);
+}
+
+int StepSequencerInstance::lane_euclid(int lane) const {
+  if (lane < 0 || lane >= kLanes) return 0;
+  return lanes_[static_cast<size_t>(lane)].euclid.load(std::memory_order_relaxed);
+}
+
+void StepSequencerInstance::set_lane(int lane, int note, int length, int division,
+                                    int direction, int channel, bool mute,
+                                    double gate) {
+  if (lane < 0 || lane >= kLanes) return;
+  LaneState& dest = lanes_[static_cast<size_t>(lane)];
+  dest.note.store(std::clamp(note, 0, 127), std::memory_order_relaxed);
+  dest.length.store(std::clamp(length, 1, kMaxSteps), std::memory_order_relaxed);
+  dest.division.store(std::clamp(division, 0, kDivisionCount - 1),
+                      std::memory_order_relaxed);
+  dest.direction.store(std::clamp(direction, 0, DirectionCount - 1),
+                       std::memory_order_relaxed);
+  dest.channel.store(std::clamp(channel, 0, 15), std::memory_order_relaxed);
+  dest.mute.store(mute, std::memory_order_relaxed);
+  dest.gate.store(std::clamp(gate, 0.05, 1.0), std::memory_order_relaxed);
+}
+
+void StepSequencerInstance::set_lane_euclid(int lane, int pulses) {
+  if (lane < 0 || lane >= kLanes) return;
+  const int n = std::clamp(
+      lanes_[static_cast<size_t>(lane)].length.load(std::memory_order_relaxed),
+      1, kMaxSteps);
+  pulses = std::clamp(pulses, 0, n);
+  lanes_[static_cast<size_t>(lane)].euclid.store(pulses,
+                                                 std::memory_order_relaxed);
+  for (int i = 0; i < kMaxSteps; ++i) {
+    const bool on = i < n && pulses > 0 && ((i * pulses) % n) < pulses;
+    cell_at(0, lane, i).active.store(on, std::memory_order_relaxed);
+  }
+}
+
+void StepSequencerInstance::set_extra_head(int extra, int lane, int rate,
+                                          int direction, int start, int length,
+                                          int transpose, bool mute) {
+  if (extra < 0 || extra >= kExtraHeads) return;
+  ExtraHead& head = extra_heads_[static_cast<size_t>(extra)];
+  head.lane.store(std::clamp(lane, 0, kLanes - 1), std::memory_order_relaxed);
+  head.rate.store(std::clamp(rate, 0, 4), std::memory_order_relaxed);
+  head.direction.store(std::clamp(direction, 0, DirectionCount - 1),
+                       std::memory_order_relaxed);
+  head.start.store(std::clamp(start, 0, kMaxSteps - 1),
+                   std::memory_order_relaxed);
+  head.length.store(std::clamp(length, 1, kMaxSteps), std::memory_order_relaxed);
+  head.transpose.store(std::clamp(transpose, -24, 24), std::memory_order_relaxed);
+  head.mute.store(mute, std::memory_order_relaxed);
+}
+
+int StepSequencerInstance::extra_head_lane(int extra) const {
+  if (extra < 0 || extra >= kExtraHeads) return 0;
+  return extra_heads_[static_cast<size_t>(extra)].lane.load(
+      std::memory_order_relaxed);
+}
+
+int StepSequencerInstance::extra_head_rate(int extra) const {
+  if (extra < 0 || extra >= kExtraHeads) return 0;
+  return extra_heads_[static_cast<size_t>(extra)].rate.load(
+      std::memory_order_relaxed);
+}
+
+int StepSequencerInstance::extra_head_direction(int extra) const {
+  if (extra < 0 || extra >= kExtraHeads) return Forward;
+  return extra_heads_[static_cast<size_t>(extra)].direction.load(
+      std::memory_order_relaxed);
+}
+
+int StepSequencerInstance::extra_head_start(int extra) const {
+  if (extra < 0 || extra >= kExtraHeads) return 0;
+  return extra_heads_[static_cast<size_t>(extra)].start.load(
+      std::memory_order_relaxed);
+}
+
+int StepSequencerInstance::extra_head_length(int extra) const {
+  if (extra < 0 || extra >= kExtraHeads) return 0;
+  return extra_heads_[static_cast<size_t>(extra)].length.load(
+      std::memory_order_relaxed);
+}
+
+int StepSequencerInstance::extra_head_transpose(int extra) const {
+  if (extra < 0 || extra >= kExtraHeads) return 0;
+  return extra_heads_[static_cast<size_t>(extra)].transpose.load(
+      std::memory_order_relaxed);
+}
+
+bool StepSequencerInstance::extra_head_muted(int extra) const {
+  if (extra < 0 || extra >= kExtraHeads) return true;
+  return extra_heads_[static_cast<size_t>(extra)].mute.load(
+      std::memory_order_relaxed);
+}
+
+int StepSequencerInstance::native_head_step(int lane) const {
+  if (lane < 0 || lane >= kLanes) return 0;
+  return head_steps_[static_cast<size_t>(lane)].load(std::memory_order_relaxed);
+}
+
 void StepSequencerInstance::set_focus(int lane) {
   if (lane < 0 || lane >= kLanes) return;
   focus_.store(lane, std::memory_order_relaxed);
@@ -298,6 +477,47 @@ void StepSequencerInstance::set_focus(int lane) {
 
 int StepSequencerInstance::focus() const {
   return focused_index();
+}
+
+int StepSequencerInstance::pattern() const {
+  return pattern_.load(std::memory_order_relaxed);
+}
+
+int StepSequencerInstance::next_pattern() const {
+  return next_pattern_.load(std::memory_order_relaxed);
+}
+
+bool StepSequencerInstance::fill() const {
+  return fill_.load(std::memory_order_relaxed);
+}
+
+bool StepSequencerInstance::recording() const {
+  return record_armed_.load(std::memory_order_relaxed);
+}
+
+int StepSequencerInstance::view() const {
+  return view_.load(std::memory_order_relaxed);
+}
+
+int StepSequencerInstance::transpose() const {
+  return transpose_.load(std::memory_order_relaxed);
+}
+
+float StepSequencerInstance::swing() const {
+  return swing_.load(std::memory_order_relaxed);
+}
+
+int StepSequencerInstance::scale() const {
+  return scale_.load(std::memory_order_relaxed);
+}
+
+int StepSequencerInstance::root() const {
+  return root_.load(std::memory_order_relaxed);
+}
+
+float StepSequencerInstance::macro(int index) const {
+  if (index < 0 || index >= static_cast<int>(macros_.size())) return 0.0f;
+  return macros_[static_cast<size_t>(index)].load(std::memory_order_relaxed);
 }
 
 int StepSequencerInstance::focused_index() const {
@@ -416,6 +636,8 @@ void StepSequencerInstance::process(const float* const*, float* const*,
     }
     if (!run) {
       playhead_.store(-1, std::memory_order_relaxed);
+      for (int h = 0; h < kLanes; ++h)
+        head_steps_[static_cast<size_t>(h)].store(0, std::memory_order_relaxed);
       return;
     }
   }
@@ -484,6 +706,7 @@ void StepSequencerInstance::process(const float* const*, float* const*,
       const int step =
           map_step(static_cast<int>(std::floor(index)), length, direction);
       const uint32_t frame = frame_for(beat);
+      head_steps_[static_cast<size_t>(h)].store(step, std::memory_order_relaxed);
       if (h == focused) focused_playhead = step;
 
       // The light keeps walking so Record still has a playhead to show, but
@@ -689,17 +912,7 @@ void StepSequencerInstance::clear_hits() {
 }
 
 void StepSequencerInstance::fill_euclidean(int pulses) {
-  const int lane = focused_index();
-  const int n = std::clamp(
-      lanes_[static_cast<size_t>(lane)].length.load(std::memory_order_relaxed),
-      1, kMaxSteps);
-  pulses = std::clamp(pulses, 0, n);
-  lanes_[static_cast<size_t>(lane)].euclid.store(pulses,
-                                                 std::memory_order_relaxed);
-  for (int i = 0; i < kMaxSteps; ++i) {
-    const bool on = i < n && pulses > 0 && ((i * pulses) % n) < pulses;
-    cell_at(0, lane, i).active.store(on, std::memory_order_relaxed);
-  }
+  set_lane_euclid(focused_index(), pulses);
 }
 
 std::vector<ParameterInfo> StepSequencerInstance::parameters() const {

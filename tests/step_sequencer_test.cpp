@@ -1027,6 +1027,48 @@ int main() {
                             " times, wanted 2 (steps 4 and 12)");
   }
 
+  // --- typed setters: out of range is a no-op, euclid stays a bang -----------
+  {
+    Seq seq;
+    seq.set_cell(0, 0, 0, 40, 80, true, 0.5f, true, true);
+    expect(seq.cell_note(0, 0, 0) == 40, "set_cell did not store the note");
+    expect(seq.cell_accent(0, 0, 0), "set_cell did not store accent");
+    expect(seq.cell_tie(0, 0, 0), "set_cell did not store tie");
+    seq.set_cell(-1, 0, 0, 99, 1, true, 1.0f, false, false);
+    expect(seq.cell_note(0, 0, 0) == 40, "out of range set_cell wrote a cell");
+
+    seq.set_trig(0, 0, 0, 0.25f, 4, 3, 2);
+    expect(std::fabs(seq.cell_microtiming(0, 0, 0) - 0.25f) < 1e-4,
+           "set_trig did not store microtiming");
+    expect(seq.cell_ratchet(0, 0, 0) == 4, "set_trig did not store ratchet");
+    expect(seq.cell_condition(0, 0, 0) == 3, "set_trig did not store cond");
+    seq.set_trig(99, 0, 0, 0.0f, 1, 0, 0);
+    expect(seq.cell_ratchet(0, 0, 0) == 4, "out of range set_trig wrote a cell");
+
+    seq.set_lane_euclid(0, 8);
+    const int euclid = seq.lane_euclid(0);
+    seq.set_lane(0, 50, 12, 1, 2, 3, true, 0.75);
+    expect(seq.lane_note(0) == 50, "set_lane did not store the note");
+    expect(seq.lane_length(0) == 12, "set_lane did not store length");
+    expect(seq.lane_channel(0) == 3, "set_lane did not store channel");
+    expect(seq.lane_muted(0), "set_lane did not store mute");
+    expect(seq.lane_euclid(0) == euclid, "set_lane rewrote euclid");
+
+    seq.set_focus(0);
+    seq.set_lane_euclid(3, 5);
+    expect(seq.lane_euclid(3) == 5, "set_lane_euclid missed lane 3");
+    expect(seq.cell_active(0, 3, 0), "euclid 5 on length 16 missed step 0");
+
+    seq.set_extra_head(1, 2, 3, 1, 4, 8, -5, false);
+    expect(seq.extra_head_lane(1) == 2, "set_extra_head did not store lane");
+    expect(seq.extra_head_rate(1) == 3, "set_extra_head did not store rate");
+    expect(seq.extra_head_transpose(1) == -5,
+           "set_extra_head did not store transpose");
+    expect(!seq.extra_head_muted(1), "set_extra_head did not store mute");
+    seq.set_extra_head(99, 0, 0, 0, 0, 16, 0, true);
+    expect(seq.extra_head_lane(1) == 2, "out of range set_extra_head wrote");
+  }
+
   if (failures > 0) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return 1;
