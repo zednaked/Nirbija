@@ -754,9 +754,13 @@ Popup {
                                 Layout.fillWidth: true
                                 spacing: 0
                                 Text {
-                                    text: root.kitView
-                                        ? root.padName(root.laneNote(laneRow.index))
-                                        : qsTr("Lane %1").arg(laneRow.index + 1)
+                                    text: {
+                                        if (!root.kitView)
+                                            return qsTr("Lane %1").arg(laneRow.index + 1)
+                                        const name = root.padName(root.laneNote(laneRow.index))
+                                        const n = root.laneLength(laneRow.index)
+                                        return n === 16 ? name : name + " " + n
+                                    }
                                     color: laneRow.focused ? Skin.text : Skin.textDim
                                     font.pixelSize: Skin.fontXS
                                     font.bold: root.kitView
@@ -1126,6 +1130,11 @@ Popup {
                                         cell.step < root.laneLength(cell.lane)
                                     readonly property bool atPlayhead:
                                         root.nativeHeadStep(cell.lane) === cell.step
+                                    // The focused lane's step, drawn on every row so a
+                                    // polymeter offset is a second light, not a mystery.
+                                    readonly property bool atKitBeat:
+                                        root.playhead >= 0 &&
+                                        root.nativeHeadStep(root.focusedLane) === cell.step
                                     readonly property bool extraHere:
                                         root.extraHeadOnStep(cell.lane, cell.step)
                                     readonly property real velocity: root.cellVel(cell.lane, cell.step)
@@ -1150,6 +1159,12 @@ Popup {
                                             ? 0.15 + 0.35 * (parent.velocity / 127) : 0
                                     }
 
+                                    Rectangle {
+                                        anchors.fill: parent
+                                        radius: Skin.radiusS
+                                        color: Skin.accent
+                                        opacity: parent.atKitBeat && !parent.atPlayhead ? 0.12 : 0
+                                    }
                                     Rectangle {
                                         anchors.fill: parent
                                         radius: Skin.radiusS

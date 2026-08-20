@@ -821,12 +821,14 @@ void StepSequencerInstance::process(const float* const*, float* const*,
     int guard = 0;
     for (; guard < 64; ++guard, index += 1.0) {
       const int idx = static_cast<int>(std::floor(index));
-      const float micro = 0.0f;  // filled from the cell after mapping
-      double beat = beat_of(index, step_beats);
-      if (beat >= end_beat && micro <= 0.0f && chaos <= 0.0f) break;
-      if (beat <= last_step_beat_[static_cast<size_t>(voice)] &&
-          beat >= start_beat)
-        continue;
+      // The cursor is the unswung-odd-swung grid, shared by every lane on
+      // the same length/division. Micro and chaos only move the *note*,
+      // otherwise Chaos=1 makes each row's playhead wander on its own.
+      const double grid_beat = beat_of(index, step_beats);
+      if (grid_beat >= end_beat) break;
+      if (grid_beat < start_beat) continue;
+      if (grid_beat <= last_step_beat_[static_cast<size_t>(voice)]) continue;
+      last_step_beat_[static_cast<size_t>(voice)] = grid_beat;
 
       const int window = map_step(idx, window_length, direction);
       int start = window_start;
@@ -835,17 +837,15 @@ void StepSequencerInstance::process(const float* const*, float* const*,
       const StepCell& cell = cell_at(play_pattern, lane, step);
       const float cell_micro = std::clamp(
           cell.microtiming.load(std::memory_order_relaxed), -0.5f, 0.5f);
-      beat = beat_of(index, step_beats) + cell_micro * step_beats;
+      double sound_beat = grid_beat + cell_micro * step_beats;
       if (chaos > 0.0f) {
         const float u = next_rng() / 4294967295.0f;
-        beat += (u * 2.0f - 1.0f) * chaos * 0.25 * step_beats;
+        sound_beat += (u * 2.0f - 1.0f) * chaos * 0.25 * step_beats;
       }
-      if (beat >= end_beat) break;
-      if (beat < start_beat) continue;
-      if (beat <= last_step_beat_[static_cast<size_t>(voice)]) continue;
-      last_step_beat_[static_cast<size_t>(voice)] = beat;
+      sound_beat = std::clamp(sound_beat, start_beat,
+                              std::nextafter(end_beat, start_beat));
 
-      const uint32_t frame = frame_for(beat);
+      const uint32_t frame = frame_for(sound_beat);
       if (extra) {
         extra_head_steps_[static_cast<size_t>(extra_idx)].store(
             step, std::memory_order_relaxed);
@@ -926,19 +926,19 @@ void StepSequencerInstance::process(const float* const*, float* const*,
             voice_state.channel = channel;
           }
           const double next = beat_of(index + 1.0, step_beats);
-          const double dur = std::max(1e-6, next - beat);
+          const double dur = std::max(1e-6, next - sound_beat);
           if (n <= 1) {
-            voice_state.off_beat = beat + dur * (tie ? 1.0 : gate);
+            voice_state.off_beat = sound_beat + dur * (tie ? 1.0 : gate);
             last_tied_[static_cast<size_t>(voice)] = tie;
           } else {
             voice_state.pulse_spacing = step_beats / n;
             voice_state.pulse_dur = gate * voice_state.pulse_spacing;
             voice_state.step_end_beat = next;
             voice_state.pulse_vel = velocity;
-            voice_state.next_pulse_beat = beat + voice_state.pulse_spacing;
+            voice_state.next_pulse_beat = sound_beat + voice_state.pulse_spacing;
             voice_state.ratchet_left = n - 1;
             voice_state.off_beat =
-                std::min(beat + voice_state.pulse_dur, next);
+                std::min(sound_beat + voice_state.pulse_dur, next);
             last_tied_[static_cast<size_t>(voice)] = false;
             drain_ratchet(voice, muted);
           }
