@@ -14,10 +14,8 @@ namespace nirbija {
 // to the host's transport — put it above a synth in the same strip and the
 // strip plays itself.
 //
-// Monophonic on purpose: one note sounds at a time and a new step cuts the one
-// before it, unless a tie holds the same pitch across. That is the instrument
-// this imitates, and it means the note that has to be chased off at the end
-// is always exactly one.
+// Each native head is monophonic — a new step cuts the one before it, unless
+// a tie holds the same pitch — so eight notes can sound at once, one per lane.
 //
 // Everything the audio thread reads is an atomic scalar in a fixed array. No
 // step is ever added or removed, so there is nothing here to allocate.
@@ -106,10 +104,14 @@ class StepSequencerInstance : public PluginInstance {
   bool cell_active(int pattern, int lane, int step) const;
   float cell_probability(int pattern, int lane, int step) const;
   bool lane_muted(int lane) const;
+  void set_lane_mute(int lane, bool mute);
   int lane_note(int lane) const;
+  void set_focus(int lane);
+  int focus() const;
 
  private:
-  static constexpr size_t kMaxEvents = 64;
+  static constexpr size_t kMaxEvents = 128;
+  static constexpr int kVoiceSlots = kLanes + kExtraHeads;
 
   struct StepCell {
     std::atomic<int> note{kUnlockedNote};
@@ -145,11 +147,17 @@ class StepSequencerInstance : public PluginInstance {
     std::atomic<int> transpose{0};
   };
 
-  double beats_per_step() const;
-  double beat_of(double index) const;
-  int map_step(int index, int length);
+  struct HeadVoice {
+    int pitch = -1;
+    uint8_t channel = 0;  // channel of the ON, not the live lane atomic
+    double off_beat = 0;
+  };
+
+  double beat_of(double index, double step_beats) const;
+  int map_step(int index, int length, int direction);
   void emit(uint32_t frame, uint8_t status, uint8_t data1, uint8_t data2);
-  void stop_sounding(uint32_t frame);
+  void stop_sounding(int head, uint32_t frame);
+  int focused_index() const;
   uint32_t next_rng();      // audio thread
   uint32_t next_ui_rng();   // UI thread — pattern ops, not process()
   void rotate_steps(int delta);
@@ -189,12 +197,11 @@ class StepSequencerInstance : public PluginInstance {
   std::atomic<bool> record_armed_{false};
 
   // --- audio thread only -----------------------------------------------------
-  int sounding_note_ = -1;    // -1 when nothing is held
-  double sounding_off_ = 0.0; // song position, in beats, the note is due off
-  bool last_tied_ = false;
-  // The last step boundary already played, so a block that crosses none does
-  // not replay the one it starts on.
-  double last_step_beat_ = -1.0;
+  std::array<HeadVoice, kVoiceSlots> voices_{};
+  std::array<bool, kVoiceSlots> last_tied_{};
+  // Last step boundary already played, per head, so a block that crosses none
+  // does not replay the one it starts on.
+  std::array<double, kVoiceSlots> last_step_beat_{};
   uint32_t rng_ = 0xC0FFEEu;
   uint32_t ui_rng_ = 0xBADC0DEu;
 
