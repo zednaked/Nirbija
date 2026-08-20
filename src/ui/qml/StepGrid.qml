@@ -111,14 +111,29 @@ Popup {
         (root.viewMode === 1 ? root.maxSteps : root.focusedLength) / root.pageSteps))
     readonly property int stepOffset: Math.min(root.page, root.pageCount - 1) * root.pageSteps
 
-    width: Px.px(760)
-    height: Px.px(680)
+    // Never larger than the mixer behind it: 16 pattern pads each wanted a
+    // 32px touch target, which blew the popup past a 660×520 window and
+    // painted off the overlay. Size is a cap against the overlay; chrome
+    // below sets Layout.minimumWidth 0 so the pads share whatever is left.
+    width: {
+        const ov = Overlay.overlay
+        const want = Px.px(640)
+        if (!ov) return want
+        return Math.min(want, Math.max(Px.px(400), ov.width - Px.px(12)))
+    }
+    height: {
+        const ov = Overlay.overlay
+        const want = Px.px(540)
+        if (!ov) return want
+        return Math.min(want, Math.max(Px.px(360), ov.height - Px.px(12)))
+    }
+    clip: true
     // Not modal: the mixer behind it stays live, so a fader or the transport
     // is still reachable with this open - the whole point of it being a tool
     // window rather than a dialog. Dragging the empty background moves it;
     // see the DragHandler below.
     modal: false
-    padding: Skin.spacingL
+    padding: Skin.spacingS
     closePolicy: Popup.CloseOnEscape
 
     background: Rectangle {
@@ -317,7 +332,15 @@ Popup {
             root.y = Math.round((Overlay.overlay.height - root.height) / 2)
             root.positioned = true
         }
+        root.clampPos()
         root.open()
+    }
+
+    function clampPos() {
+        const ov = Overlay.overlay
+        if (!ov) return
+        root.x = Math.max(0, Math.min(root.x, ov.width - root.width))
+        root.y = Math.max(0, Math.min(root.y, ov.height - root.height))
     }
 
     function setParam(id, value) {
@@ -395,8 +418,15 @@ Popup {
         }
     }
 
+    Connections {
+        target: Overlay.overlay
+        function onWidthChanged() { root.clampPos() }
+        function onHeightChanged() { root.clampPos() }
+    }
+
     contentItem: ColumnLayout {
-        spacing: Skin.spacingS
+        spacing: Skin.spacingXS
+        clip: true
 
         Text {
             text: root.pluginName
@@ -411,7 +441,8 @@ Popup {
             spacing: Skin.spacingXS
 
             StripButton {
-                Layout.preferredWidth: Px.px(52)
+                Layout.preferredWidth: Px.px(44)
+                Layout.minimumWidth: 0
                 label: qsTr("Rec")
                 active: root.recording
                 activeColor: Skin.mute
@@ -422,7 +453,8 @@ Popup {
                 }
             }
             StripButton {
-                Layout.preferredWidth: Px.px(52)
+                Layout.preferredWidth: Px.px(44)
+                Layout.minimumWidth: 0
                 label: qsTr("Fill")
                 active: root.fill
                 activeColor: Skin.solo
@@ -439,7 +471,10 @@ Popup {
                 model: root.patternCount
                 StripButton {
                     required property int index
-                    Layout.preferredWidth: Px.px(22)
+                    Layout.minimumWidth: 0
+                    Layout.fillWidth: true
+                    Layout.preferredWidth: Px.px(18)
+                    Layout.maximumWidth: Px.px(28)
                     Layout.preferredHeight: Px.px(22)
                     label: String(index + 1)
                     flat: true
@@ -455,7 +490,9 @@ Popup {
             Item { Layout.fillWidth: true }
 
             ValueTrack {
-                Layout.preferredWidth: Px.px(76)
+                Layout.preferredWidth: Px.px(64)
+                Layout.minimumWidth: 0
+                Layout.fillWidth: true
                 Layout.preferredHeight: Px.px(22)
                 label: qsTr("dens")
                 valueText: (root.macros[0] ?? 1).toFixed(2)
@@ -464,25 +501,31 @@ Popup {
                 onMoved: v => root.setParam(root.idDensity, v * 2)
             }
             ValueTrack {
-                Layout.preferredWidth: Px.px(76)
+                Layout.preferredWidth: Px.px(64)
+                Layout.minimumWidth: 0
+                Layout.fillWidth: true
                 Layout.preferredHeight: Px.px(22)
                 label: qsTr("chaos")
                 valueText: (root.macros[1] ?? 0).toFixed(2)
                 value: root.macros[1] ?? 0
-                tip: qsTr("Chaos. No audible effect yet - lands with microtiming.")
+                tip: qsTr("Chaos. Jitters timing and can flip a hit.")
                 onMoved: v => root.setParam(root.idChaos, v)
             }
             ValueTrack {
-                Layout.preferredWidth: Px.px(76)
+                Layout.preferredWidth: Px.px(64)
+                Layout.minimumWidth: 0
+                Layout.fillWidth: true
                 Layout.preferredHeight: Px.px(22)
                 label: qsTr("rtch")
                 valueText: (root.macros[2] ?? 0).toFixed(2)
                 value: root.macros[2] ?? 0
-                tip: qsTr("Ratchet amount. No audible effect yet - lands with the ratchet scheduler.")
+                tip: qsTr("How hard per-step ratchets fire. Zero leaves one hit.")
                 onMoved: v => root.setParam(root.idRatchetAmount, v)
             }
             ValueTrack {
-                Layout.preferredWidth: Px.px(76)
+                Layout.preferredWidth: Px.px(64)
+                Layout.minimumWidth: 0
+                Layout.fillWidth: true
                 Layout.preferredHeight: Px.px(22)
                 label: qsTr("prob")
                 valueText: (root.macros[3] ?? 1).toFixed(2)
@@ -499,13 +542,15 @@ Popup {
 
             StripButton {
                 Layout.preferredWidth: Px.px(58)
+                Layout.minimumWidth: 0
                 label: qsTr("Skyline")
                 active: root.viewMode === 0
                 tip: qsTr("One lane, pitch as a bar. The instrument for a melody or a bassline.")
                 onClicked: { root.setParam(root.idView, 0); root.page = 0; root.readAll() }
             }
             StripButton {
-                Layout.preferredWidth: Px.px(48)
+                Layout.preferredWidth: Px.px(44)
+                Layout.minimumWidth: 0
                 label: qsTr("Grid")
                 active: root.viewMode === 1
                 tip: qsTr("All eight lanes as pads. The instrument for a kit.")
@@ -515,38 +560,44 @@ Popup {
             Item { Layout.preferredWidth: Skin.spacingS }
 
             StripButton {
-                Layout.preferredWidth: Px.px(36)
+                Layout.preferredWidth: Px.px(28)
+                Layout.minimumWidth: 0
                 label: "←"
                 tip: qsTr("Nudge the focused lane's pattern one step earlier.")
                 onClicked: root.fire(root.idNudgeLeft)
             }
             StripButton {
-                Layout.preferredWidth: Px.px(36)
+                Layout.preferredWidth: Px.px(28)
+                Layout.minimumWidth: 0
                 label: "→"
                 tip: qsTr("Nudge the focused lane's pattern one step later.")
                 onClicked: root.fire(root.idNudgeRight)
             }
             StripButton {
-                Layout.preferredWidth: Px.px(52)
+                Layout.preferredWidth: Px.px(40)
+                Layout.minimumWidth: 0
                 label: qsTr("Hits")
                 tip: qsTr("Randomize which steps are on. Notes stay.")
                 onClicked: root.fire(root.idRandomHits)
             }
             StripButton {
-                Layout.preferredWidth: Px.px(56)
+                Layout.preferredWidth: Px.px(44)
+                Layout.minimumWidth: 0
                 label: qsTr("Notes")
                 tip: qsTr("Randomize pitches, snapped to the scale.")
                 onClicked: root.fire(root.idRandomNotes)
             }
             StripButton {
-                Layout.preferredWidth: Px.px(52)
+                Layout.preferredWidth: Px.px(44)
+                Layout.minimumWidth: 0
                 label: qsTr("Clear")
                 danger: true
                 tip: qsTr("Turn every step off. The pitches stay.")
                 onClicked: root.fire(root.idClearHits)
             }
             StripButton {
-                Layout.preferredWidth: Px.px(56)
+                Layout.preferredWidth: Px.px(48)
+                Layout.minimumWidth: 0
                 label: qsTr("Mutate")
                 tip: qsTr("Nudge the current pattern: a few hits flip, locked pitches walk a scale degree.")
                 onClicked: root.fire(root.idMutate)
@@ -556,7 +607,8 @@ Popup {
 
             component DirButton: StripButton {
                 required property int forValue
-                Layout.preferredWidth: Px.px(32)
+                Layout.preferredWidth: Px.px(28)
+                Layout.minimumWidth: 0
                 active: root.laneDirection(root.focusedLane) === forValue
                 onClicked: root.setParam(root.idDirection, forValue)
             }
@@ -572,7 +624,8 @@ Popup {
                 StripButton {
                     required property int index
                     required property string modelData
-                    Layout.preferredWidth: Px.px(36)
+                    Layout.preferredWidth: Px.px(32)
+                    Layout.minimumWidth: 0
                     label: modelData
                     active: root.scaleId === index
                     tip: qsTr("Notes snap to this scale.")
@@ -601,7 +654,8 @@ Popup {
                 // plain Item - without this it competes for width with the
                 // skyline/grid pane next to it instead of staying a rail.
                 Layout.fillWidth: false
-                Layout.preferredWidth: Px.px(112)
+                Layout.preferredWidth: Px.px(96)
+                Layout.minimumWidth: Px.px(80)
                 Layout.fillHeight: true
                 spacing: Px.px(2)
 
@@ -1110,16 +1164,18 @@ Popup {
 
         RowLayout {
             Layout.fillWidth: true
-            spacing: Skin.spacingXS
+            spacing: Px.px(2)
             visible: root.cellOn(root.focusedLane, root.editStep)
 
             Text {
                 text: qsTr("step %1").arg(root.editStep + 1)
                 color: Skin.textDim
                 font.pixelSize: Skin.fontXS
+                Layout.minimumWidth: Px.px(36)
             }
             ValueTrack {
-                Layout.fillWidth: true
+                Layout.preferredWidth: Px.px(88)
+                Layout.minimumWidth: 0
                 Layout.preferredHeight: Px.px(18)
                 label: qsTr("ratchet")
                 valueText: Math.max(1, Math.round(root.cellRatchet(root.focusedLane, root.editStep)))
@@ -1139,7 +1195,9 @@ Popup {
                 StripButton {
                     required property int index
                     required property string modelData
-                    Layout.preferredWidth: Px.px(40)
+                    Layout.minimumWidth: 0
+                    Layout.fillWidth: true
+                    Layout.preferredWidth: Px.px(28)
                     Layout.preferredHeight: Px.px(18)
                     flat: true
                     label: modelData
@@ -1153,16 +1211,6 @@ Popup {
                     }
                 }
             }
-        }
-
-        Text {
-            Layout.fillWidth: true
-            text: root.viewMode === 0
-                ? qsTr("Tap a step to arm it right where you clicked · drag sideways to paint that note across the steps you cross · gold tick is accent · green notch is a tie · yellow strip is chance")
-                : qsTr("Tap a pad to arm it at the lane's own note · brightness is velocity · gold dot is accent · tap a lane on the left to focus it, M to mute")
-            color: Skin.textDim
-            font.pixelSize: Skin.fontXS
-            wrapMode: Text.WordWrap
         }
 
         GridLayout {
