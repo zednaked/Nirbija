@@ -968,12 +968,17 @@ QVariantMap MixerModel::insertSequencerSnapshot(int row, int slot) const {
   heads.reserve(StepSequencerInstance::kLanes +
                 StepSequencerInstance::kExtraHeads);
   for (int lane = 0; lane < StepSequencerInstance::kLanes; ++lane) {
-    const int step = seq->native_head_step(lane) & 0xff;
-    heads.append((lane << 8) | step);
+    const int step = seq->native_head_step(lane);
+    heads.append(step < 0 ? -1 : ((lane << 8) | (step & 0xff)));
   }
   for (int extra = 0; extra < StepSequencerInstance::kExtraHeads; ++extra) {
+    const int step = seq->extra_head_step(extra);
+    if (seq->extra_head_muted(extra) || step < 0) {
+      heads.append(-1);
+      continue;
+    }
     const int lane = seq->extra_head_lane(extra);
-    heads.append(0x10000 | (lane << 8));
+    heads.append(0x10000 | (lane << 8) | (step & 0xff));
   }
   out[QStringLiteral("heads")] = heads;
 

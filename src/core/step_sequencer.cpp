@@ -55,10 +55,15 @@ enum Params : uint32_t {
   kRatchetAmount = 194,
   kMasterProb = 195,
   kPattern = 196,
+  kNextPattern = 197,  // 0 = none, 1–16 = pattern 0–15
   kFill = 198,
   kFocusedLane = 199,
   kView = 200,
+  kMutate = 201,
 };
+
+constexpr double kRates[] = {1.0, 2.0, 0.5, 1.0 / 3.0, 1.5};
+constexpr int kRateCount = static_cast<int>(std::size(kRates));
 
 constexpr uint8_t kNoteOn = 0x90;
 constexpr uint8_t kNoteOff = 0x80;
@@ -195,7 +200,7 @@ void StepSequencerInstance::reset_blank() {
     lane.mute.store(l != 0, std::memory_order_relaxed);
     lane.gate.store(0.5, std::memory_order_relaxed);
     lane.euclid.store(0, std::memory_order_relaxed);
-    head_steps_[static_cast<size_t>(l)].store(0, std::memory_order_relaxed);
+    head_steps_[static_cast<size_t>(l)].store(-1, std::memory_order_relaxed);
   }
 
   for (int h = 0; h < kExtraHeads; ++h) {
@@ -207,6 +212,7 @@ void StepSequencerInstance::reset_blank() {
     head.length.store(kVisibleSteps, std::memory_order_relaxed);
     head.mute.store(true, std::memory_order_relaxed);
     head.transpose.store(0, std::memory_order_relaxed);
+    extra_head_steps_[static_cast<size_t>(h)].store(-1, std::memory_order_relaxed);
   }
 
   swing_.store(0.0f, std::memory_order_relaxed);
@@ -414,7 +420,8 @@ void StepSequencerInstance::set_lane_euclid(int lane, int pulses) {
                                                  std::memory_order_relaxed);
   for (int i = 0; i < kMaxSteps; ++i) {
     const bool on = i < n && pulses > 0 && ((i * pulses) % n) < pulses;
-    cell_at(0, lane, i).active.store(on, std::memory_order_relaxed);
+    cell_at(current_pattern(), lane, i)
+        .active.store(on, std::memory_order_relaxed);
   }
 }
 
@@ -476,9 +483,19 @@ bool StepSequencerInstance::extra_head_muted(int extra) const {
       std::memory_order_relaxed);
 }
 
+int StepSequencerInstance::extra_head_step(int extra) const {
+  if (extra < 0 || extra >= kExtraHeads) return -1;
+  return extra_head_steps_[static_cast<size_t>(extra)].load(
+      std::memory_order_relaxed);
+}
+
 int StepSequencerInstance::native_head_step(int lane) const {
-  if (lane < 0 || lane >= kLanes) return 0;
+  if (lane < 0 || lane >= kLanes) return -1;
   return head_steps_[static_cast<size_t>(lane)].load(std::memory_order_relaxed);
+}
+
+int StepSequencerInstance::current_pattern() const {
+  return std::clamp(pattern_.load(std::memory_order_relaxed), 0, kPatterns - 1);
 }
 
 void StepSequencerInstance::set_focus(int lane) {
@@ -540,7 +557,15 @@ bool StepSequencerInstance::activate(double sample_rate, uint32_t) {
   voices_ = {};
   last_tied_ = {};
   last_step_beat_.fill(-1.0);
+  last_fired_ = {};
+  last_on_ = {};
+  last_bar_ = -1;
   event_count_ = 0;
+  for (int h = 0; h < kLanes; ++h)
+    head_steps_[static_cast<size_t>(h)].store(-1, std::memory_order_relaxed);
+  for (int h = 0; h < kExtraHeads; ++h)
+    extra_head_steps_[static_cast<size_t>(h)].store(-1,
+                                                    std::memory_order_relaxed);
   return true;
 }
 
@@ -612,6 +637,12 @@ void StepSequencerInstance::stop_sounding(int head, uint32_t frame) {
   last_tied_[static_cast<size_t>(head)] = false;
 }
 
+void StepSequencerInstance::cancel_scheduler(int head, uint32_t frame) {
+  stop_sounding(head, frame);
+  if (head < 0 || head >= kVoiceSlots) return;
+  voices_[static_cast<size_t>(head)].ratchet_left = 0;
+}
+
 void StepSequencerInstance::queue_midi(const MidiEvent& event) {
   // Passed along untouched: the sequencer adds to the chain, it does not own it.
   if (event_count_ >= kMaxEvents) return;
@@ -622,35 +653,35 @@ void StepSequencerInstance::process(const float* const*, float* const*,
                                     uint32_t frames) {
   if (frames == 0) return;
 
-  // Snapshot before this block adds anything of its own: everything at these
-  // indices arrived through queue_midi() and is what Record has to listen to.
   const size_t incoming_count = event_count_;
   const bool armed = record_armed_.load(std::memory_order_relaxed);
   if (armed != record_active_) {
-    // Arming cuts whatever the pattern itself was sounding, so a note it
-    // triggered a moment ago does not ring on underneath a live take.
     if (armed) {
-      for (int h = 0; h < kVoiceSlots; ++h) stop_sounding(h, 0);
-      capture_open_ = false;
+      for (int h = 0; h < kVoiceSlots; ++h) cancel_scheduler(h, 0);
+      for (Capture& cap : captures_) cap.open = false;
     }
     record_active_ = armed;
   }
 
-  // Play starts the figure. The metronome may be walking the same grid so a
-  // looper can punch to the click, but that is not a reason to fire notes —
-  // turning the click on used to start the sequencer as if Play had been hit.
   const bool run = transport_.playing;
   if (!run || transport_.changed) {
     for (int h = 0; h < kVoiceSlots; ++h) {
-      stop_sounding(h, 0);
+      cancel_scheduler(h, 0);
       last_step_beat_[static_cast<size_t>(h)] = -1.0;
     }
     if (!run) {
       playhead_.store(-1, std::memory_order_relaxed);
       for (int h = 0; h < kLanes; ++h)
-        head_steps_[static_cast<size_t>(h)].store(0, std::memory_order_relaxed);
+        head_steps_[static_cast<size_t>(h)].store(-1, std::memory_order_relaxed);
+      for (int h = 0; h < kExtraHeads; ++h)
+        extra_head_steps_[static_cast<size_t>(h)].store(
+            -1, std::memory_order_relaxed);
+      last_bar_ = -1;
       return;
     }
+    const int numerator =
+        transport_.numerator > 0 ? transport_.numerator : 4;
+    last_bar_ = static_cast<int>(std::floor(transport_.beats / numerator));
   }
 
   const double tempo = transport_.tempo_bpm > 0.0 ? transport_.tempo_bpm : 120.0;
@@ -664,18 +695,25 @@ void StepSequencerInstance::process(const float* const*, float* const*,
   const int root = root_.load(std::memory_order_relaxed);
   const int transpose = transpose_.load(std::memory_order_relaxed);
   const int focused = focused_index();
+  const bool fill = fill_.load(std::memory_order_relaxed);
+  const float density = macros_[0].load(std::memory_order_relaxed);
+  const float chaos = macros_[1].load(std::memory_order_relaxed);
+  const float ratchet_macro = macros_[2].load(std::memory_order_relaxed);
+  const float master_prob = macros_[3].load(std::memory_order_relaxed);
 
-  if (armed) {
-    const LaneState& rec_lane = lanes_[static_cast<size_t>(focused)];
-    const int rec_div = std::clamp(
-        rec_lane.division.load(std::memory_order_relaxed), 0,
-        kDivisionCount - 1);
-    const int rec_length =
-        std::clamp(rec_lane.length.load(std::memory_order_relaxed), 1,
-                   kMaxSteps);
-    capture_events(incoming_count, start_beat, block_beats, frames,
-                   kDivisions[rec_div], rec_length, focused);
+  const int numerator = transport_.numerator > 0 ? transport_.numerator : 4;
+  const int bar = static_cast<int>(std::floor(start_beat / numerator));
+  if (last_bar_ >= 0 && bar > last_bar_) {
+    const int next = next_pattern_.load(std::memory_order_relaxed);
+    if (next >= 0 && next < kPatterns) {
+      pattern_.store(next, std::memory_order_relaxed);
+      next_pattern_.store(-1, std::memory_order_relaxed);
+    }
   }
+  last_bar_ = bar;
+  const int play_pattern = current_pattern();
+
+  if (armed) capture_events(incoming_count, start_beat, block_beats, frames);
 
   const auto frame_for = [&](double beat) {
     const double offset = (beat - start_beat) / block_beats * frames;
@@ -683,122 +721,278 @@ void StepSequencerInstance::process(const float* const*, float* const*,
         std::clamp(offset, 0.0, static_cast<double>(frames - 1)));
   };
 
-  // Gate-off is applied after the step walk: a tie has to see the next
-  // step before anyone releases, or a held pitch retriggers every column.
+  bool snap_fired[kVoiceSlots];
+  bool snap_on[kLanes][kMaxSteps];
+  for (int h = 0; h < kVoiceSlots; ++h)
+    snap_fired[h] = last_fired_[static_cast<size_t>(h)];
+  for (int l = 0; l < kLanes; ++l)
+    for (int s = 0; s < kMaxSteps; ++s)
+      snap_on[l][s] = last_on_[static_cast<size_t>(l)][static_cast<size_t>(s)];
+
+  const auto drain_ratchet = [&](int voice, bool muted) {
+    if (armed || muted) return;
+    HeadVoice& v = voices_[static_cast<size_t>(voice)];
+    const int held = v.pitch;
+    const uint8_t ch = v.channel;
+    while (v.ratchet_left > 0) {
+      if (v.next_pulse_beat < start_beat) {
+        --v.ratchet_left;
+        v.next_pulse_beat += v.pulse_spacing;
+        continue;
+      }
+      if (v.next_pulse_beat >= end_beat) break;
+      if (held < 0) {
+        v.ratchet_left = 0;
+        break;
+      }
+      const uint32_t frame = frame_for(v.next_pulse_beat);
+      stop_sounding(voice, frame);
+      emit(frame, static_cast<uint8_t>(kNoteOn | ch),
+           static_cast<uint8_t>(held), static_cast<uint8_t>(v.pulse_vel));
+      v.pitch = held;
+      v.channel = ch;
+      v.off_beat = std::min(v.next_pulse_beat + v.pulse_dur, v.step_end_beat);
+      --v.ratchet_left;
+      v.next_pulse_beat += v.pulse_spacing;
+    }
+  };
+
+  const auto cond_ok = [&](int voice, int lane, int step, int cond,
+                           uint8_t arg, int cycle) {
+    switch (cond) {
+      case Fill:
+        return fill;
+      case NotFill:
+        return !fill;
+      case Pre:
+        return snap_fired[voice];
+      case NotPre:
+        return !snap_fired[voice];
+      case Nei: {
+        const int neighbor = (lane + kLanes - 1) % kLanes;
+        return snap_on[neighbor][step];
+      }
+      case AOverB: {
+        const int a = (arg >> 4) & 0x0f;
+        const int b = arg & 0x0f;
+        if (b <= 0 || a <= 0) return true;
+        return (cycle % b) == (a - 1);
+      }
+      default:
+        return true;
+    }
+  };
 
   int focused_playhead = playhead_.load(std::memory_order_relaxed);
-  for (int h = 0; h < kLanes; ++h) {
-    LaneState& lane = lanes_[static_cast<size_t>(h)];
-    const int div = std::clamp(lane.division.load(std::memory_order_relaxed), 0,
-                               kDivisionCount - 1);
-    const double step_beats = kDivisions[div];
+
+  const auto walk = [&](int voice, int lane, bool extra, int extra_idx,
+                        double rate, int window_length, int window_start,
+                        int direction, int extra_transpose, bool extra_mute) {
+    LaneState& lane_state = lanes_[static_cast<size_t>(lane)];
+    const int div = std::clamp(
+        lane_state.division.load(std::memory_order_relaxed), 0,
+        kDivisionCount - 1);
+    const double step_beats = kDivisions[div] / rate;
     const int length =
-        std::clamp(lane.length.load(std::memory_order_relaxed), 1, kMaxSteps);
-    const int direction = lane.direction.load(std::memory_order_relaxed);
+        std::clamp(lane_state.length.load(std::memory_order_relaxed), 1,
+                   kMaxSteps);
     const uint8_t channel = static_cast<uint8_t>(
-        std::clamp(lane.channel.load(std::memory_order_relaxed), 0, 15));
+        std::clamp(lane_state.channel.load(std::memory_order_relaxed), 0, 15));
     const double gate =
-        std::clamp(lane.gate.load(std::memory_order_relaxed), 0.05, 1.0);
-    const bool muted = lane.mute.load(std::memory_order_relaxed);
-    HeadVoice& voice = voices_[static_cast<size_t>(h)];
+        std::clamp(lane_state.gate.load(std::memory_order_relaxed), 0.05, 1.0);
+    const bool lane_mute =
+        lane_state.mute.load(std::memory_order_relaxed);
+    const bool muted = extra_mute || lane_mute;
+    HeadVoice& voice_state = voices_[static_cast<size_t>(voice)];
 
-    if (muted) stop_sounding(h, 0);
+    if (extra_mute) {
+      cancel_scheduler(voice, 0);
+      extra_head_steps_[static_cast<size_t>(extra_idx)].store(
+          -1, std::memory_order_relaxed);
+      return;
+    }
 
-    // Walk one extra index behind so a swung odd step that landed late in this
-    // block is not skipped because its unswung time was in the previous one.
+    if (lane_mute) cancel_scheduler(voice, 0);
+
+    if (!armed) drain_ratchet(voice, muted);
+
     double index = std::floor(start_beat / step_beats) - 1.0;
     if (index < 0.0) index = 0.0;
     int guard = 0;
     for (; guard < 64; ++guard, index += 1.0) {
-      const double beat = beat_of(index, step_beats);
+      const int idx = static_cast<int>(std::floor(index));
+      const float micro = 0.0f;  // filled from the cell after mapping
+      double beat = beat_of(index, step_beats);
+      if (beat >= end_beat && micro <= 0.0f && chaos <= 0.0f) break;
+      if (beat <= last_step_beat_[static_cast<size_t>(voice)] &&
+          beat >= start_beat)
+        continue;
+
+      const int window = map_step(idx, window_length, direction);
+      int start = window_start;
+      if (start >= length) start %= length;
+      const int step = extra ? (start + window) % length : window;
+      const StepCell& cell = cell_at(play_pattern, lane, step);
+      const float cell_micro = std::clamp(
+          cell.microtiming.load(std::memory_order_relaxed), -0.5f, 0.5f);
+      beat = beat_of(index, step_beats) + cell_micro * step_beats;
+      if (chaos > 0.0f) {
+        const float u = next_rng() / 4294967295.0f;
+        beat += (u * 2.0f - 1.0f) * chaos * 0.25 * step_beats;
+      }
       if (beat >= end_beat) break;
       if (beat < start_beat) continue;
-      if (beat <= last_step_beat_[static_cast<size_t>(h)]) continue;
-      last_step_beat_[static_cast<size_t>(h)] = beat;
+      if (beat <= last_step_beat_[static_cast<size_t>(voice)]) continue;
+      last_step_beat_[static_cast<size_t>(voice)] = beat;
 
-      const int step =
-          map_step(static_cast<int>(std::floor(index)), length, direction);
       const uint32_t frame = frame_for(beat);
-      head_steps_[static_cast<size_t>(h)].store(step, std::memory_order_relaxed);
-      if (h == focused) focused_playhead = step;
-
-      // The light keeps walking so Record still has a playhead to show, but
-      // nothing here fires: a live take is the only source of notes while
-      // it's running. Mute is the same for emit, not the light.
-      if (armed || muted) continue;
-
-      const StepCell& cell = cell_at(0, h, step);
-      const bool on = cell.active.load(std::memory_order_relaxed);
-      const float p_step = std::clamp(
-          cell.probability.load(std::memory_order_relaxed), 0.0f, 1.0f);
-      const float density = macros_[0].load(std::memory_order_relaxed);
-      const float master_prob = macros_[3].load(std::memory_order_relaxed);
-
-      // Density above 1 spends its excess on ghost notes at off steps,
-      // rather than pushing an on step's chance past certain. An on step's
-      // own chance is only ever scaled down by density, then by the master
-      // knob; capped at 1 either way.
-      bool ghost = false;
-      bool hits;
-      if (on) {
-        const float p_eff = std::clamp(p_step * density, 0.0f, 1.0f) *
-                            master_prob;
-        hits = p_eff >= 0.999f || (next_rng() / 4294967295.0f) < p_eff;
-      } else if (density > 1.0f) {
-        const float ghost_chance =
-            std::clamp(density - 1.0f, 0.0f, 1.0f) * master_prob;
-        hits = ghost = ghost_chance >= 0.999f ||
-                       (next_rng() / 4294967295.0f) < ghost_chance;
+      if (extra) {
+        extra_head_steps_[static_cast<size_t>(extra_idx)].store(
+            step, std::memory_order_relaxed);
       } else {
-        hits = false;
+        head_steps_[static_cast<size_t>(lane)].store(
+            step, std::memory_order_relaxed);
+        if (lane == focused) focused_playhead = step;
       }
 
-      if (!hits) {
-        stop_sounding(h, frame);
-        continue;
+      bool fired = false;
+      if (armed || muted) {
+        // Light walks; no emit, no visit for Pre/Nei while Rec is the source.
+      } else {
+        const bool on = cell.active.load(std::memory_order_relaxed);
+        const float p_step = std::clamp(
+            cell.probability.load(std::memory_order_relaxed), 0.0f, 1.0f);
+        const int cond =
+            cell.condition.load(std::memory_order_relaxed);
+        const uint8_t arg = cell.cond_arg.load(std::memory_order_relaxed);
+        const int cycle_n = window_length > 0 ? idx / window_length : 0;
+
+        bool ghost = false;
+        bool hits = false;
+        if (on) {
+          hits = true;
+        } else if (density > 1.0f) {
+          const float ghost_chance =
+              std::clamp(density - 1.0f, 0.0f, 1.0f) * master_prob;
+          hits = ghost = ghost_chance >= 0.999f ||
+                         (next_rng() / 4294967295.0f) < ghost_chance;
+        }
+        if (hits && !ghost && !cond_ok(voice, lane, step, cond, arg, cycle_n))
+          hits = false;
+        if (hits && on) {
+          const float p_eff =
+              std::clamp(p_step * std::min(density, 1.0f), 0.0f, 1.0f) *
+              master_prob;
+          hits = p_eff >= 0.999f || (next_rng() / 4294967295.0f) < p_eff;
+        }
+        if (hits && chaos > 0.0f &&
+            (next_rng() / 4294967295.0f) < chaos * 0.25f)
+          hits = !hits;
+
+        if (!hits) {
+          cancel_scheduler(voice, frame);
+        } else {
+          const int cell_note = cell.note.load(std::memory_order_relaxed);
+          const int lane_note =
+              lane_state.note.load(std::memory_order_relaxed);
+          const int raw = (cell_note == kUnlockedNote ? lane_note : cell_note) +
+                          transpose + extra_transpose;
+          const int pitch =
+              std::clamp(snap_to_scale(raw, scale, root), 0, 127);
+          int velocity = std::clamp(
+              cell.velocity.load(std::memory_order_relaxed), 1, 127);
+          if (!ghost && cell.accent.load(std::memory_order_relaxed))
+            velocity = std::min(127, velocity + 27);
+          if (ghost) velocity = std::max(1, static_cast<int>(velocity * 0.7f));
+          const bool tie = cell.tie.load(std::memory_order_relaxed);
+          const bool legato =
+              last_tied_[static_cast<size_t>(voice)] &&
+              voice_state.pitch == pitch;
+
+          int ratchet = cell.ratchet.load(std::memory_order_relaxed);
+          if (ratchet < 1) ratchet = 1;
+          int n = 1 + static_cast<int>(
+                          std::lround((ratchet - 1) * ratchet_macro));
+          if (n < 1) n = 1;
+          if (tie || ghost) n = 1;
+
+          voice_state.ratchet_left = 0;
+          if (!legato) {
+            stop_sounding(voice, frame);
+            emit(frame, static_cast<uint8_t>(kNoteOn | channel),
+                 static_cast<uint8_t>(pitch),
+                 static_cast<uint8_t>(velocity));
+            voice_state.pitch = pitch;
+            voice_state.channel = channel;
+          }
+          const double next = beat_of(index + 1.0, step_beats);
+          const double dur = std::max(1e-6, next - beat);
+          if (n <= 1) {
+            voice_state.off_beat = beat + dur * (tie ? 1.0 : gate);
+            last_tied_[static_cast<size_t>(voice)] = tie;
+          } else {
+            voice_state.pulse_spacing = step_beats / n;
+            voice_state.pulse_dur = gate * voice_state.pulse_spacing;
+            voice_state.step_end_beat = next;
+            voice_state.pulse_vel = velocity;
+            voice_state.next_pulse_beat = beat + voice_state.pulse_spacing;
+            voice_state.ratchet_left = n - 1;
+            voice_state.off_beat =
+                std::min(beat + voice_state.pulse_dur, next);
+            last_tied_[static_cast<size_t>(voice)] = false;
+            drain_ratchet(voice, muted);
+          }
+          fired = true;
+        }
       }
 
-      const int cell_note = cell.note.load(std::memory_order_relaxed);
-      const int lane_note = lane.note.load(std::memory_order_relaxed);
-      const int raw =
-          (cell_note == kUnlockedNote ? lane_note : cell_note) + transpose;
-      const int pitch = std::clamp(snap_to_scale(raw, scale, root), 0, 127);
-      int velocity =
-          std::clamp(cell.velocity.load(std::memory_order_relaxed), 1, 127);
-      if (cell.accent.load(std::memory_order_relaxed))
-        velocity = std::min(127, velocity + 27);
-      // A ghost never accents: it is the quiet in-between hit, not the one
-      // that stands out.
-      if (ghost) velocity = std::max(1, static_cast<int>(velocity * 0.7f));
-      const bool tie = cell.tie.load(std::memory_order_relaxed);
-      const bool legato =
-          last_tied_[static_cast<size_t>(h)] && voice.pitch == pitch;
-
-      if (!legato) {
-        stop_sounding(h, frame);
-        emit(frame, static_cast<uint8_t>(kNoteOn | channel),
-             static_cast<uint8_t>(pitch), static_cast<uint8_t>(velocity));
-        voice.pitch = pitch;
-        voice.channel = channel;
+      if (!armed) {
+        last_fired_[static_cast<size_t>(voice)] = fired;
+        if (!extra)
+          last_on_[static_cast<size_t>(lane)][static_cast<size_t>(step)] =
+              fired;
       }
-
-      const double next = beat_of(index + 1.0, step_beats);
-      const double dur = std::max(1e-6, next - beat);
-      voice.off_beat = beat + dur * (tie ? 1.0 : gate);
-      last_tied_[static_cast<size_t>(h)] = tie;
     }
 
-    if (!armed && !muted && voice.pitch >= 0 && voice.off_beat < end_beat)
-      stop_sounding(h, frame_for(std::max(voice.off_beat, start_beat)));
+    if (!armed && !muted && voice_state.pitch >= 0 &&
+        voice_state.off_beat < end_beat)
+      stop_sounding(voice,
+                    frame_for(std::max(voice_state.off_beat, start_beat)));
+  };
+
+  for (int h = 0; h < kLanes; ++h) {
+    const int length = std::clamp(
+        lanes_[static_cast<size_t>(h)].length.load(std::memory_order_relaxed),
+        1, kMaxSteps);
+    const int direction =
+        lanes_[static_cast<size_t>(h)].direction.load(std::memory_order_relaxed);
+    walk(h, h, false, 0, 1.0, length, 0, direction, 0, false);
   }
+  for (int e = 0; e < kExtraHeads; ++e) {
+    const ExtraHead& head = extra_heads_[static_cast<size_t>(e)];
+    const bool extra_mute = head.mute.load(std::memory_order_relaxed);
+    const int lane = std::clamp(head.lane.load(std::memory_order_relaxed), 0,
+                                kLanes - 1);
+    const int rate_i =
+        std::clamp(head.rate.load(std::memory_order_relaxed), 0, kRateCount - 1);
+    const int dir = head.direction.load(std::memory_order_relaxed);
+    const int start = head.start.load(std::memory_order_relaxed);
+    const int win = std::clamp(head.length.load(std::memory_order_relaxed), 1,
+                               kMaxSteps);
+    const int xpose = head.transpose.load(std::memory_order_relaxed);
+    walk(kLanes + e, lane, true, e, kRates[rate_i], win, start, dir, xpose,
+         extra_mute);
+  }
+
   playhead_.store(focused_playhead, std::memory_order_relaxed);
 }
 
 void StepSequencerInstance::capture_events(size_t incoming_count,
                                            double start_beat,
-                                           double block_beats, uint32_t frames,
-                                           double step_beats, int length,
-                                           int lane) {
+                                           double block_beats, uint32_t frames) {
+  const int pattern = current_pattern();
+  const int focused = focused_index();
+
   for (size_t i = 0; i < incoming_count; ++i) {
     const MidiEvent& event = events_[i];
     if (event.size < 3) continue;
@@ -809,41 +1003,72 @@ void StepSequencerInstance::capture_events(size_t incoming_count,
     const bool is_off = status == kNoteOff || (status == kNoteOn && velocity == 0);
     if (!is_on && !is_off) continue;
 
-    // Where this event actually landed, in the same beat clock the pattern
-    // itself walks — then snapped to whichever step it fell closest to.
+    if (is_off) {
+      for (Capture& cap : captures_) {
+        if (cap.open && cap.pitch == note) {
+          const int length = std::clamp(
+              lanes_[static_cast<size_t>(cap.lane)].length.load(
+                  std::memory_order_relaxed),
+              1, kMaxSteps);
+          const double event_beat =
+              start_beat +
+              static_cast<double>(event.frame) / frames * block_beats;
+          const int div = std::clamp(
+              lanes_[static_cast<size_t>(cap.lane)].division.load(
+                  std::memory_order_relaxed),
+              0, kDivisionCount - 1);
+          const int64_t raw_index = static_cast<int64_t>(
+              std::llround(event_beat / kDivisions[div]));
+          close_capture(cap, raw_index, length);
+          break;
+        }
+      }
+      continue;
+    }
+
+    int dest = focused;
+    for (int l = 0; l < kLanes; ++l) {
+      if (lanes_[static_cast<size_t>(l)].note.load(std::memory_order_relaxed) ==
+          note) {
+        dest = l;
+        break;
+      }
+    }
+
+    const int div = std::clamp(
+        lanes_[static_cast<size_t>(dest)].division.load(
+            std::memory_order_relaxed),
+        0, kDivisionCount - 1);
+    const int length = std::clamp(
+        lanes_[static_cast<size_t>(dest)].length.load(std::memory_order_relaxed),
+        1, kMaxSteps);
     const double event_beat =
         start_beat + static_cast<double>(event.frame) / frames * block_beats;
     const int64_t raw_index =
-        static_cast<int64_t>(std::llround(event_beat / step_beats));
-    const int step = static_cast<int>(((raw_index % length) + length) % length);
+        static_cast<int64_t>(std::llround(event_beat / kDivisions[div]));
+    const int step =
+        static_cast<int>(((raw_index % length) + length) % length);
 
-    if (is_on) {
-      // A new note while one is still open — overlapping input, or a missed
-      // note-off — closes the old one right here instead of leaving it to
-      // ring forever.
-      if (capture_open_) close_capture(raw_index, length);
-      StepCell& cell = cell_at(0, lane, step);
-      // Unlocked (kit row, note == 255) stays unlocked: Rec arms on/velocity
-      // and leaves the pad's own pitch alone. Locked (a 303 line) takes the
-      // captured pitch, as it always has.
-      const bool locked =
-          cell.note.load(std::memory_order_relaxed) != kUnlockedNote;
-      if (locked) cell.note.store(note, std::memory_order_relaxed);
-      cell.velocity.store(std::clamp(velocity, 1, 127),
-                          std::memory_order_relaxed);
-      cell.active.store(true, std::memory_order_relaxed);
-      cell.probability.store(1.0f, std::memory_order_relaxed);
-      cell.accent.store(false, std::memory_order_relaxed);
-      cell.tie.store(false, std::memory_order_relaxed);
-      capture_open_ = true;
-      capture_index_ = raw_index;
-      capture_pitch_ = note;
-      capture_velocity_ = std::clamp(velocity, 1, 127);
-      capture_lane_ = lane;
-      capture_locked_ = locked;
-    } else if (capture_open_ && note == capture_pitch_) {
-      close_capture(raw_index, length);
-    }
+    Capture& cap = captures_[static_cast<size_t>(dest)];
+    if (cap.open) close_capture(cap, raw_index, length);
+
+    StepCell& cell = cell_at(pattern, dest, step);
+    const bool locked =
+        cell.note.load(std::memory_order_relaxed) != kUnlockedNote;
+    if (locked) cell.note.store(note, std::memory_order_relaxed);
+    cell.velocity.store(std::clamp(velocity, 1, 127),
+                        std::memory_order_relaxed);
+    cell.active.store(true, std::memory_order_relaxed);
+    cell.probability.store(1.0f, std::memory_order_relaxed);
+    cell.accent.store(false, std::memory_order_relaxed);
+    cell.tie.store(false, std::memory_order_relaxed);
+    cap.open = true;
+    cap.index = raw_index;
+    cap.pitch = note;
+    cap.velocity = std::clamp(velocity, 1, 127);
+    cap.lane = dest;
+    cap.pattern = pattern;
+    cap.locked = locked;
   }
 }
 
@@ -851,22 +1076,19 @@ void StepSequencerInstance::capture_events(size_t incoming_count,
 // playback holds the same length rather than retriggering at each one — a
 // hit that never made it past its own step is left with no tie at all, which
 // is what leaves the gate knob free to shape it as usual.
-void StepSequencerInstance::close_capture(int64_t release_index, int length) {
-  int64_t span = release_index - capture_index_;
+void StepSequencerInstance::close_capture(Capture& cap, int64_t release_index,
+                                          int length) {
+  int64_t span = release_index - cap.index;
   if (span > 0) {
     span = std::min<int64_t>(span, length);
     for (int64_t i = 0; i < span; ++i) {
       const int step = static_cast<int>(
-          ((capture_index_ + i) % length + length) % length);
-      StepCell& cell = cell_at(0, capture_lane_, step);
+          ((cap.index + i) % length + length) % length);
+      StepCell& cell = cell_at(cap.pattern, cap.lane, step);
       if (i > 0) {
-        // Same lock decision as the step that opened the hold, not each
-        // spanned cell's own — a kit row does not turn into a 303 line
-        // partway through a note just because some other take had locked
-        // one of these cells before.
-        if (capture_locked_)
-          cell.note.store(capture_pitch_, std::memory_order_relaxed);
-        cell.velocity.store(capture_velocity_, std::memory_order_relaxed);
+        if (cap.locked)
+          cell.note.store(cap.pitch, std::memory_order_relaxed);
+        cell.velocity.store(cap.velocity, std::memory_order_relaxed);
         cell.active.store(true, std::memory_order_relaxed);
         cell.probability.store(1.0f, std::memory_order_relaxed);
         cell.accent.store(false, std::memory_order_relaxed);
@@ -874,7 +1096,7 @@ void StepSequencerInstance::close_capture(int64_t release_index, int length) {
       cell.tie.store(true, std::memory_order_relaxed);
     }
   }
-  capture_open_ = false;
+  cap.open = false;
 }
 
 size_t StepSequencerInstance::take_midi_output(MidiEvent* out, size_t capacity) {
@@ -892,6 +1114,7 @@ size_t StepSequencerInstance::take_midi_output(MidiEvent* out, size_t capacity) 
 
 void StepSequencerInstance::rotate_steps(int delta) {
   const int lane = focused_index();
+  const int pattern = current_pattern();
   const int n = std::clamp(
       lanes_[static_cast<size_t>(lane)].length.load(std::memory_order_relaxed),
       1, kMaxSteps);
@@ -902,7 +1125,7 @@ void StepSequencerInstance::rotate_steps(int delta) {
   float probs[kMaxSteps], micros[kMaxSteps];
   uint8_t conds[kMaxSteps], args[kMaxSteps];
   for (int i = 0; i < n; ++i) {
-    const StepCell& cell = cell_at(0, lane, i);
+    const StepCell& cell = cell_at(pattern, lane, i);
     notes[i] = cell.note.load(std::memory_order_relaxed);
     vels[i] = cell.velocity.load(std::memory_order_relaxed);
     ons[i] = cell.active.load(std::memory_order_relaxed);
@@ -916,7 +1139,7 @@ void StepSequencerInstance::rotate_steps(int delta) {
   }
   for (int i = 0; i < n; ++i) {
     const int src = (i - shift + n) % n;
-    StepCell& cell = cell_at(0, lane, i);
+    StepCell& cell = cell_at(pattern, lane, i);
     cell.note.store(notes[src], std::memory_order_relaxed);
     cell.velocity.store(vels[src], std::memory_order_relaxed);
     cell.active.store(ons[src], std::memory_order_relaxed);
@@ -932,32 +1155,61 @@ void StepSequencerInstance::rotate_steps(int delta) {
 
 void StepSequencerInstance::randomize_hits() {
   const int lane = focused_index();
+  const int pattern = current_pattern();
   const int n = std::clamp(
       lanes_[static_cast<size_t>(lane)].length.load(std::memory_order_relaxed),
       1, kMaxSteps);
   for (int i = 0; i < n; ++i)
-    cell_at(0, lane, i).active.store((next_ui_rng() & 1u) != 0,
-                                     std::memory_order_relaxed);
+    cell_at(pattern, lane, i).active.store((next_ui_rng() & 1u) != 0,
+                                          std::memory_order_relaxed);
 }
 
 void StepSequencerInstance::randomize_notes() {
   const int lane = focused_index();
+  const int pattern = current_pattern();
   const int n = std::clamp(
       lanes_[static_cast<size_t>(lane)].length.load(std::memory_order_relaxed),
       1, kMaxSteps);
   const int scale = scale_.load(std::memory_order_relaxed);
   const int root = root_.load(std::memory_order_relaxed);
   for (int i = 0; i < n; ++i) {
+    StepCell& cell = cell_at(pattern, lane, i);
+    if (cell.note.load(std::memory_order_relaxed) == kUnlockedNote) continue;
     const int raw = 48 + static_cast<int>(next_ui_rng() % 25u);
-    cell_at(0, lane, i).note.store(snap_to_scale(raw, scale, root),
-                                   std::memory_order_relaxed);
+    cell.note.store(snap_to_scale(raw, scale, root), std::memory_order_relaxed);
   }
 }
 
 void StepSequencerInstance::clear_hits() {
   const int lane = focused_index();
+  const int pattern = current_pattern();
   for (int i = 0; i < kMaxSteps; ++i)
-    cell_at(0, lane, i).active.store(false, std::memory_order_relaxed);
+    cell_at(pattern, lane, i).active.store(false, std::memory_order_relaxed);
+}
+
+void StepSequencerInstance::mutate_pattern() {
+  const int pattern = current_pattern();
+  const int scale = scale_.load(std::memory_order_relaxed);
+  const int root = root_.load(std::memory_order_relaxed);
+  for (int lane = 0; lane < kLanes; ++lane) {
+    const int n = std::clamp(
+        lanes_[static_cast<size_t>(lane)].length.load(std::memory_order_relaxed),
+        1, kMaxSteps);
+    for (int i = 0; i < n; ++i) {
+      StepCell& cell = cell_at(pattern, lane, i);
+      const bool on = cell.active.load(std::memory_order_relaxed);
+      const uint32_t roll = next_ui_rng();
+      if (on && (roll % 8u) == 0)
+        cell.active.store(false, std::memory_order_relaxed);
+      else if (!on && (roll % 16u) == 0)
+        cell.active.store(true, std::memory_order_relaxed);
+      const int note = cell.note.load(std::memory_order_relaxed);
+      if (note == kUnlockedNote) continue;
+      const int delta = (next_ui_rng() & 1u) ? 1 : -1;
+      cell.note.store(snap_to_scale(note + delta, scale, root),
+                      std::memory_order_relaxed);
+    }
+  }
 }
 
 void StepSequencerInstance::fill_euclidean(int pulses) {
@@ -993,9 +1245,11 @@ std::vector<ParameterInfo> StepSequencerInstance::parameters() const {
       {kRatchetAmount, "Ratchet amount", 0.0, 1.0, 0.0},
       {kMasterProb, "Master probability", 0.0, 1.0, 1.0},
       {kPattern, "Pattern", 0.0, kPatterns - 1.0, 0.0},
+      {kNextPattern, "Next pattern (0 none, 1–16)", 0.0, kPatterns, 0.0},
       {kFill, "Fill", 0.0, 1.0, 0.0},
       {kFocusedLane, "Focused lane", 0.0, kLanes - 1.0, 0.0},
       {kView, "View (0 skyline, 1 grid)", 0.0, 1.0, 0.0},
+      {kMutate, "Mutate", 0.0, 1.0, 0.0},
   };
 }
 
@@ -1016,6 +1270,7 @@ double StepSequencerInstance::parameter_value(uint32_t id) const {
     case kRandomHits:
     case kRandomNotes:
     case kClearHits:
+    case kMutate:
       return 0.0;
     case kEuclid: return lane.euclid.load(std::memory_order_relaxed);
     case kRecordArm:
@@ -1025,6 +1280,10 @@ double StepSequencerInstance::parameter_value(uint32_t id) const {
     case kRatchetAmount: return macros_[2].load(std::memory_order_relaxed);
     case kMasterProb: return macros_[3].load(std::memory_order_relaxed);
     case kPattern: return pattern_.load(std::memory_order_relaxed);
+    case kNextPattern: {
+      const int next = next_pattern_.load(std::memory_order_relaxed);
+      return next < 0 ? 0.0 : next + 1;
+    }
     case kFill: return fill_.load(std::memory_order_relaxed) ? 1.0 : 0.0;
     case kFocusedLane: return focused_index();
     case kView: return view_.load(std::memory_order_relaxed);
@@ -1133,6 +1392,14 @@ void StepSequencerInstance::set_parameter(uint32_t id, double value) {
       pattern_.store(clamp_int(value, 0, kPatterns - 1),
                      std::memory_order_relaxed);
       return;
+    case kNextPattern: {
+      const int n = clamp_int(value, 0, kPatterns);
+      next_pattern_.store(n <= 0 ? -1 : n - 1, std::memory_order_relaxed);
+      return;
+    }
+    case kMutate:
+      if (value >= 0.5) mutate_pattern();
+      return;
     case kFill:
       fill_.store(value >= 0.5, std::memory_order_relaxed);
       return;
@@ -1232,19 +1499,27 @@ std::vector<uint8_t> StepSequencerInstance::save_state() const {
     for (int l = 0; l < kLanes; ++l) {
       for (int s = 0; s < kMaxSteps; ++s) {
         const StepCell& cell = cell_at(p, l, s);
-        std::snprintf(
-            line, sizeof(line),
-            "pstep %d %d %d %d %d %d %.4f %d %d %.4f %d %d %d\n", p, l, s,
-            cell.note.load(std::memory_order_relaxed),
-            cell.velocity.load(std::memory_order_relaxed),
-            cell.active.load(std::memory_order_relaxed) ? 1 : 0,
-            cell.probability.load(std::memory_order_relaxed),
-            cell.accent.load(std::memory_order_relaxed) ? 1 : 0,
-            cell.tie.load(std::memory_order_relaxed) ? 1 : 0,
-            cell.microtiming.load(std::memory_order_relaxed),
-            cell.ratchet.load(std::memory_order_relaxed),
-            static_cast<int>(cell.condition.load(std::memory_order_relaxed)),
-            static_cast<int>(cell.cond_arg.load(std::memory_order_relaxed)));
+        const int note = cell.note.load(std::memory_order_relaxed);
+        const int vel = cell.velocity.load(std::memory_order_relaxed);
+        const bool on = cell.active.load(std::memory_order_relaxed);
+        const float prob = cell.probability.load(std::memory_order_relaxed);
+        const bool acc = cell.accent.load(std::memory_order_relaxed);
+        const bool tie = cell.tie.load(std::memory_order_relaxed);
+        const float micro = cell.microtiming.load(std::memory_order_relaxed);
+        const int ratchet = cell.ratchet.load(std::memory_order_relaxed);
+        const int cond =
+            static_cast<int>(cell.condition.load(std::memory_order_relaxed));
+        const int arg =
+            static_cast<int>(cell.cond_arg.load(std::memory_order_relaxed));
+        // Skip a blank cell so a saved strip is not 8192 empty lines.
+        if (!on && note == kUnlockedNote && vel == 100 && prob >= 0.999f &&
+            !acc && !tie && micro == 0.0f && ratchet <= 1 && cond == 0 &&
+            arg == 0)
+          continue;
+        std::snprintf(line, sizeof(line),
+                      "pstep %d %d %d %d %d %d %.4f %d %d %.4f %d %d %d\n", p,
+                      l, s, note, vel, on ? 1 : 0, prob, acc ? 1 : 0,
+                      tie ? 1 : 0, micro, ratchet, cond, arg);
         text += line;
       }
     }

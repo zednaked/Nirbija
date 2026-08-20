@@ -1233,6 +1233,285 @@ int main() {
     }
   }
 
+  // --- pattern bank: audio follows pattern_, isolation between banks --------
+  {
+    Seq seq;
+    seq.activate(kRate, kBlock);
+    seq.set_parameter(13, 1.0);  // clear lane 0 pattern 0
+    seq.set_cell(1, 0, 0, 72, 100, true, 1.0f);
+    seq.set_parameter(196, 1.0);
+    const std::vector<Note> notes =
+        run(seq, static_cast<int>(std::ceil(4.0 / block_beats)));
+    int ons = 0;
+    int pitch = -1;
+    for (const Note& note : notes) {
+      if (!note.on) continue;
+      ++ons;
+      pitch = note.pitch;
+    }
+    expect(ons == 1, "pattern 1 should sound once per bar, got " +
+                         std::to_string(ons));
+    expect(pitch == 72, "pattern 1 did not play its own pitch");
+    expect(seq.cell_active(0, 0, 0) == false,
+           "switching pattern rewrote pattern 0");
+  }
+
+  // --- FILL / NotFill -------------------------------------------------------
+  {
+    Seq seq;
+    seq.activate(kRate, kBlock);
+    seq.set_parameter(13, 1.0);
+    seq.set_cell(0, 0, 0, 60, 100, true, 1.0f);
+    seq.set_trig(0, 0, 0, 0.0f, 1, Seq::Fill, 0);
+    auto silent = run(seq, static_cast<int>(std::ceil(4.0 / block_beats)));
+    int ons = 0;
+    for (const Note& note : silent) if (note.on) ++ons;
+    expect(ons == 0, "Fill condition sounded with FILL off");
+  }
+  {
+    Seq seq;
+    seq.activate(kRate, kBlock);
+    seq.set_parameter(13, 1.0);
+    seq.set_cell(0, 0, 0, 60, 100, true, 1.0f);
+    seq.set_trig(0, 0, 0, 0.0f, 1, Seq::Fill, 0);
+    seq.set_parameter(198, 1.0);
+    auto loud = run(seq, static_cast<int>(std::ceil(4.0 / block_beats)));
+    int ons = 0;
+    for (const Note& note : loud) if (note.on) ++ons;
+    expect(ons == 1, "Fill condition stayed silent with FILL on, got " +
+                         std::to_string(ons));
+  }
+
+  // --- NEI miss: neighbor silent at this index stays silent next cycle ------
+  {
+    Seq seq;
+    seq.activate(kRate, kBlock);
+    seq.set_lane_mute(1, false);
+    seq.set_parameter(13, 1.0);  // clear focused (0)
+    seq.set_focus(1);
+    seq.set_parameter(13, 1.0);  // clear lane 1
+    seq.set_cell(0, 1, 0, 62, 100, true, 1.0f);
+    seq.set_trig(0, 1, 0, 0.0f, 1, Seq::Nei, 0);
+    // Lane 0 step 0 is off, so Nei on lane 1 step 0 must miss after one bar
+    // of visits. First bar writes last_on[0][0]=false; second bar Nei reads it.
+    const std::vector<Note> notes =
+        run(seq, static_cast<int>(std::ceil(8.0 / block_beats)));
+    int ons62 = 0;
+    for (const Note& note : notes)
+      if (note.on && note.pitch == 62) ++ons62;
+    expect(ons62 == 0, "Nei fired when the neighbor had missed that index");
+  }
+
+  // --- A:B 1:2 fires every other cycle of the lane --------------------------
+  {
+    Seq seq;
+    seq.activate(kRate, kBlock);
+    seq.set_parameter(13, 1.0);
+    seq.set_cell(0, 0, 0, 64, 100, true, 1.0f);
+    seq.set_trig(0, 0, 0, 0.0f, 1, Seq::AOverB, (1 << 4) | 2);
+    const std::vector<Note> notes =
+        run(seq, static_cast<int>(std::ceil(16.0 / block_beats)));
+    int ons = 0;
+    for (const Note& note : notes) if (note.on) ++ons;
+    expect(ons == 2, "1:2 over four bars should fire twice, got " +
+                         std::to_string(ons));
+  }
+
+  // --- ratchet 4, gate=1, 256-frame blocks: ons on the step/N grid ----------
+  {
+    Seq seq;
+    seq.activate(kRate, kBlock);
+    seq.set_parameter(13, 1.0);
+    seq.set_parameter(2, 1.0);  // full gate
+    seq.set_parameter(194, 1.0);  // ratchet macro fully on
+    seq.set_cell(0, 0, 0, 60, 100, true, 1.0f);
+    seq.set_trig(0, 0, 0, 0.0f, 4, Seq::Always, 0);
+    const std::vector<Note> notes =
+        run(seq, static_cast<int>(std::ceil(1.0 / block_beats)));
+    std::vector<double> ons;
+    for (const Note& note : notes)
+      if (note.on) ons.push_back(note.beat);
+    expect(ons.size() >= 4, "ratchet 4 should emit four ons, got " +
+                                std::to_string(ons.size()));
+    if (ons.size() >= 4) {
+      const double tol = block_beats;
+      expect(std::fabs(ons[0] - 0.0) < tol, "ratchet pulse 0 missed the grid");
+      expect(std::fabs(ons[1] - 0.0625) < tol,
+             "ratchet pulse 1 missed 0.0625");
+      expect(std::fabs(ons[2] - 0.125) < tol, "ratchet pulse 2 missed 0.125");
+      expect(std::fabs(ons[3] - 0.1875) < tol,
+             "ratchet pulse 3 missed 0.1875");
+    }
+  }
+
+  // --- ratchet 8 in a 1024-frame block includes pulse 2 in the same block ---
+  {
+    Seq seq;
+    seq.activate(kRate, 1024);
+    seq.set_parameter(13, 1.0);
+    seq.set_parameter(2, 1.0);
+    seq.set_parameter(194, 1.0);
+    seq.set_cell(0, 0, 0, 60, 100, true, 1.0f);
+    seq.set_trig(0, 0, 0, 0.0f, 8, Seq::Always, 0);
+
+    nirbija::TransportInfo transport;
+    transport.playing = true;
+    transport.tempo_bpm = kTempo;
+    transport.beats = 0.0;
+    seq.set_transport(transport);
+    seq.process(nullptr, nullptr, 1024);
+    nirbija::MidiEvent buffer[128];
+    const size_t count = seq.take_midi_output(buffer, 128);
+    int ons = 0;
+    for (size_t e = 0; e < count; ++e)
+      if ((buffer[e].data[0] & 0xf0) == 0x90 && buffer[e].data[2] > 0) ++ons;
+    expect(ons >= 2, "1024-frame ratchet 8 should contain trig + pulse 2, got " +
+                         std::to_string(ons));
+  }
+
+  // --- mute before pulse 2 silences the rest of the ratchet -----------------
+  {
+    Seq seq;
+    seq.activate(kRate, kBlock);
+    seq.set_parameter(13, 1.0);
+    seq.set_parameter(2, 1.0);
+    seq.set_parameter(194, 1.0);
+    seq.set_cell(0, 0, 0, 60, 100, true, 1.0f);
+    seq.set_trig(0, 0, 0, 0.0f, 8, Seq::Always, 0);
+
+    nirbija::TransportInfo transport;
+    transport.playing = true;
+    transport.tempo_bpm = kTempo;
+    transport.beats = 0.0;
+    seq.set_transport(transport);
+    seq.process(nullptr, nullptr, kBlock);
+    nirbija::MidiEvent buffer[128];
+    seq.take_midi_output(buffer, 128);
+    seq.set_lane_mute(0, true);
+    transport.beats = kBlock / kRate * kTempo / 60.0;
+    seq.set_transport(transport);
+    seq.process(nullptr, nullptr, kBlock);
+    const size_t count = seq.take_midi_output(buffer, 128);
+    int ons = 0;
+    for (size_t e = 0; e < count; ++e)
+      if ((buffer[e].data[0] & 0xf0) == 0x90 && buffer[e].data[2] > 0) ++ons;
+    expect(ons == 0, "mute during a ratchet still emitted, got " +
+                         std::to_string(ons));
+  }
+
+  // --- extra head rate×2 doubles ons; muted extra is silent -----------------
+  {
+    Seq seq;
+    seq.activate(kRate, kBlock);
+    seq.set_parameter(13, 1.0);
+    for (int i = 0; i < Seq::kVisibleSteps; ++i)
+      seq.set_cell(0, 0, i, 60, 100, true, 1.0f);
+    seq.set_extra_head(0, 0, 1, Seq::Forward, 0, 16, 12, false);
+    const std::vector<Note> notes =
+        run(seq, static_cast<int>(std::ceil(4.0 / block_beats)));
+    int native = 0, extra = 0;
+    for (const Note& note : notes) {
+      if (!note.on) continue;
+      if (note.pitch == 60) ++native;
+      if (note.pitch == 72) ++extra;
+    }
+    expect(native == 16, "native head lost ons with an extra running, got " +
+                             std::to_string(native));
+    expect(extra == 32, "rate×2 extra should double the ons, got " +
+                            std::to_string(extra));
+
+    seq.set_extra_head(0, 0, 1, Seq::Forward, 0, 16, 12, true);
+    const std::vector<Note> quiet =
+        run(seq, static_cast<int>(std::ceil(4.0 / block_beats)));
+    extra = 0;
+    for (const Note& note : quiet)
+      if (note.on && note.pitch == 72) ++extra;
+    expect(extra == 0, "muted extra still sounded");
+  }
+
+  // --- extra reverse window start=48 length=16 never indexes 64+ ------------
+  {
+    Seq seq;
+    seq.activate(kRate, kBlock);
+    seq.set_parameter(1, 64.0);  // lane 0 length 64
+    for (int i = 0; i < 64; ++i)
+      seq.set_cell(0, 0, i, 40 + i, 100, true, 1.0f);
+    seq.set_extra_head(0, 0, 0, Seq::Reverse, 48, 16, 0, false);
+    nirbija::TransportInfo transport;
+    transport.playing = true;
+    transport.tempo_bpm = kTempo;
+    transport.beats = 0.0;
+    seq.set_transport(transport);
+    seq.process(nullptr, nullptr, kBlock);
+    expect(seq.extra_head_step(0) == 63,
+           "reverse window first step was not 63, got " +
+               std::to_string(seq.extra_head_step(0)));
+  }
+
+  // --- next pattern queues on the host bar ----------------------------------
+  {
+    Seq seq;
+    seq.activate(kRate, kBlock);
+    seq.set_parameter(13, 1.0);
+    seq.set_cell(0, 0, 0, 60, 100, true, 1.0f);
+    seq.set_cell(1, 0, 0, 72, 100, true, 1.0f);
+    seq.set_parameter(197, 2.0);  // next = pattern 1
+    const int blocks = static_cast<int>(std::ceil(8.0 / block_beats));
+    const std::vector<Note> notes = run(seq, blocks);
+    bool heard60 = false, heard72 = false;
+    for (const Note& note : notes) {
+      if (!note.on) continue;
+      if (note.pitch == 60 && note.beat < 4.0) heard60 = true;
+      if (note.pitch == 72 && note.beat >= 4.0) heard72 = true;
+    }
+    expect(heard60, "first bar did not play pattern 0");
+    expect(heard72, "second bar did not switch to the queued pattern");
+    expect(seq.pattern() == 1, "queued pattern did not become current");
+    expect(seq.next_pattern() < 0, "next pattern did not clear after the bar");
+  }
+
+  // --- Rec routes a pad pitch onto that lane, unlocked stays unlocked -------
+  {
+    Seq seq;
+    seq.activate(kRate, kBlock);
+    seq.set_parameter(15, 1.0);
+    nirbija::TransportInfo transport;
+    transport.playing = true;
+    transport.tempo_bpm = kTempo;
+    transport.beats = 0.0;
+    seq.set_transport(transport);
+    nirbija::MidiEvent on{};
+    on.frame = 5;
+    on.size = 3;
+    on.data[0] = 0x90;
+    on.data[1] = 38;  // GM snare = lane 1
+    on.data[2] = 111;
+    seq.queue_midi(on);
+    seq.process(nullptr, nullptr, kBlock);
+    nirbija::MidiEvent buffer[128];
+    seq.take_midi_output(buffer, 128);
+    expect(seq.cell_active(0, 1, 0), "snare rec did not land on lane 1");
+    expect(seq.cell_note(0, 1, 0) == Seq::kUnlockedNote,
+           "snare rec locked the kit row");
+    expect(seq.cell_velocity(0, 1, 0) == 111, "snare rec lost velocity");
+  }
+
+  // --- stopping stores playhead -1, not step 0 ------------------------------
+  {
+    Seq seq;
+    seq.activate(kRate, kBlock);
+    run(seq, 4);
+    expect(seq.playhead() >= 0, "playing should have a playhead");
+    nirbija::TransportInfo stopped;
+    stopped.playing = false;
+    stopped.tempo_bpm = kTempo;
+    seq.set_transport(stopped);
+    seq.process(nullptr, nullptr, kBlock);
+    expect(seq.playhead() == -1, "stop did not clear playhead");
+    expect(seq.native_head_step(0) < 0,
+           "stop left native head_steps at 0, lighting column 1");
+  }
+
   if (failures > 0) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return 1;

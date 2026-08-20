@@ -135,6 +135,7 @@ class StepSequencerInstance : public PluginInstance {
   int extra_head_length(int extra) const;
   int extra_head_transpose(int extra) const;
   bool extra_head_muted(int extra) const;
+  int extra_head_step(int extra) const;
   int native_head_step(int lane) const;
   void set_focus(int lane);
   int focus() const;
@@ -191,6 +192,23 @@ class StepSequencerInstance : public PluginInstance {
     int pitch = -1;
     uint8_t channel = 0;  // channel of the ON, not the live lane atomic
     double off_beat = 0;
+    // Ratchet scheduler — last_step_beat_ is the *step* guard, not this.
+    int ratchet_left = 0;
+    double next_pulse_beat = 0;
+    double pulse_spacing = 0;  // step_beats / N
+    double pulse_dur = 0;      // gate * spacing
+    double step_end_beat = 0;
+    int pulse_vel = 100;
+  };
+
+  struct Capture {
+    bool open = false;
+    int64_t index = 0;
+    int pitch = 0;
+    int velocity = 100;
+    int lane = 0;
+    int pattern = 0;
+    bool locked = false;
   };
 
   double beat_of(double index, double step_beats) const;
@@ -200,15 +218,17 @@ class StepSequencerInstance : public PluginInstance {
   int focused_index() const;
   uint32_t next_rng();      // audio thread
   uint32_t next_ui_rng();   // UI thread — pattern ops, not process()
+  int current_pattern() const;
   void rotate_steps(int delta);
   void randomize_hits();
   void randomize_notes();
   void clear_hits();
   void fill_euclidean(int pulses);
+  void mutate_pattern();
   void capture_events(size_t incoming_count, double start_beat,
-                      double block_beats, uint32_t frames, double step_beats,
-                      int length, int lane);
-  void close_capture(int64_t release_index, int length);
+                      double block_beats, uint32_t frames);
+  void close_capture(Capture& cap, int64_t release_index, int length);
+  void cancel_scheduler(int head, uint32_t frame);
   void reset_blank();
   void paint_constructor_pattern();
   bool cell_in_range(int pattern, int lane, int step) const;
@@ -248,22 +268,18 @@ class StepSequencerInstance : public PluginInstance {
   // The armed state process() last acted on, to spot the edge where a fresh
   // arm has to cut off whatever the pattern itself was sounding.
   bool record_active_ = false;
-  // The note capture currently has open, waiting for its release to know how
-  // many steps it spanned. -1 pitch means nothing is open.
-  bool capture_open_ = false;
-  int64_t capture_index_ = 0;
-  int capture_pitch_ = 0;
-  int capture_velocity_ = 100;
-  int capture_lane_ = 0;
-  // Whether the cell the capture opened on was locked (had an explicit
-  // pitch, not the unlocked marker). Every step the hold spans inherits this
-  // one decision, so a kit row does not gain a locked pitch partway through
-  // a held note.
-  bool capture_locked_ = false;
+  std::array<Capture, kLanes> captures_{};
+
+  // Pre / Nei: last *visit* (miss included), audio-thread only.
+  std::array<bool, kVoiceSlots> last_fired_{};
+  std::array<std::array<bool, kMaxSteps>, kLanes> last_on_{};
+  int last_bar_ = -1;
 
   std::atomic<int> playhead_{-1};
   // Last mapped step per native head, so the snapshot can light all eight.
+  // −1 when nothing is walking (stopped, or an extra that is muted).
   std::array<std::atomic<int>, kLanes> head_steps_{};
+  std::array<std::atomic<int>, kExtraHeads> extra_head_steps_{};
 
   std::array<MidiEvent, kMaxEvents> events_{};
   size_t event_count_ = 0;
