@@ -542,23 +542,25 @@ int main(int argc, char* argv[]) {
                      - 0.33) > 1e-9)
           fail("the loaded strip did not take the gain");
 
-        // The state is the whole reason for the feature.
+        // The state is the whole reason for the feature. Step 1's note (id
+        // 16) is no longer in insertParameters() - an 8x64 grid does not
+        // list per-step IDs - so it comes from the snapshot instead, the
+        // same place the editor itself reads it from.
         const QVariantList params = mixer.insertParameters(copy, 0);
-        double note = -1;
         double steps = -1;
         for (const QVariant& value : params) {
           const QVariantMap p = value.toMap();
-          if (p.value(QStringLiteral("id")).toInt() == 16) note = p.value(QStringLiteral("value")).toDouble();
           if (p.value(QStringLiteral("id")).toInt() == 1) steps = p.value(QStringLiteral("value")).toDouble();
         }
-        if (std::abs(note - 42.0) > 1e-9)
-          fail("the sequencer's pattern did not survive the preset");
         if (std::abs(steps - 7.0) > 1e-9)
           fail("the sequencer's length did not survive the preset");
 
         const QVariantMap snap = mixer.insertSequencerSnapshot(copy, 0);
         if (snap.isEmpty())
           fail("insertSequencerSnapshot was empty on a sequencer");
+        const QVariantList notes = snap.value(QStringLiteral("note")).toList();
+        if (notes.isEmpty() || std::abs(notes.value(0).toDouble() - 42.0) > 1e-9)
+          fail("the sequencer's pattern did not survive the preset");
         const QVariantList ons = snap.value(QStringLiteral("on")).toList();
         if (ons.size() != 512)
           fail("sequencer snapshot on list was " + std::to_string(ons.size()) +
