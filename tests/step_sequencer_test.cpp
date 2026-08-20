@@ -74,7 +74,7 @@ int main() {
     nirbija::StepSequencerInstance seq;
     seq.activate(kRate, kBlock);
     // Every step on, so the count is predictable.
-    for (int i = 0; i < nirbija::StepSequencerInstance::kSteps; ++i)
+    for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i)
       seq.set_parameter(80 + i, 1.0);
 
     // Four beats is a bar: at 1/16 that is sixteen steps.
@@ -109,7 +109,7 @@ int main() {
   {
     nirbija::StepSequencerInstance seq;
     seq.activate(kRate, kBlock);
-    for (int i = 0; i < nirbija::StepSequencerInstance::kSteps; ++i)
+    for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i)
       seq.set_parameter(80 + i, 1.0);
     seq.set_parameter(2, 1.0);
 
@@ -131,7 +131,7 @@ int main() {
   {
     nirbija::StepSequencerInstance seq;
     seq.activate(kRate, kBlock);
-    for (int i = 0; i < nirbija::StepSequencerInstance::kSteps; ++i)
+    for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i)
       seq.set_parameter(80 + i, 0.0);
     seq.set_parameter(80 + 0, 1.0);   // only the first
     seq.set_parameter(16 + 0, 64.0);  // on a note we can recognise
@@ -156,7 +156,7 @@ int main() {
   {
     nirbija::StepSequencerInstance seq;
     seq.activate(kRate, kBlock);
-    for (int i = 0; i < nirbija::StepSequencerInstance::kSteps; ++i)
+    for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i)
       seq.set_parameter(80 + i, 1.0);
     seq.set_parameter(2, 1.0);  // full gate, so a note is always sounding
 
@@ -188,7 +188,7 @@ int main() {
   {
     nirbija::StepSequencerInstance seq;
     seq.activate(kRate, kBlock);
-    for (int i = 0; i < nirbija::StepSequencerInstance::kSteps; ++i) {
+    for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i) {
       seq.set_parameter(80 + i, 1.0);
       seq.set_parameter(16 + i, 40.0 + i);  // each step a different pitch
     }
@@ -222,7 +222,7 @@ int main() {
   {
     nirbija::StepSequencerInstance seq;
     seq.activate(kRate, 6000);
-    for (int i = 0; i < nirbija::StepSequencerInstance::kSteps; ++i)
+    for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i)
       seq.set_parameter(80 + i, 1.0);
 
     nirbija::MidiEvent buffer[64];
@@ -252,7 +252,7 @@ int main() {
   {
     nirbija::StepSequencerInstance seq;
     seq.activate(kRate, 6000);
-    for (int i = 0; i < nirbija::StepSequencerInstance::kSteps; ++i)
+    for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i)
       seq.set_parameter(80 + i, 1.0);
 
     nirbija::MidiEvent buffer[64];
@@ -278,7 +278,7 @@ int main() {
   {
     nirbija::StepSequencerInstance seq;
     seq.activate(kRate, kBlock);
-    for (int i = 0; i < nirbija::StepSequencerInstance::kSteps; ++i)
+    for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i)
       seq.set_parameter(80 + i, 0.0);  // silent, so only the passthrough shows
 
     nirbija::MidiEvent incoming{};
@@ -342,7 +342,7 @@ int main() {
   {
     nirbija::StepSequencerInstance seq;
     seq.activate(kRate, kBlock);
-    for (int i = 0; i < nirbija::StepSequencerInstance::kSteps; ++i)
+    for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i)
       seq.set_parameter(80 + i, 1.0);
     seq.set_parameter(5, 1.0);  // full swing: odd sixteenths +1/32
 
@@ -367,7 +367,7 @@ int main() {
   {
     nirbija::StepSequencerInstance seq;
     seq.activate(kRate, kBlock);
-    for (int i = 0; i < nirbija::StepSequencerInstance::kSteps; ++i) {
+    for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i) {
       seq.set_parameter(80 + i, 1.0);
       seq.set_parameter(16 + i, 40.0 + i);
     }
@@ -414,7 +414,7 @@ int main() {
   {
     nirbija::StepSequencerInstance seq;
     seq.activate(kRate, kBlock);
-    for (int i = 0; i < nirbija::StepSequencerInstance::kSteps; ++i) {
+    for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i) {
       seq.set_parameter(80 + i, 1.0);
       seq.set_parameter(112 + i, 0.0);
     }
@@ -430,7 +430,7 @@ int main() {
   {
     nirbija::StepSequencerInstance seq;
     seq.activate(kRate, kBlock);
-    for (int i = 0; i < nirbija::StepSequencerInstance::kSteps; ++i)
+    for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i)
       seq.set_parameter(80 + i, 0.0);
     seq.set_parameter(80 + 0, 1.0);
     seq.set_parameter(48 + 0, 100.0);
@@ -447,7 +447,7 @@ int main() {
   {
     nirbija::StepSequencerInstance seq;
     seq.activate(kRate, kBlock);
-    for (int i = 0; i < nirbija::StepSequencerInstance::kSteps; ++i) {
+    for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i) {
       seq.set_parameter(80 + i, 1.0);
       seq.set_parameter(16 + i, 60.0);
       seq.set_parameter(176 + i, 1.0);
@@ -490,7 +490,7 @@ int main() {
   {
     nirbija::StepSequencerInstance seq;
     seq.activate(kRate, kBlock);
-    for (int i = 0; i < nirbija::StepSequencerInstance::kSteps; ++i)
+    for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i)
       seq.set_parameter(80 + i, 1.0);
 
     const double block_beats_local = kBlock / kRate * kTempo / 60.0;
@@ -589,7 +589,7 @@ int main() {
     nirbija::StepSequencerInstance seq;
     seq.activate(kRate, kBlock);
     seq.set_parameter(15, 1.0);  // arm
-    for (int i = 0; i < nirbija::StepSequencerInstance::kSteps; ++i)
+    for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i)
       seq.set_parameter(80 + i, 1.0);  // every step on, so silence proves it
 
     nirbija::TransportInfo transport;
@@ -671,6 +671,203 @@ int main() {
         fail("held note step " + std::to_string(step) +
              " should have tied into the next");
     }
+  }
+
+  using Seq = nirbija::StepSequencerInstance;
+
+  auto blob_of = [](const std::string& text) {
+    return std::vector<uint8_t>(text.begin(), text.end());
+  };
+
+  auto lanes_empty_muted = [](const Seq& seq, const std::string& who) {
+    for (int lane = 1; lane < Seq::kLanes; ++lane) {
+      if (!seq.lane_muted(lane))
+        fail(who + " lane " + std::to_string(lane) + " was not muted");
+      for (int i = 0; i < Seq::kMaxSteps; ++i) {
+        if (seq.cell_active(0, lane, i)) {
+          fail(who + " lane " + std::to_string(lane) + " step " +
+               std::to_string(i) + " kept a factory hit");
+          break;
+        }
+      }
+    }
+  };
+
+  // --- constructor paints a muted kit; no audio needed ----------------------
+  {
+    Seq seq;
+    const std::vector<uint8_t> blob = seq.save_state();
+    const std::string text(blob.begin(), blob.end());
+    if (text.find("version 2\n") != 0)
+      fail("a fresh instance did not save as v2");
+    if (!seq.lane_muted(1)) fail("constructor lane 1 was not muted");
+    if (!seq.cell_active(0, 1, 4) || !seq.cell_active(0, 1, 12))
+      fail("constructor snare did not land on steps 4 and 12");
+    if (seq.cell_active(0, 1, 0)) fail("constructor snare had extra hits");
+    if (seq.cell_note(0, 1, 4) != Seq::kUnlockedNote)
+      fail("constructor kit cells were locked");
+    if (seq.lane_note(1) != 38) fail("constructor snare was not GM 38");
+    for (int i = 0; i < Seq::kVisibleSteps; ++i) {
+      const bool want = (i % 2) == 0;
+      if (seq.cell_active(0, 0, i) != want)
+        fail("constructor lane 0 seed hit " + std::to_string(i));
+      if (seq.cell_active(0, 2, i) != want)
+        fail("constructor closed-hat hit " + std::to_string(i));
+    }
+    if (!seq.cell_active(0, 3, 14)) fail("constructor open-hat missed step 14");
+    if (!seq.cell_active(0, 6, 4)) fail("constructor clap missed step 4");
+    for (int lane : {4, 5, 7}) {
+      for (int i = 0; i < Seq::kMaxSteps; ++i)
+        if (seq.cell_active(0, lane, i))
+          fail("constructor empty lane " + std::to_string(lane) + " had a hit");
+    }
+    for (int lane = 1; lane < Seq::kLanes; ++lane)
+      if (!seq.lane_muted(lane))
+        fail("constructor lane " + std::to_string(lane) + " was not muted");
+    if (seq.lane_muted(0)) fail("constructor lane 0 was muted");
+  }
+
+  // --- v2 roundtrip preserves a cell the shim cannot reach ------------------
+  {
+    Seq seq;
+    seq.set_cell(0, 3, 40, 48, 90, true, 0.25f);
+    const std::vector<uint8_t> blob = seq.save_state();
+    Seq restored;
+    if (!restored.load_state(blob)) fail("v2 roundtrip blob was refused");
+    if (restored.cell_note(0, 3, 40) != 48)
+      fail("v2 roundtrip lost lane 3 step 40 note");
+    if (restored.cell_velocity(0, 3, 40) != 90)
+      fail("v2 roundtrip lost lane 3 step 40 velocity");
+    if (!restored.cell_active(0, 3, 40))
+      fail("v2 roundtrip lost lane 3 step 40 on");
+    if (std::fabs(restored.cell_probability(0, 3, 40) - 0.25f) > 1e-4)
+      fail("v2 roundtrip lost lane 3 step 40 probability");
+  }
+
+  // --- jam-goth v1 loads as lane 0; other lanes stay empty ------------------
+  {
+    const std::string kick =
+        "division 2\nlength 16\ngate 0.2500\ntranspose 0\nchannel 0\n"
+        "step 36 118 1\nstep 60 100 0\nstep 60 100 0\nstep 36 88 1\n"
+        "step 36 118 1\nstep 60 100 0\nstep 60 100 0\nstep 60 100 0\n"
+        "step 36 118 1\nstep 60 100 0\nstep 60 100 0\nstep 36 92 1\n"
+        "step 36 118 1\nstep 60 100 0\nstep 60 100 0\nstep 60 100 0\n";
+    const std::string snare =
+        "division 2\nlength 16\ngate 0.2500\ntranspose 0\nchannel 0\n"
+        "step 60 100 0\nstep 60 100 0\nstep 60 100 0\nstep 60 100 0\n"
+        "step 38 120 1\nstep 60 100 0\nstep 60 100 0\nstep 37 62 1\n"
+        "step 60 100 0\nstep 60 100 0\nstep 60 100 0\nstep 60 100 0\n"
+        "step 38 120 1\nstep 60 100 0\nstep 60 100 0\nstep 37 70 1\n";
+    const std::string hat =
+        "division 2\nlength 16\ngate 0.2500\ntranspose 0\nchannel 0\n"
+        "step 60 100 0\nstep 60 100 0\nstep 43 96 1\nstep 60 100 0\n"
+        "step 60 100 0\nstep 60 100 0\nstep 41 104 1\nstep 60 100 0\n"
+        "step 60 100 0\nstep 60 100 0\nstep 43 96 1\nstep 60 100 0\n"
+        "step 60 100 0\nstep 60 100 0\nstep 41 110 1\nstep 60 100 0\n";
+    const std::string perc =
+        "division 2\nlength 16\ngate 0.2500\ntranspose 0\nchannel 0\n"
+        "step 60 100 0\nstep 42 54 1\nstep 60 100 0\nstep 60 100 0\n"
+        "step 60 100 0\nstep 42 58 1\nstep 60 100 0\nstep 60 100 0\n"
+        "step 60 100 0\nstep 42 54 1\nstep 60 100 0\nstep 60 100 0\n"
+        "step 60 100 0\nstep 42 58 1\nstep 60 100 0\nstep 46 72 1\n";
+
+    const std::string blobs[] = {kick, snare, hat, perc};
+    const char* names[] = {"kick", "snare", "hat", "perc"};
+    for (int b = 0; b < 4; ++b) {
+      Seq seq;
+      if (!seq.load_state(blob_of(blobs[b])))
+        fail(std::string("jam-goth ") + names[b] + " blob was refused");
+      lanes_empty_muted(seq, std::string("jam-goth ") + names[b]);
+    }
+
+    Seq seq;
+    seq.activate(kRate, kBlock);
+    if (!seq.load_state(blob_of(kick))) fail("jam-goth kick blob was refused");
+    const int kick_on[] = {0, 3, 4, 8, 11, 12};
+    for (int i = 0; i < Seq::kVisibleSteps; ++i) {
+      bool want = false;
+      for (int k : kick_on)
+        if (k == i) want = true;
+      if (seq.cell_active(0, 0, i) != want)
+        fail("jam-goth kick step " + std::to_string(i) +
+             (want ? " was off" : " was on"));
+      if (want && seq.cell_note(0, 0, i) != 36)
+        fail("jam-goth kick step " + std::to_string(i) + " was not 36");
+    }
+    if (seq.cell_active(0, 1, 4))
+      fail("jam-goth kick grew a constructor snare on lane 1");
+
+    const std::vector<Note> notes =
+        run(seq, static_cast<int>(std::ceil(4.0 / block_beats)));
+    std::vector<int> pitches;
+    for (const Note& note : notes)
+      if (note.on) pitches.push_back(note.pitch);
+    if (pitches.size() != 6)
+      fail("jam-goth kick played " + std::to_string(pitches.size()) +
+           " notes, wanted 6");
+    for (int p : pitches)
+      if (p != 36) fail("jam-goth kick played pitch " + std::to_string(p));
+  }
+
+  // --- a truncated v2 dump does not throw -----------------------------------
+  {
+    Seq seq;
+    seq.set_cell(0, 3, 40, 48, 90, true, 0.25f);
+    const std::vector<uint8_t> blob = seq.save_state();
+    Seq damaged;
+    const std::vector<uint8_t> half(blob.begin(),
+                                    blob.begin() + blob.size() / 2);
+    if (!damaged.load_state(half)) fail("truncated v2 blob was refused");
+  }
+
+  // --- inflated blobs give up without eating the constructor seed -----------
+  {
+    Seq seq;
+    std::vector<uint8_t> junk(2 * 1024 * 1024, static_cast<uint8_t>('x'));
+    if (!seq.load_state(junk)) fail("2 MiB junk blob was refused");
+    if (!seq.cell_active(0, 1, 4) || !seq.cell_active(0, 1, 12))
+      fail("2 MiB junk overwrote constructor defaults");
+    if (seq.cell_note(0, 0, 0) != 57)
+      fail("2 MiB junk overwrote the lane 0 seed");
+  }
+
+  {
+    std::string text = "version 2\n";
+    for (int p = 0; p < Seq::kPatterns; ++p)
+      for (int l = 0; l < Seq::kLanes; ++l)
+        for (int s = 0; s < Seq::kMaxSteps; ++s)
+          text += "pstep " + std::to_string(p) + " " + std::to_string(l) + " " +
+                  std::to_string(s) + " 10 100 0 1.0000 0 0 0.0000 1 0 0\n";
+    for (int i = 0; i < 2000; ++i)
+      text += "pstep 0 0 0 99 100 1 1.0000 0 0 0.0000 1 0 0\n";
+    Seq seq;
+    if (!seq.load_state(blob_of(text))) fail("10k pstep blob was refused");
+    if (seq.cell_note(0, 0, 0) != 10)
+      fail("pstep lines past 16*8*64 still wrote the first cell");
+    if (seq.cell_active(0, 0, 0))
+      fail("overflow pstep lines armed step 0");
+  }
+
+  {
+    std::string text = "version 2\n";
+    for (int i = 0; i < 9000; ++i) text += "junk 1\n";
+    text += "pstep 0 0 0 77 100 1 1.0000 0 0 0.0000 1 0 0\n";
+    Seq seq;
+    if (!seq.load_state(blob_of(text))) fail("line-capped blob was refused");
+    if (seq.cell_note(0, 0, 0) == 77)
+      fail("a pstep past the line cap still landed");
+  }
+
+  // --- shim IDs 16–191 always write pattern 0 / lane 0 / steps 0–15 ---------
+  {
+    Seq seq;
+    const std::string focused = "version 2\nfocus 3\n";
+    if (!seq.load_state(blob_of(focused))) fail("focus blob was refused");
+    seq.set_parameter(16, 64.0);
+    if (seq.cell_note(0, 0, 0) != 64)
+      fail("set_parameter(16) did not write lane 0 step 0");
+    if (seq.parameter_value(16) != 64.0)
+      fail("parameter_value(16) did not read the shim cell");
   }
 
   if (failures > 0) {
