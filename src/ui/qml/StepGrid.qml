@@ -111,21 +111,20 @@ Popup {
         (root.viewMode === 1 ? root.maxSteps : root.focusedLength) / root.pageSteps))
     readonly property int stepOffset: Math.min(root.page, root.pageCount - 1) * root.pageSteps
 
-    // Never larger than the mixer behind it: 16 pattern pads each wanted a
-    // 32px touch target, which blew the popup past a 660×520 window and
-    // painted off the overlay. Size is a cap against the overlay; chrome
-    // below sets Layout.minimumWidth 0 so the pads share whatever is left.
+    // Capped to the overlay so it cannot paint off the mixer, but allowed to
+    // use the room a normal 1200×700 window has — a hard 640×540 clipped the
+    // macros, the scale names and the swing track.
     width: {
         const ov = Overlay.overlay
-        const want = Px.px(640)
+        const want = Px.px(880)
         if (!ov) return want
-        return Math.min(want, Math.max(Px.px(400), ov.width - Px.px(12)))
+        return Math.min(want, Math.max(Px.px(520), ov.width - Px.px(24)))
     }
     height: {
         const ov = Overlay.overlay
-        const want = Px.px(540)
+        const want = Px.px(600)
         if (!ov) return want
-        return Math.min(want, Math.max(Px.px(360), ov.height - Px.px(12)))
+        return Math.min(want, Math.max(Px.px(400), ov.height - Px.px(24)))
     }
     clip: true
     // Not modal: the mixer behind it stays live, so a fader or the transport
@@ -435,7 +434,8 @@ Popup {
             font.bold: true
         }
 
-        // --- performance row: always visible, works from across the room -------
+        // Rec / Fill / bank on their own row so the sixteen pads are not
+        // fighting the macros for the same pixels.
         RowLayout {
             Layout.fillWidth: true
             spacing: Skin.spacingXS
@@ -465,16 +465,13 @@ Popup {
                 }
             }
 
-            Item { Layout.preferredWidth: Skin.spacingS }
-
             Repeater {
                 model: root.patternCount
                 StripButton {
                     required property int index
                     Layout.minimumWidth: 0
                     Layout.fillWidth: true
-                    Layout.preferredWidth: Px.px(18)
-                    Layout.maximumWidth: Px.px(28)
+                    Layout.preferredWidth: Px.px(22)
                     Layout.preferredHeight: Px.px(22)
                     label: String(index + 1)
                     flat: true
@@ -486,12 +483,13 @@ Popup {
                     }
                 }
             }
+        }
 
-            Item { Layout.fillWidth: true }
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Skin.spacingXS
 
             ValueTrack {
-                Layout.preferredWidth: Px.px(64)
-                Layout.minimumWidth: 0
                 Layout.fillWidth: true
                 Layout.preferredHeight: Px.px(22)
                 label: qsTr("dens")
@@ -501,8 +499,6 @@ Popup {
                 onMoved: v => root.setParam(root.idDensity, v * 2)
             }
             ValueTrack {
-                Layout.preferredWidth: Px.px(64)
-                Layout.minimumWidth: 0
                 Layout.fillWidth: true
                 Layout.preferredHeight: Px.px(22)
                 label: qsTr("chaos")
@@ -512,8 +508,6 @@ Popup {
                 onMoved: v => root.setParam(root.idChaos, v)
             }
             ValueTrack {
-                Layout.preferredWidth: Px.px(64)
-                Layout.minimumWidth: 0
                 Layout.fillWidth: true
                 Layout.preferredHeight: Px.px(22)
                 label: qsTr("rtch")
@@ -523,8 +517,6 @@ Popup {
                 onMoved: v => root.setParam(root.idRatchetAmount, v)
             }
             ValueTrack {
-                Layout.preferredWidth: Px.px(64)
-                Layout.minimumWidth: 0
                 Layout.fillWidth: true
                 Layout.preferredHeight: Px.px(22)
                 label: qsTr("prob")
@@ -604,6 +596,11 @@ Popup {
             }
 
             Item { Layout.fillWidth: true }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Skin.spacingXS
 
             component DirButton: StripButton {
                 required property int forValue
@@ -617,15 +614,14 @@ Popup {
             DirButton { forValue: 2; label: "↔"; tip: qsTr("Pendulum.") }
             DirButton { forValue: 3; label: qsTr("?"); tip: qsTr("A new step each time.") }
 
-            Item { Layout.preferredWidth: Skin.spacingS }
-
             Repeater {
                 model: root.scaleNames
                 StripButton {
                     required property int index
                     required property string modelData
-                    Layout.preferredWidth: Px.px(32)
                     Layout.minimumWidth: 0
+                    Layout.fillWidth: true
+                    Layout.preferredWidth: Px.px(36)
                     label: modelData
                     active: root.scaleId === index
                     tip: qsTr("Notes snap to this scale.")
@@ -634,6 +630,7 @@ Popup {
             }
             StripButton {
                 Layout.preferredWidth: Px.px(32)
+                Layout.minimumWidth: 0
                 label: root.rootNames[root.root] || "C"
                 tip: qsTr("Root of the scale. Click to walk it.")
                 onClicked: root.setParam(root.idRoot, (root.root + 1) % 12)
@@ -1215,7 +1212,7 @@ Popup {
 
         GridLayout {
             Layout.fillWidth: true
-            columns: 4
+            columns: 3
             columnSpacing: Skin.spacing
             rowSpacing: Skin.spacingXS
 
