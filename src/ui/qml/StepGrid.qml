@@ -91,7 +91,7 @@ Popup {
     property bool fill: false
     property bool recording: false
     property int focusedLane: 0
-    property int viewMode: 0  // 0 skyline, 1 grid
+    property int viewMode: 1  // grid first; skyline is the bassline view
     // Which page of 16 steps is on screen. QML-only - a restart always comes
     // back to page 0, and two editors open on the same insert can look at
     // different pages without fighting over one number in the blob.
@@ -313,7 +313,7 @@ Popup {
         root.fill = snap.fill === true || snap.fill === 1
         root.recording = snap.recording === true || snap.recording === 1
         root.focusedLane = snap.focusedLane ?? 0
-        root.viewMode = snap.view ?? 0
+        root.viewMode = snap.view ?? 1
         root.transpose = snap.transpose ?? 0
         root.swing = snap.swing ?? 0
         root.scaleId = snap.scale ?? 0

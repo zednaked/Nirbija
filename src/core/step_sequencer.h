@@ -251,7 +251,7 @@ class StepSequencerInstance : public PluginInstance {
   std::atomic<int> pattern_{0};
   std::atomic<int> next_pattern_{-1};
   std::atomic<bool> fill_{false};
-  std::atomic<int> view_{0};
+  std::atomic<int> view_{1};  // grid: the view you create in
   std::atomic<int> focus_{0};
   std::array<std::atomic<float>, 4> macros_{};
   std::atomic<bool> record_armed_{false};

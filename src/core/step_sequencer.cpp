@@ -222,7 +222,7 @@ void StepSequencerInstance::reset_blank() {
   pattern_.store(0, std::memory_order_relaxed);
   next_pattern_.store(-1, std::memory_order_relaxed);
   fill_.store(false, std::memory_order_relaxed);
-  view_.store(0, std::memory_order_relaxed);
+  view_.store(1, std::memory_order_relaxed);
   focus_.store(0, std::memory_order_relaxed);
   macros_[0].store(1.0f, std::memory_order_relaxed);
   macros_[1].store(0.0f, std::memory_order_relaxed);
@@ -1248,7 +1248,7 @@ std::vector<ParameterInfo> StepSequencerInstance::parameters() const {
       {kNextPattern, "Next pattern (0 none, 1–16)", 0.0, kPatterns, 0.0},
       {kFill, "Fill", 0.0, 1.0, 0.0},
       {kFocusedLane, "Focused lane", 0.0, kLanes - 1.0, 0.0},
-      {kView, "View (0 skyline, 1 grid)", 0.0, 1.0, 0.0},
+      {kView, "View (0 skyline, 1 grid)", 0.0, 1.0, 1.0},
       {kMutate, "Mutate", 0.0, 1.0, 0.0},
   };
 }
