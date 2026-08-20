@@ -1,3 +1,6 @@
+// before Qt: emit() is a method, not the Qt macro
+#include "core/step_sequencer.h"
+
 #include "mixer_model.h"
 
 #include "core/script_plugin.h"
@@ -938,6 +941,144 @@ bool MixerModel::setInsertScript(int row, int slot, const QString& source) {
 int MixerModel::insertPlayhead(int row, int slot) const {
   PluginInstance* insert = insertFor(row, slot);
   return insert == nullptr ? -1 : insert->playhead();
+}
+
+QVariantMap MixerModel::insertSequencerSnapshot(int row, int slot) const {
+  QVariantMap out;
+  auto* seq = dynamic_cast<StepSequencerInstance*>(insertFor(row, slot));
+  if (seq == nullptr) return out;
+
+  out[QStringLiteral("pattern")] = seq->pattern();
+  out[QStringLiteral("nextPattern")] = seq->next_pattern();
+  out[QStringLiteral("fill")] = seq->fill();
+  out[QStringLiteral("recording")] = seq->recording();
+  out[QStringLiteral("focusedLane")] = seq->focus();
+  out[QStringLiteral("view")] = seq->view();
+  out[QStringLiteral("transpose")] = seq->transpose();
+  out[QStringLiteral("swing")] = static_cast<qreal>(seq->swing());
+  out[QStringLiteral("scale")] = seq->scale();
+  out[QStringLiteral("root")] = seq->root();
+
+  QVariantList macros;
+  macros.reserve(4);
+  for (int i = 0; i < 4; ++i) macros.append(static_cast<qreal>(seq->macro(i)));
+  out[QStringLiteral("macros")] = macros;
+
+  QVariantList heads;
+  heads.reserve(StepSequencerInstance::kLanes +
+                StepSequencerInstance::kExtraHeads);
+  for (int lane = 0; lane < StepSequencerInstance::kLanes; ++lane) {
+    const int step = seq->native_head_step(lane) & 0xff;
+    heads.append((lane << 8) | step);
+  }
+  for (int extra = 0; extra < StepSequencerInstance::kExtraHeads; ++extra) {
+    const int lane = seq->extra_head_lane(extra);
+    heads.append(0x10000 | (lane << 8));
+  }
+  out[QStringLiteral("heads")] = heads;
+
+  QVariantList lanes;
+  lanes.reserve(StepSequencerInstance::kLanes * 7);
+  QVariantList gates;
+  gates.reserve(StepSequencerInstance::kLanes);
+  for (int lane = 0; lane < StepSequencerInstance::kLanes; ++lane) {
+    lanes.append(seq->lane_note(lane));
+    lanes.append(seq->lane_length(lane));
+    lanes.append(seq->lane_muted(lane) ? 1 : 0);
+    lanes.append(seq->lane_channel(lane));
+    lanes.append(seq->lane_division(lane));
+    lanes.append(seq->lane_direction(lane));
+    lanes.append(seq->lane_euclid(lane));
+    gates.append(seq->lane_gate(lane));
+  }
+  out[QStringLiteral("lanes")] = lanes;
+  out[QStringLiteral("gates")] = gates;
+
+  const int pattern = seq->pattern();
+  const int plane = StepSequencerInstance::kLanes *
+                    StepSequencerInstance::kMaxSteps;
+  QVariantList on, accent, tie, note, vel, ratchet, cond, condArg, chance, micro;
+  on.reserve(plane);
+  accent.reserve(plane);
+  tie.reserve(plane);
+  note.reserve(plane);
+  vel.reserve(plane);
+  ratchet.reserve(plane);
+  cond.reserve(plane);
+  condArg.reserve(plane);
+  chance.reserve(plane);
+  micro.reserve(plane);
+  for (int lane = 0; lane < StepSequencerInstance::kLanes; ++lane) {
+    for (int step = 0; step < StepSequencerInstance::kMaxSteps; ++step) {
+      on.append(seq->cell_active(pattern, lane, step) ? 1 : 0);
+      accent.append(seq->cell_accent(pattern, lane, step) ? 1 : 0);
+      tie.append(seq->cell_tie(pattern, lane, step) ? 1 : 0);
+      note.append(seq->cell_note(pattern, lane, step));
+      vel.append(seq->cell_velocity(pattern, lane, step));
+      ratchet.append(seq->cell_ratchet(pattern, lane, step));
+      cond.append(seq->cell_condition(pattern, lane, step));
+      condArg.append(seq->cell_cond_arg(pattern, lane, step));
+      chance.append(static_cast<qreal>(seq->cell_probability(pattern, lane, step)));
+      micro.append(static_cast<qreal>(seq->cell_microtiming(pattern, lane, step)));
+    }
+  }
+  out[QStringLiteral("on")] = on;
+  out[QStringLiteral("accent")] = accent;
+  out[QStringLiteral("tie")] = tie;
+  out[QStringLiteral("note")] = note;
+  out[QStringLiteral("vel")] = vel;
+  out[QStringLiteral("ratchet")] = ratchet;
+  out[QStringLiteral("cond")] = cond;
+  out[QStringLiteral("condArg")] = condArg;
+  out[QStringLiteral("chance")] = chance;
+  out[QStringLiteral("micro")] = micro;
+  return out;
+}
+
+void MixerModel::setSequencerCell(int row, int slot, int pattern, int lane,
+                                 int step, int note, int velocity, bool on,
+                                 qreal chance, bool accent, bool tie) {
+  auto* seq = dynamic_cast<StepSequencerInstance*>(insertFor(row, slot));
+  if (seq == nullptr) return;
+  seq->set_cell(pattern, lane, step, note, velocity, on,
+                static_cast<float>(chance), accent, tie);
+  markDirty();
+}
+
+void MixerModel::setSequencerTrig(int row, int slot, int pattern, int lane,
+                                 int step, qreal micro, int ratchet, int cond,
+                                 int condArg) {
+  auto* seq = dynamic_cast<StepSequencerInstance*>(insertFor(row, slot));
+  if (seq == nullptr) return;
+  seq->set_trig(pattern, lane, step, static_cast<float>(micro), ratchet, cond,
+                condArg);
+  markDirty();
+}
+
+void MixerModel::setSequencerLane(int row, int slot, int lane, int note,
+                                 int length, int division, int direction,
+                                 int channel, bool mute, qreal gate) {
+  auto* seq = dynamic_cast<StepSequencerInstance*>(insertFor(row, slot));
+  if (seq == nullptr) return;
+  seq->set_lane(lane, note, length, division, direction, channel, mute, gate);
+  markDirty();
+}
+
+void MixerModel::setSequencerLaneEuclid(int row, int slot, int lane, int pulses) {
+  auto* seq = dynamic_cast<StepSequencerInstance*>(insertFor(row, slot));
+  if (seq == nullptr) return;
+  seq->set_lane_euclid(lane, pulses);
+  markDirty();
+}
+
+void MixerModel::setSequencerHead(int row, int slot, int extra, int lane,
+                                 int rate, int direction, int start, int length,
+                                 int transpose, bool mute) {
+  auto* seq = dynamic_cast<StepSequencerInstance*>(insertFor(row, slot));
+  if (seq == nullptr) return;
+  seq->set_extra_head(extra, lane, rate, direction, start, length, transpose,
+                      mute);
+  markDirty();
 }
 
 bool MixerModel::setInsertFile(int row, int slot, const QUrl& file) {

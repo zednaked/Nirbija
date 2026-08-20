@@ -6,6 +6,7 @@
 #include <QQmlEngine>
 #include <QUrl>
 #include <QVariantList>
+#include <QVariantMap>
 #include <QJsonArray>
 #include <QTimer>
 #include <QVector>
@@ -347,6 +348,23 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE bool setInsertScript(int row, int slot, const QString& source);
   // Which step the sequencer is on, or -1. Polled while its grid is open.
   Q_INVOKABLE int insertPlayhead(int row, int slot) const;
+  // Current-pattern planes plus scalars. Empty if the insert is not a sequencer.
+  Q_INVOKABLE QVariantMap insertSequencerSnapshot(int row, int slot) const;
+  Q_INVOKABLE void setSequencerCell(int row, int slot, int pattern, int lane,
+                                    int step, int note, int velocity, bool on,
+                                    qreal chance, bool accent, bool tie);
+  Q_INVOKABLE void setSequencerTrig(int row, int slot, int pattern, int lane,
+                                    int step, qreal micro, int ratchet,
+                                    int cond, int condArg);
+  // Euclid is not a field here. Mute/channel must not repaint Toussaint.
+  Q_INVOKABLE void setSequencerLane(int row, int slot, int lane, int note,
+                                    int length, int division, int direction,
+                                    int channel, bool mute, qreal gate);
+  Q_INVOKABLE void setSequencerLaneEuclid(int row, int slot, int lane,
+                                          int pulses);
+  Q_INVOKABLE void setSequencerHead(int row, int slot, int extra, int lane,
+                                    int rate, int direction, int start,
+                                    int length, int transpose, bool mute);
   Q_INVOKABLE bool setInsertFile(int row, int slot, const QUrl& file);
   Q_INVOKABLE QString insertFilePath(int row, int slot) const;
 

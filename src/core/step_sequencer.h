@@ -10,14 +10,12 @@
 namespace nirbija {
 
 // A step sequencer that lives in an insert slot and feeds whatever comes after
-// it in the chain. Sixteen steps, one note each, snapped to the host's
-// transport — put it above a synth in the same strip and the strip plays
-// itself.
+// it in the chain. Eight lanes of sixty-four steps, sixteen patterns, snapped
+// to the host's transport — put it above a synth in the same strip and the
+// strip plays itself.
 //
-// Monophonic on purpose: one note sounds at a time and a new step cuts the one
-// before it, unless a tie holds the same pitch across. That is the instrument
-// this imitates, and it means the note that has to be chased off at the end
-// is always exactly one.
+// Each native head is monophonic — a new step cuts the one before it, unless
+// a tie holds the same pitch — so eight notes can sound at once, one per lane.
 //
 // Everything the audio thread reads is an atomic scalar in a fixed array. No
 // step is ever added or removed, so there is nothing here to allocate.
@@ -35,7 +33,15 @@ class StepSequencerInstance : public PluginInstance {
 
   static PluginDescriptor make_descriptor();
 
-  static constexpr int kSteps = 16;
+  static constexpr int kLanes = 8;
+  static constexpr int kMaxSteps = 64;
+  static constexpr int kVisibleSteps = 16;  // shim + old parameter IDs 16–191
+  static constexpr int kPatterns = 16;
+  static constexpr int kExtraHeads = 4;
+  // Old name for the ID-block width. Must stay 16: a loop to kMaxSteps
+  // writing 80+i lands in the probability block.
+  static constexpr int kSteps = kVisibleSteps;
+  static constexpr int kUnlockedNote = 255;
 
   enum Direction : int { Forward = 0, Reverse, Pendulum, Random, DirectionCount };
   enum Scale : int {
@@ -48,6 +54,15 @@ class StepSequencerInstance : public PluginInstance {
     PentaMajor,
     Blues,
     ScaleCount
+  };
+  enum Cond : uint8_t {
+    Always = 0,
+    Fill,
+    NotFill,
+    Pre,
+    NotPre,
+    Nei,
+    AOverB
   };
 
   // PluginInstance ------------------------------------------------------------
@@ -81,14 +96,108 @@ class StepSequencerInstance : public PluginInstance {
 
   static int snap_to_scale(int note, int scale, int root);
 
- private:
-  static constexpr size_t kMaxEvents = 64;
+  // Mixer (and tests) write without parameter IDs. Out of range is a no-op.
+  void set_cell(int pattern, int lane, int step, int note, int velocity, bool on,
+                float probability);
+  void set_cell(int pattern, int lane, int step, int note, int velocity, bool on,
+                float probability, bool accent, bool tie);
+  void set_trig(int pattern, int lane, int step, float micro, int ratchet,
+                int cond, int cond_arg);
+  int cell_note(int pattern, int lane, int step) const;
+  int cell_velocity(int pattern, int lane, int step) const;
+  bool cell_active(int pattern, int lane, int step) const;
+  float cell_probability(int pattern, int lane, int step) const;
+  bool cell_accent(int pattern, int lane, int step) const;
+  bool cell_tie(int pattern, int lane, int step) const;
+  float cell_microtiming(int pattern, int lane, int step) const;
+  int cell_ratchet(int pattern, int lane, int step) const;
+  int cell_condition(int pattern, int lane, int step) const;
+  int cell_cond_arg(int pattern, int lane, int step) const;
+  bool lane_muted(int lane) const;
+  void set_lane_mute(int lane, bool mute);
+  int lane_note(int lane) const;
+  int lane_length(int lane) const;
+  int lane_division(int lane) const;
+  int lane_direction(int lane) const;
+  int lane_channel(int lane) const;
+  double lane_gate(int lane) const;
+  int lane_euclid(int lane) const;
+  // Euclid is a bang — mute/channel here must not repaint Toussaint.
+  void set_lane(int lane, int note, int length, int division, int direction,
+                int channel, bool mute, double gate);
+  void set_lane_euclid(int lane, int pulses);
+  void set_extra_head(int extra, int lane, int rate, int direction, int start,
+                      int length, int transpose, bool mute);
+  int extra_head_lane(int extra) const;
+  int extra_head_rate(int extra) const;
+  int extra_head_direction(int extra) const;
+  int extra_head_start(int extra) const;
+  int extra_head_length(int extra) const;
+  int extra_head_transpose(int extra) const;
+  bool extra_head_muted(int extra) const;
+  int native_head_step(int lane) const;
+  void set_focus(int lane);
+  int focus() const;
+  int pattern() const;
+  int next_pattern() const;
+  bool fill() const;
+  bool recording() const;
+  int view() const;
+  int transpose() const;
+  float swing() const;
+  int scale() const;
+  int root() const;
+  float macro(int index) const;
 
-  double beats_per_step() const;
-  double beat_of(double index) const;
-  int map_step(int index, int length);
+ private:
+  static constexpr size_t kMaxEvents = 128;
+  static constexpr int kVoiceSlots = kLanes + kExtraHeads;
+
+  struct StepCell {
+    std::atomic<int> note{kUnlockedNote};
+    std::atomic<int> velocity{100};
+    std::atomic<bool> active{false};
+    std::atomic<float> probability{1.0f};
+    std::atomic<bool> accent{false};
+    std::atomic<bool> tie{false};
+    std::atomic<float> microtiming{0.0f};
+    std::atomic<int> ratchet{1};
+    std::atomic<uint8_t> condition{Always};
+    std::atomic<uint8_t> cond_arg{0};
+  };
+
+  struct LaneState {
+    std::atomic<int> note{60};
+    std::atomic<int> length{kVisibleSteps};
+    std::atomic<int> division{2};
+    std::atomic<int> direction{Forward};
+    std::atomic<int> channel{0};  // 0-based on the wire, 1-based to the user
+    std::atomic<bool> mute{false};
+    std::atomic<double> gate{0.5};
+    std::atomic<int> euclid{0};
+  };
+
+  struct ExtraHead {
+    std::atomic<int> lane{0};
+    std::atomic<int> rate{0};
+    std::atomic<int> direction{Forward};
+    std::atomic<int> start{0};
+    std::atomic<int> length{kVisibleSteps};
+    std::atomic<bool> mute{true};
+    std::atomic<int> transpose{0};
+  };
+
+  struct HeadVoice {
+    int pitch = -1;
+    uint8_t channel = 0;  // channel of the ON, not the live lane atomic
+    double off_beat = 0;
+  };
+
+  double beat_of(double index, double step_beats) const;
+  int map_step(int index, int length, int direction);
   void emit(uint32_t frame, uint8_t status, uint8_t data1, uint8_t data2);
-  void stop_sounding(uint32_t frame);
+  void stop_sounding(int head, uint32_t frame);
+  int focused_index() const;
   uint32_t next_rng();      // audio thread
   uint32_t next_ui_rng();   // UI thread — pattern ops, not process()
   void rotate_steps(int delta);
@@ -100,37 +209,39 @@ class StepSequencerInstance : public PluginInstance {
                       double block_beats, uint32_t frames, double step_beats,
                       int length);
   void close_capture(int64_t release_index, int length);
+  void reset_blank();
+  void paint_constructor_pattern();
+  bool cell_in_range(int pattern, int lane, int step) const;
+  StepCell& cell_at(int pattern, int lane, int step);
+  const StepCell& cell_at(int pattern, int lane, int step) const;
 
   PluginDescriptor descriptor_;
   double sample_rate_ = 48000.0;
   TransportInfo transport_;
 
   // --- what the UI thread writes and the audio thread reads ------------------
-  std::array<std::atomic<int>, kSteps> note_;
-  std::array<std::atomic<int>, kSteps> velocity_;
-  std::array<std::atomic<bool>, kSteps> active_;
-  std::array<std::atomic<float>, kSteps> probability_;
-  std::array<std::atomic<bool>, kSteps> accent_;
-  std::array<std::atomic<bool>, kSteps> tie_;
-  std::atomic<int> division_{2};   // index into the table in the .cpp
-  std::atomic<int> length_{kSteps};
-  std::atomic<double> gate_{0.5};  // fraction of a step the note is held
-  std::atomic<int> transpose_{0};
-  std::atomic<int> channel_{0};  // 0-based on the wire, 1-based to the user
+  std::array<std::array<std::array<StepCell, kMaxSteps>, kLanes>, kPatterns>
+      cells_{};
+  std::array<LaneState, kLanes> lanes_{};
+  std::array<ExtraHead, kExtraHeads> extra_heads_{};
   std::atomic<float> swing_{0.0f};
-  std::atomic<int> direction_{Forward};
   std::atomic<int> scale_{Chromatic};
   std::atomic<int> root_{0};
-  std::atomic<int> euclid_{0};
+  std::atomic<int> transpose_{0};
+  std::atomic<int> pattern_{0};
+  std::atomic<int> next_pattern_{-1};
+  std::atomic<bool> fill_{false};
+  std::atomic<int> view_{0};
+  std::atomic<int> focus_{0};
+  std::array<std::atomic<float>, 4> macros_{};
   std::atomic<bool> record_armed_{false};
 
   // --- audio thread only -----------------------------------------------------
-  int sounding_note_ = -1;    // -1 when nothing is held
-  double sounding_off_ = 0.0; // song position, in beats, the note is due off
-  bool last_tied_ = false;
-  // The last step boundary already played, so a block that crosses none does
-  // not replay the one it starts on.
-  double last_step_beat_ = -1.0;
+  std::array<HeadVoice, kVoiceSlots> voices_{};
+  std::array<bool, kVoiceSlots> last_tied_{};
+  // Last step boundary already played, per head, so a block that crosses none
+  // does not replay the one it starts on.
+  std::array<double, kVoiceSlots> last_step_beat_{};
   uint32_t rng_ = 0xC0FFEEu;
   uint32_t ui_rng_ = 0xBADC0DEu;
 
@@ -145,6 +256,8 @@ class StepSequencerInstance : public PluginInstance {
   int capture_velocity_ = 100;
 
   std::atomic<int> playhead_{-1};
+  // Last mapped step per native head, so the snapshot can light all eight.
+  std::array<std::atomic<int>, kLanes> head_steps_{};
 
   std::array<MidiEvent, kMaxEvents> events_{};
   size_t event_count_ = 0;

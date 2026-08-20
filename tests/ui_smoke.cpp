@@ -555,6 +555,14 @@ int main(int argc, char* argv[]) {
           fail("the sequencer's pattern did not survive the preset");
         if (std::abs(steps - 7.0) > 1e-9)
           fail("the sequencer's length did not survive the preset");
+
+        const QVariantMap snap = mixer.insertSequencerSnapshot(copy, 0);
+        if (snap.isEmpty())
+          fail("insertSequencerSnapshot was empty on a sequencer");
+        const QVariantList ons = snap.value(QStringLiteral("on")).toList();
+        if (ons.size() != 512)
+          fail("sequencer snapshot on list was " + std::to_string(ons.size()) +
+               ", wanted 512");
         mixer.removeChannel(copy);
       }
 
