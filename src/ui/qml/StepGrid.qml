@@ -951,17 +951,17 @@ Popup {
                                 font.pixelSize: Skin.fontXS
                             }
 
-                            // Tie: the notch on the trailing edge. On, this step
-                            // holds into the next instead of retriggering.
+                            // Tie sits on the note itself. Anchoring it to `bar`
+                            // put a green tick in empty air whenever the pitch
+                            // was low, which read as a second playhead.
                             Rectangle {
-                                visible: column.step < root.focusedLength - 1
-                                anchors.right: parent.right
-                                anchors.verticalCenter: bar.verticalCenter
+                                visible: column.on && column.step < root.focusedLength - 1
+                                anchors.right: pitchFill.right
+                                anchors.verticalCenter: pitchFill.verticalCenter
                                 width: Px.px(5)
-                                height: Px.px(10)
+                                height: Math.min(Px.px(10), pitchFill.height)
                                 radius: 1
                                 color: column.tied ? Skin.meterLow : Skin.border
-                                opacity: column.on ? 1 : 0.35
 
                                 TapHandler {
                                     onTapped: root.setTie(column.lane, column.step,
