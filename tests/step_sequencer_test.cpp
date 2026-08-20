@@ -1069,6 +1069,170 @@ int main() {
     expect(seq.extra_head_lane(1) == 2, "out of range set_extra_head wrote");
   }
 
+  // --- macros 192-200: round trip, and out of the shim's way -----------------
+  {
+    Seq seq;
+    seq.set_parameter(192, 1.5);
+    expect(std::fabs(seq.parameter_value(192) - 1.5) < 1e-4,
+           "density did not round-trip");
+    seq.set_parameter(193, 0.5);
+    expect(std::fabs(seq.parameter_value(193) - 0.5) < 1e-4,
+           "chaos did not round-trip");
+    seq.set_parameter(194, 0.25);
+    expect(std::fabs(seq.parameter_value(194) - 0.25) < 1e-4,
+           "ratchet amount did not round-trip");
+    seq.set_parameter(195, 0.75);
+    expect(std::fabs(seq.parameter_value(195) - 0.75) < 1e-4,
+           "master probability did not round-trip");
+    seq.set_parameter(196, 5.0);
+    expect(seq.parameter_value(196) == 5.0, "pattern did not round-trip");
+    seq.set_parameter(198, 1.0);
+    expect(seq.parameter_value(198) == 1.0, "fill did not round-trip");
+    seq.set_parameter(199, 3.0);
+    expect(seq.parameter_value(199) == 3.0 && seq.focus() == 3,
+           "focused lane did not round-trip");
+    seq.set_parameter(200, 1.0);
+    expect(seq.parameter_value(200) == 1.0, "view did not round-trip");
+
+    bool has_shim = false, has_density = false, has_view = false;
+    for (const nirbija::ParameterInfo& info : seq.parameters()) {
+      if (info.id >= 16 && info.id < 192) has_shim = true;
+      if (info.id == 192) has_density = true;
+      if (info.id == 200) has_view = true;
+    }
+    expect(!has_shim, "parameters() still lists the dead per-step shim");
+    expect(has_density, "parameters() is missing density");
+    expect(has_view, "parameters() is missing view");
+    // Unlisted does not mean unreachable: an old MIDI learn map still works.
+    seq.set_parameter(16, 70.0);
+    expect(seq.parameter_value(16) == 70.0, "the unlisted shim stopped working");
+  }
+
+  // --- Density above 1 spends its excess on ghost notes at off steps --------
+  {
+    Seq seq;
+    seq.activate(kRate, kBlock);
+    seq.set_parameter(13, 1.0);    // clear hits: every step off
+    seq.set_parameter(192, 2.0);   // density maxed: ghost chance is certain
+
+    const std::vector<Note> notes =
+        run(seq, static_cast<int>(std::ceil(4.0 / block_beats)));
+    int ons = 0;
+    for (const Note& note : notes) if (note.on) ++ons;
+    expect(ons == 16, "density ghosts did not fill every off step, got " +
+                          std::to_string(ons));
+    if (!notes.empty())
+      expect(notes.front().velocity == 70,
+             "a ghost note did not come in at 70% velocity, got " +
+                 std::to_string(notes.front().velocity));
+  }
+
+  // --- master probability is a hard ceiling on top of per-step chance -------
+  {
+    Seq seq;
+    seq.activate(kRate, kBlock);
+    seq.set_parameter(195, 0.0);  // master probability zero
+
+    const std::vector<Note> notes =
+        run(seq, static_cast<int>(std::ceil(4.0 / block_beats)));
+    int ons = 0;
+    for (const Note& note : notes) if (note.on) ++ons;
+    expect(ons == 0, "master probability 0 did not silence the pattern, got " +
+                          std::to_string(ons));
+  }
+
+  // --- Record lands on the focused lane, and does not lock a kit row --------
+  {
+    Seq seq;
+    seq.activate(kRate, kBlock);
+    seq.set_focus(1);
+    seq.set_parameter(15, 1.0);  // arm
+
+    nirbija::TransportInfo transport;
+    transport.playing = true;
+    transport.tempo_bpm = kTempo;
+    transport.beats = 0.0;
+    seq.set_transport(transport);
+
+    nirbija::MidiEvent on{};
+    on.frame = 5;
+    on.size = 3;
+    on.data[0] = 0x90;
+    on.data[1] = 66;
+    on.data[2] = 90;
+    seq.queue_midi(on);
+    nirbija::MidiEvent off{};
+    off.frame = 200;
+    off.size = 3;
+    off.data[0] = 0x80;
+    off.data[1] = 66;
+    seq.queue_midi(off);
+
+    seq.process(nullptr, nullptr, kBlock);
+
+    expect(seq.cell_active(0, 1, 0), "Rec did not land on the focused lane");
+    expect(seq.cell_note(0, 0, 0) == 57,
+           "Rec leaked into lane 0's factory pattern while lane 1 was focused");
+    expect(seq.cell_note(0, 1, 0) == Seq::kUnlockedNote,
+           "Rec locked a fresh kit row's pitch");
+    expect(seq.cell_velocity(0, 1, 0) == 90,
+           "Rec on an unlocked cell lost the played velocity");
+  }
+
+  // --- a held note across steps keeps the lock decision it opened with ------
+  {
+    Seq seq;
+    seq.activate(kRate, kBlock);
+    seq.set_focus(2);
+    seq.set_parameter(15, 1.0);  // arm
+
+    const double block_beats_local = kBlock / kRate * kTempo / 60.0;
+    const int blocks_per_step =
+        static_cast<int>(std::ceil(0.25 / block_beats_local));
+    const int release_block = blocks_per_step * 2;  // held through 2 steps
+
+    nirbija::MidiEvent buffer[128];
+    for (int i = 0; i <= release_block; ++i) {
+      nirbija::TransportInfo transport;
+      transport.playing = true;
+      transport.tempo_bpm = kTempo;
+      transport.beats = i * block_beats_local;
+      seq.set_transport(transport);
+
+      if (i == 0) {
+        nirbija::MidiEvent on{};
+        on.frame = 1;
+        on.size = 3;
+        on.data[0] = 0x90;
+        on.data[1] = 71;
+        on.data[2] = 100;
+        seq.queue_midi(on);
+      }
+      if (i == release_block) {
+        nirbija::MidiEvent off{};
+        off.frame = 1;
+        off.size = 3;
+        off.data[0] = 0x80;
+        off.data[1] = 71;
+        seq.queue_midi(off);
+      }
+
+      seq.process(nullptr, nullptr, kBlock);
+      seq.take_midi_output(buffer, 128);
+    }
+
+    for (int step = 0; step < 2; ++step) {
+      if (!seq.cell_active(0, 2, step))
+        fail("held note step " + std::to_string(step) + " was not armed");
+      if (seq.cell_note(0, 2, step) != Seq::kUnlockedNote)
+        fail("held note step " + std::to_string(step) +
+             " locked a kit row that started unlocked");
+      if (step < 1 && !seq.cell_tie(0, 2, step))
+        fail("held note step " + std::to_string(step) +
+             " should have tied into the next");
+    }
+  }
+
   if (failures > 0) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return 1;

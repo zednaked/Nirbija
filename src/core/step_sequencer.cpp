@@ -47,6 +47,17 @@ enum Params : uint32_t {
   kStepProb = 112,
   kStepAccent = 144,
   kStepTie = 176,
+
+  // Performance macros and transport-facing scalars. Not per-step, so they
+  // stay listed in parameters() even though the shim block above does not.
+  kDensity = 192,
+  kChaos = 193,
+  kRatchetAmount = 194,
+  kMasterProb = 195,
+  kPattern = 196,
+  kFill = 198,
+  kFocusedLane = 199,
+  kView = 200,
 };
 
 constexpr uint8_t kNoteOn = 0x90;
@@ -655,13 +666,15 @@ void StepSequencerInstance::process(const float* const*, float* const*,
   const int focused = focused_index();
 
   if (armed) {
+    const LaneState& rec_lane = lanes_[static_cast<size_t>(focused)];
     const int rec_div = std::clamp(
-        lanes_[0].division.load(std::memory_order_relaxed), 0,
+        rec_lane.division.load(std::memory_order_relaxed), 0,
         kDivisionCount - 1);
-    const int rec_length = std::clamp(
-        lanes_[0].length.load(std::memory_order_relaxed), 1, kMaxSteps);
+    const int rec_length =
+        std::clamp(rec_lane.length.load(std::memory_order_relaxed), 1,
+                   kMaxSteps);
     capture_events(incoming_count, start_beat, block_beats, frames,
-                   kDivisions[rec_div], rec_length);
+                   kDivisions[rec_div], rec_length, focused);
   }
 
   const auto frame_for = [&](double beat) {
@@ -716,9 +729,29 @@ void StepSequencerInstance::process(const float* const*, float* const*,
 
       const StepCell& cell = cell_at(0, h, step);
       const bool on = cell.active.load(std::memory_order_relaxed);
-      const float p = std::clamp(cell.probability.load(std::memory_order_relaxed),
-                                 0.0f, 1.0f);
-      const bool hits = on && (p >= 0.999f || (next_rng() / 4294967295.0f) < p);
+      const float p_step = std::clamp(
+          cell.probability.load(std::memory_order_relaxed), 0.0f, 1.0f);
+      const float density = macros_[0].load(std::memory_order_relaxed);
+      const float master_prob = macros_[3].load(std::memory_order_relaxed);
+
+      // Density above 1 spends its excess on ghost notes at off steps,
+      // rather than pushing an on step's chance past certain. An on step's
+      // own chance is only ever scaled down by density, then by the master
+      // knob; capped at 1 either way.
+      bool ghost = false;
+      bool hits;
+      if (on) {
+        const float p_eff = std::clamp(p_step * density, 0.0f, 1.0f) *
+                            master_prob;
+        hits = p_eff >= 0.999f || (next_rng() / 4294967295.0f) < p_eff;
+      } else if (density > 1.0f) {
+        const float ghost_chance =
+            std::clamp(density - 1.0f, 0.0f, 1.0f) * master_prob;
+        hits = ghost = ghost_chance >= 0.999f ||
+                       (next_rng() / 4294967295.0f) < ghost_chance;
+      } else {
+        hits = false;
+      }
 
       if (!hits) {
         stop_sounding(h, frame);
@@ -734,6 +767,9 @@ void StepSequencerInstance::process(const float* const*, float* const*,
           std::clamp(cell.velocity.load(std::memory_order_relaxed), 1, 127);
       if (cell.accent.load(std::memory_order_relaxed))
         velocity = std::min(127, velocity + 27);
+      // A ghost never accents: it is the quiet in-between hit, not the one
+      // that stands out.
+      if (ghost) velocity = std::max(1, static_cast<int>(velocity * 0.7f));
       const bool tie = cell.tie.load(std::memory_order_relaxed);
       const bool legato =
           last_tied_[static_cast<size_t>(h)] && voice.pitch == pitch;
@@ -761,7 +797,8 @@ void StepSequencerInstance::process(const float* const*, float* const*,
 void StepSequencerInstance::capture_events(size_t incoming_count,
                                            double start_beat,
                                            double block_beats, uint32_t frames,
-                                           double step_beats, int length) {
+                                           double step_beats, int length,
+                                           int lane) {
   for (size_t i = 0; i < incoming_count; ++i) {
     const MidiEvent& event = events_[i];
     if (event.size < 3) continue;
@@ -785,8 +822,13 @@ void StepSequencerInstance::capture_events(size_t incoming_count,
       // note-off — closes the old one right here instead of leaving it to
       // ring forever.
       if (capture_open_) close_capture(raw_index, length);
-      StepCell& cell = cell_at(0, 0, step);
-      cell.note.store(note, std::memory_order_relaxed);
+      StepCell& cell = cell_at(0, lane, step);
+      // Unlocked (kit row, note == 255) stays unlocked: Rec arms on/velocity
+      // and leaves the pad's own pitch alone. Locked (a 303 line) takes the
+      // captured pitch, as it always has.
+      const bool locked =
+          cell.note.load(std::memory_order_relaxed) != kUnlockedNote;
+      if (locked) cell.note.store(note, std::memory_order_relaxed);
       cell.velocity.store(std::clamp(velocity, 1, 127),
                           std::memory_order_relaxed);
       cell.active.store(true, std::memory_order_relaxed);
@@ -797,6 +839,8 @@ void StepSequencerInstance::capture_events(size_t incoming_count,
       capture_index_ = raw_index;
       capture_pitch_ = note;
       capture_velocity_ = std::clamp(velocity, 1, 127);
+      capture_lane_ = lane;
+      capture_locked_ = locked;
     } else if (capture_open_ && note == capture_pitch_) {
       close_capture(raw_index, length);
     }
@@ -814,9 +858,14 @@ void StepSequencerInstance::close_capture(int64_t release_index, int length) {
     for (int64_t i = 0; i < span; ++i) {
       const int step = static_cast<int>(
           ((capture_index_ + i) % length + length) % length);
-      StepCell& cell = cell_at(0, 0, step);
+      StepCell& cell = cell_at(0, capture_lane_, step);
       if (i > 0) {
-        cell.note.store(capture_pitch_, std::memory_order_relaxed);
+        // Same lock decision as the step that opened the hold, not each
+        // spanned cell's own — a kit row does not turn into a 303 line
+        // partway through a note just because some other take had locked
+        // one of these cells before.
+        if (capture_locked_)
+          cell.note.store(capture_pitch_, std::memory_order_relaxed);
         cell.velocity.store(capture_velocity_, std::memory_order_relaxed);
         cell.active.store(true, std::memory_order_relaxed);
         cell.probability.store(1.0f, std::memory_order_relaxed);
@@ -916,7 +965,11 @@ void StepSequencerInstance::fill_euclidean(int pulses) {
 }
 
 std::vector<ParameterInfo> StepSequencerInstance::parameters() const {
-  std::vector<ParameterInfo> info{
+  // IDs 16-191 (the per-step shim) are deliberately not listed: an 8x64 grid
+  // does not fit a generic slider wall, and the grid talks to the Mixer
+  // snapshot instead (see mixer_model.cpp). set_parameter/parameter_value
+  // still honor those IDs below, for an old MIDI learn map.
+  return {
       {kDivision, "Division (0 1/4, 1 1/8, 2 1/16, 3 1/32, 4 1/4T, 5 1/8T)", 0.0,
        kDivisionCount - 1.0, 2.0},
       {kLength, "Steps", 1.0, kMaxSteps, kVisibleSteps},
@@ -935,39 +988,15 @@ std::vector<ParameterInfo> StepSequencerInstance::parameters() const {
       {kClearHits, "Clear hits", 0.0, 1.0, 0.0},
       {kEuclid, "Euclid hits", 0.0, kMaxSteps, 0.0},
       {kRecordArm, "Record (capture live input into steps)", 0.0, 1.0, 0.0},
+      {kDensity, "Density", 0.0, 2.0, 1.0},
+      {kChaos, "Chaos", 0.0, 1.0, 0.0},
+      {kRatchetAmount, "Ratchet amount", 0.0, 1.0, 0.0},
+      {kMasterProb, "Master probability", 0.0, 1.0, 1.0},
+      {kPattern, "Pattern", 0.0, kPatterns - 1.0, 0.0},
+      {kFill, "Fill", 0.0, 1.0, 0.0},
+      {kFocusedLane, "Focused lane", 0.0, kLanes - 1.0, 0.0},
+      {kView, "View (0 skyline, 1 grid)", 0.0, 1.0, 0.0},
   };
-  info.reserve(info.size() + kVisibleSteps * 6);
-  for (int i = 0; i < kVisibleSteps; ++i) {
-    char name[32];
-    std::snprintf(name, sizeof(name), "Step %d note", i + 1);
-    info.push_back({kStepNote + i, name, 0.0, 127.0, 60.0});
-  }
-  for (int i = 0; i < kVisibleSteps; ++i) {
-    char name[32];
-    std::snprintf(name, sizeof(name), "Step %d level", i + 1);
-    info.push_back({kStepVelocity + i, name, 1.0, 127.0, 100.0});
-  }
-  for (int i = 0; i < kVisibleSteps; ++i) {
-    char name[32];
-    std::snprintf(name, sizeof(name), "Step %d on", i + 1);
-    info.push_back({kStepActive + i, name, 0.0, 1.0, 0.0});
-  }
-  for (int i = 0; i < kVisibleSteps; ++i) {
-    char name[32];
-    std::snprintf(name, sizeof(name), "Step %d chance", i + 1);
-    info.push_back({kStepProb + i, name, 0.0, 1.0, 1.0});
-  }
-  for (int i = 0; i < kVisibleSteps; ++i) {
-    char name[32];
-    std::snprintf(name, sizeof(name), "Step %d accent", i + 1);
-    info.push_back({kStepAccent + i, name, 0.0, 1.0, 0.0});
-  }
-  for (int i = 0; i < kVisibleSteps; ++i) {
-    char name[32];
-    std::snprintf(name, sizeof(name), "Step %d tie", i + 1);
-    info.push_back({kStepTie + i, name, 0.0, 1.0, 0.0});
-  }
-  return info;
 }
 
 double StepSequencerInstance::parameter_value(uint32_t id) const {
@@ -991,6 +1020,14 @@ double StepSequencerInstance::parameter_value(uint32_t id) const {
     case kEuclid: return lane.euclid.load(std::memory_order_relaxed);
     case kRecordArm:
       return record_armed_.load(std::memory_order_relaxed) ? 1.0 : 0.0;
+    case kDensity: return macros_[0].load(std::memory_order_relaxed);
+    case kChaos: return macros_[1].load(std::memory_order_relaxed);
+    case kRatchetAmount: return macros_[2].load(std::memory_order_relaxed);
+    case kMasterProb: return macros_[3].load(std::memory_order_relaxed);
+    case kPattern: return pattern_.load(std::memory_order_relaxed);
+    case kFill: return fill_.load(std::memory_order_relaxed) ? 1.0 : 0.0;
+    case kFocusedLane: return focused_index();
+    case kView: return view_.load(std::memory_order_relaxed);
     default: break;
   }
   if (id >= kStepNote && id < kStepNote + kVisibleSteps)
@@ -1075,6 +1112,35 @@ void StepSequencerInstance::set_parameter(uint32_t id, double value) {
       return;
     case kRecordArm:
       record_armed_.store(value >= 0.5, std::memory_order_relaxed);
+      return;
+    case kDensity:
+      macros_[0].store(static_cast<float>(std::clamp(value, 0.0, 2.0)),
+                       std::memory_order_relaxed);
+      return;
+    case kChaos:
+      macros_[1].store(static_cast<float>(std::clamp(value, 0.0, 1.0)),
+                       std::memory_order_relaxed);
+      return;
+    case kRatchetAmount:
+      macros_[2].store(static_cast<float>(std::clamp(value, 0.0, 1.0)),
+                       std::memory_order_relaxed);
+      return;
+    case kMasterProb:
+      macros_[3].store(static_cast<float>(std::clamp(value, 0.0, 1.0)),
+                       std::memory_order_relaxed);
+      return;
+    case kPattern:
+      pattern_.store(clamp_int(value, 0, kPatterns - 1),
+                     std::memory_order_relaxed);
+      return;
+    case kFill:
+      fill_.store(value >= 0.5, std::memory_order_relaxed);
+      return;
+    case kFocusedLane:
+      focus_.store(clamp_int(value, 0, kLanes - 1), std::memory_order_relaxed);
+      return;
+    case kView:
+      view_.store(clamp_int(value, 0, 1), std::memory_order_relaxed);
       return;
     default:
       break;

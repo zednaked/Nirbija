@@ -207,7 +207,7 @@ class StepSequencerInstance : public PluginInstance {
   void fill_euclidean(int pulses);
   void capture_events(size_t incoming_count, double start_beat,
                       double block_beats, uint32_t frames, double step_beats,
-                      int length);
+                      int length, int lane);
   void close_capture(int64_t release_index, int length);
   void reset_blank();
   void paint_constructor_pattern();
@@ -254,6 +254,12 @@ class StepSequencerInstance : public PluginInstance {
   int64_t capture_index_ = 0;
   int capture_pitch_ = 0;
   int capture_velocity_ = 100;
+  int capture_lane_ = 0;
+  // Whether the cell the capture opened on was locked (had an explicit
+  // pitch, not the unlocked marker). Every step the hold spans inherits this
+  // one decision, so a kit row does not gain a locked pitch partway through
+  // a held note.
+  bool capture_locked_ = false;
 
   std::atomic<int> playhead_{-1};
   // Last mapped step per native head, so the snapshot can light all eight.
