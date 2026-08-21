@@ -87,11 +87,43 @@ int main() {
   }
 
   const auto all = backend->scan();
+
+  // Black Pearl (AVL Drums) publishes pad names through Ardour midnam, which
+  // is how the sequencer labels a kit instead of guessing General MIDI.
+  if (const nirbija::PluginDescriptor* kit =
+          find_by_name(all, "Black Pearl Drumkit")) {
+    auto drums = backend->instantiate(*kit);
+    if (drums == nullptr) {
+      fail("Black Pearl instantiate returned null");
+    } else {
+      drums->set_channel_layout(2);
+      if (!drums->activate(kSampleRate, kBlock)) {
+        fail("Black Pearl activate failed");
+      } else {
+        const auto names = drums->note_names();
+        bool kick = false;
+        bool hat = false;
+        for (const auto& named : names) {
+          if (named.key == 36 && named.name == "Kick Drum") kick = true;
+          if (named.key == 42 && named.name == "Closed Hat") hat = true;
+        }
+        if (names.size() < 20)
+          fail("Black Pearl midnam listed " + std::to_string(names.size()) +
+               " pads, wanted the kit");
+        if (!kick) fail("Black Pearl midnam had no Kick Drum on 36");
+        if (!hat) fail("Black Pearl midnam had no Closed Hat on 42");
+        drums->deactivate();
+      }
+    }
+  } else {
+    std::printf("Black Pearl Drumkit not installed, skipping midnam check\n");
+  }
+
   const nirbija::PluginDescriptor* reverb =
       find_by_name(all, "Dragonfly Hall Reverb");
   if (reverb == nullptr) {
     std::printf("Dragonfly Hall Reverb not installed, skipping\n");
-    return 0;
+    return failures > 0 ? 1 : 0;
   }
 
   auto plugin = backend->instantiate(*reverb);

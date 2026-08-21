@@ -91,6 +91,24 @@ it again. Each editor's own background already eats a stray press the same
 way — that was always enough on its own — so the switch was not just
 stale, it was actively wrong.
 
+### The grid reads the chip below it
+
+Pad names on the step sequencer are no longer a General MIDI guess — MIDI 39
+was "clap" even when the sampler sitting under it was something else. Grid
+now asks the **next insert** for the names it publishes: CLAP `note-name`,
+and LV2 midnam, which is how **Black Pearl** and the other AVL kits tell
+the host that 36 is Kick Drum. The title says `→ Black Pearl Drumkit` so it
+is obvious who is being addressed.
+
+Two instruments on one strip is two sequencers. The list is never merged:
+an Odin and a kit sharing one sequencer would have collided, so they do not
+share. **pads** assigns a window of that chip onto the eight lanes. ▲ / ▼
+on the rail is a view: hits stay on their pitch. A note painted in Skyline
+has a row in Grid — the same MIDI key, even if it is not one of the kit's
+pads — and scrolling never retunes it. Without a map, Grid is the same
+C2–C6 span Skyline draws. Wheel scrolls the window; Shift+wheel walks one
+pad.
+
 ### Also
 
 - The landing page says what the mixer does now: eight entries rather than

@@ -8,6 +8,7 @@
 #include <QUrl>
 
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <utility>
 
@@ -28,6 +29,40 @@ void fail(const std::string& what) {
 QVariant field(nirbija::MixerModel& mixer, int row, int role) {
   return mixer.data(mixer.index(row), role);
 }
+
+// A kit that actually names its pads, standing in for DrumGizmo or any
+// sampler that publishes clap.note-name. Used to prove the sequencer reads
+// the next insert and nobody after it.
+class NamedKit : public nirbija::PluginInstance {
+ public:
+  void set_channel_layout(int) override {}
+  bool activate(double, uint32_t) override { return true; }
+  void deactivate() override {}
+  void process(const float* const*, float* const*, uint32_t) override {}
+
+  std::vector<nirbija::ParameterInfo> parameters() const override { return {}; }
+  double parameter_value(uint32_t) const override { return 0.0; }
+  void set_parameter(uint32_t, double) override {}
+
+  std::vector<uint8_t> save_state() const override { return {}; }
+  bool load_state(const std::vector<uint8_t>&) override { return true; }
+
+  const nirbija::PluginDescriptor& descriptor() const override { return desc_; }
+
+  std::vector<nirbija::NoteName> note_names() const override {
+    return {{38, "snare"}, {36, "kick"}, {36, "also-kick"}, {42, "hat"}};
+  }
+
+ private:
+  nirbija::PluginDescriptor desc_{.format = nirbija::PluginFormat::Internal,
+                                  .uid = "test.namedkit",
+                                  .name = "Named Kit",
+                                  .vendor = "Nirbija",
+                                  .kind = nirbija::PluginKind::Instrument,
+                                  .audio_inputs = 0,
+                                  .audio_outputs = 2,
+                                  .has_midi_input = true};
+};
 
 }  // namespace
 
@@ -600,6 +635,61 @@ int main(int argc, char* argv[]) {
         }
       }
       mixer.removeChannel(source);
+    }
+  }
+
+  // --- sequencer pad names come from the next insert only --------------------
+  {
+    const int sequencer =
+        mixer.plugins()->rowFor(nirbija::PluginFormat::Internal, "nirbija.stepseq");
+    const int keyboard =
+        mixer.plugins()->rowFor(nirbija::PluginFormat::Internal, "nirbija.keyboard");
+    if (sequencer < 0) {
+      std::printf("no step sequencer, skipping the pad-target check\n");
+    } else {
+      mixer.addChannel(QStringLiteral("Kit"), 2);
+      const int row = mixer.rowCount() - 1;
+      mixer.addInsert(row, sequencer);
+
+      QVariantMap none = mixer.insertSequencerTarget(row, 0);
+      if (!none.value(QStringLiteral("name")).toString().isEmpty())
+        fail("a sequencer with nothing below it still named a target");
+      if (!none.value(QStringLiteral("pads")).toList().isEmpty())
+        fail("a sequencer with nothing below it still listed pads");
+
+      nirbija::ChannelStrip* strip = nullptr;
+      nirbija::AudioGraph& graph = mixer.engineForTests().graph();
+      for (size_t i = 0; i < nirbija::kMaxChannels; ++i) {
+        if (!graph.channel_alive(i)) continue;
+        if (graph.channel(i).name() != "Kit") continue;
+        strip = &graph.channel(i);
+        break;
+      }
+      if (strip == nullptr || !strip->add_insert(std::make_unique<NamedKit>()))
+        fail("could not add the named kit under the sequencer");
+      if (keyboard >= 0) mixer.addInsert(row, keyboard);
+
+      const QVariantMap target = mixer.insertSequencerTarget(row, 0);
+      if (target.value(QStringLiteral("name")).toString() != QStringLiteral("Named Kit"))
+        fail("the sequencer did not bind to the insert below it: \"" +
+             target.value(QStringLiteral("name")).toString().toStdString() + "\"");
+      const QVariantList pads = target.value(QStringLiteral("pads")).toList();
+      if (pads.size() != 3)
+        fail("pad list was " + std::to_string(pads.size()) +
+             ", wanted 3 unique keys sorted");
+      else {
+        const int a = pads.value(0).toMap().value(QStringLiteral("note")).toInt();
+        const int b = pads.value(1).toMap().value(QStringLiteral("note")).toInt();
+        const int c = pads.value(2).toMap().value(QStringLiteral("note")).toInt();
+        const QString kick =
+            pads.value(0).toMap().value(QStringLiteral("name")).toString();
+        if (a != 36 || b != 38 || c != 42)
+          fail("pads were not sorted unique keys");
+        if (kick != QStringLiteral("kick"))
+          fail("duplicate key did not keep the first name");
+      }
+
+      mixer.removeChannel(row);
     }
   }
 

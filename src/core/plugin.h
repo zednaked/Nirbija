@@ -90,6 +90,14 @@ struct ParameterInfo {
   double default_value;
 };
 
+// A named key the plugin publishes, UI thread only. Drum samplers list the
+// pads they actually have; a synth that says nothing leaves this empty and
+// the host writes C3 rather than guessing "clap".
+struct NoteName {
+  int key = -1;  // MIDI note 0–127. -1 means every key, which is not a pad.
+  std::string name;
+};
+
 // A number out of a state blob. Session files are bytes on disk and a hand
 // edited or truncated one must give a plugin its default back, not throw out
 // of load_state and off the top of the call stack — which is what std::stod
@@ -157,6 +165,10 @@ class PluginInstance {
   virtual std::vector<ParameterInfo> parameters() const = 0;
   virtual double parameter_value(uint32_t id) const = 0;
   virtual void set_parameter(uint32_t id, double value) = 0;
+
+  // Named notes this instance currently answers to. Empty when it publishes
+  // none. Main thread; a kit load can change the list between calls.
+  virtual std::vector<NoteName> note_names() const { return {}; }
 
   // Opaque blob owned by the plugin, stored verbatim in the session file.
   virtual std::vector<uint8_t> save_state() const = 0;

@@ -28,6 +28,7 @@
 #include <atomic>
 #include <semaphore>
 #include <string>
+#include <string_view>
 #include <chrono>
 #include <thread>
 #include <vector>
@@ -36,6 +37,54 @@
 
 namespace nirbija {
 namespace {
+
+// Ardour's LV2 midnam: a plugin hands the host an XML MIDINameDocument of
+// the keys it actually answers to. Black Pearl and the other AVL kits live
+// here; CLAP has clap.note-name for the same job.
+#define LV2_MIDNAM_URI "http://ardour.org/lv2/midnam"
+#define LV2_MIDNAM__interface LV2_MIDNAM_URI "#interface"
+#define LV2_MIDNAM__update LV2_MIDNAM_URI "#update"
+
+struct LV2_Midnam {
+  void* handle;
+  void (*update)(void* handle);
+};
+
+struct LV2_Midnam_Interface {
+  char* (*midnam)(LV2_Handle instance);
+  char* (*model)(LV2_Handle instance);
+  void (*free)(char*);
+};
+
+std::vector<NoteName> parse_midnam_notes(const char* xml) {
+  std::vector<NoteName> out;
+  if (xml == nullptr) return out;
+  const char* cursor = xml;
+  while (const char* tag = std::strstr(cursor, "<Note")) {
+    const char* close = std::strchr(tag, '>');
+    if (close == nullptr) break;
+    const std::string_view attrs(tag, static_cast<size_t>(close - tag));
+    auto quoted = [&](std::string_view key) -> std::string {
+      const std::string needle = std::string(key) + "=\"";
+      const auto pos = attrs.find(needle);
+      if (pos == std::string_view::npos) return {};
+      const auto start = pos + needle.size();
+      const auto end = attrs.find('"', start);
+      if (end == std::string_view::npos) return {};
+      return std::string(attrs.substr(start, end - start));
+    };
+    const std::string number = quoted("Number");
+    const std::string name = quoted("Name");
+    if (!number.empty() && !name.empty()) {
+      char* endp = nullptr;
+      const long key = std::strtol(number.c_str(), &endp, 10);
+      if (endp != number.c_str() && key >= 0 && key <= 127)
+        out.push_back({static_cast<int>(key), name});
+    }
+    cursor = close + 1;
+  }
+  return out;
+}
 
 // urid:map, shared by every LV2 instance in the process. Plugins call map on
 // the UI thread during instantiation; the mutex never reaches the audio thread.
@@ -494,6 +543,10 @@ class Lv2Instance : public PluginInstance {
         lilv_instance_get_extension_data(instance_, LV2_WORKER__interface));
     if (worker_iface_ != nullptr) start_worker();
 
+    midnam_iface_ = static_cast<const LV2_Midnam_Interface*>(
+        lilv_instance_get_extension_data(instance_, LV2_MIDNAM__interface));
+    note_names_valid_.store(false, std::memory_order_release);
+
     lilv_instance_activate(instance_);
     return true;
   }
@@ -503,6 +556,9 @@ class Lv2Instance : public PluginInstance {
     stop_worker();
     lilv_instance_deactivate(instance_);
     worker_iface_ = nullptr;
+    midnam_iface_ = nullptr;
+    note_names_valid_.store(false, std::memory_order_release);
+    note_names_.clear();
     lilv_instance_free(instance_);
     instance_ = nullptr;
   }
@@ -675,6 +731,7 @@ class Lv2Instance : public PluginInstance {
     lilv_instance_deactivate(instance_);
     lilv_state_restore(state, instance_, &Lv2Instance::set_port_value, this, 0,
                        map_path_features());
+    note_names_valid_.store(false, std::memory_order_release);
     lilv_instance_activate(instance_);
 
     restoring_.store(false, std::memory_order_release);
@@ -699,7 +756,14 @@ class Lv2Instance : public PluginInstance {
   }
 
   bool take_state_dirty() override {
-    return state_dirty_.exchange(false, std::memory_order_acq_rel);
+    const bool dirty = state_dirty_.exchange(false, std::memory_order_acq_rel);
+    if (dirty) note_names_valid_.store(false, std::memory_order_release);
+    return dirty;
+  }
+
+  std::vector<NoteName> note_names() const override {
+    if (!note_names_valid_.load(std::memory_order_acquire)) refresh_note_names();
+    return note_names_;
   }
 
  private:
@@ -893,9 +957,31 @@ class Lv2Instance : public PluginInstance {
     map_path_.absolute_path = &Lv2Instance::absolute_path;
     map_path_feature_ = {LV2_STATE__mapPath, &map_path_};
 
-    features_ = {&map_feature_,  &unmap_feature_,  &options_feature_,
+    midnam_host_.handle = this;
+    midnam_host_.update = &Lv2Instance::midnam_changed;
+    midnam_feature_ = {LV2_MIDNAM__update, &midnam_host_};
+
+    features_ = {&map_feature_,     &unmap_feature_,  &options_feature_,
                  &bounded_feature_, &worker_feature_, &map_path_feature_,
-                 nullptr};
+                 &midnam_feature_,  nullptr};
+  }
+
+  static void midnam_changed(void* handle) {
+    static_cast<Lv2Instance*>(handle)->note_names_valid_.store(
+        false, std::memory_order_release);
+  }
+
+  void refresh_note_names() const {
+    note_names_.clear();
+    if (instance_ != nullptr && midnam_iface_ != nullptr &&
+        midnam_iface_->midnam != nullptr) {
+      char* xml = midnam_iface_->midnam(lilv_instance_get_handle(instance_));
+      if (xml != nullptr) {
+        note_names_ = parse_midnam_notes(xml);
+        if (midnam_iface_->free != nullptr) midnam_iface_->free(xml);
+      }
+    }
+    note_names_valid_.store(true, std::memory_order_release);
   }
 
   static char* abstract_path(LV2_State_Map_Path_Handle, const char* path) {
@@ -1102,7 +1188,11 @@ class Lv2Instance : public PluginInstance {
   size_t pending_midi_count_ = 0;
   int32_t block_length_ = 0;
   LV2_Feature map_feature_{}, unmap_feature_{}, options_feature_{}, bounded_feature_{};
-  LV2_Feature worker_feature_{}, map_path_feature_{};
+  LV2_Feature worker_feature_{}, map_path_feature_{}, midnam_feature_{};
+  LV2_Midnam midnam_host_{};
+  const LV2_Midnam_Interface* midnam_iface_ = nullptr;
+  mutable std::atomic<bool> note_names_valid_{false};
+  mutable std::vector<NoteName> note_names_;
   LV2_State_Map_Path map_path_{};
   LV2_Worker_Schedule schedule_{};
   std::vector<LV2_Options_Option> options_;

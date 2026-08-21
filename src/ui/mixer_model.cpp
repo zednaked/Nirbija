@@ -1040,6 +1040,49 @@ QVariantMap MixerModel::insertSequencerSnapshot(int row, int slot) const {
   return out;
 }
 
+QVariantMap MixerModel::insertSequencerTarget(int row, int slot) const {
+  // MIDI walks the chain in slot order. The sequencer only ever addresses
+  // the next live insert — merging every chip on the strip would name an
+  // Odin key "kick" the moment a kit sat below it.
+  QVariantMap out;
+  ChannelStrip* strip = const_cast<MixerModel*>(this)->stripFor(row);
+  if (strip == nullptr || slot < 0) return out;
+  if (dynamic_cast<StepSequencerInstance*>(insertFor(row, slot)) == nullptr)
+    return out;
+
+  PluginInstance* target = nullptr;
+  const size_t count = strip->insert_count();
+  for (size_t i = static_cast<size_t>(slot) + 1; i < count; ++i) {
+    PluginInstance* candidate = strip->insert_at(i);
+    if (candidate == nullptr) continue;
+    target = candidate;
+    break;
+  }
+  if (target == nullptr) return out;
+
+  out[QStringLiteral("name")] =
+      QString::fromStdString(target->descriptor().name);
+
+  std::vector<NoteName> named = target->note_names();
+  std::sort(named.begin(), named.end(),
+            [](const NoteName& a, const NoteName& b) { return a.key < b.key; });
+
+  QVariantList pads;
+  pads.reserve(static_cast<int>(named.size()));
+  bool seen[128] = {};
+  for (const NoteName& entry : named) {
+    if (entry.key < 0 || entry.key > 127 || entry.name.empty()) continue;
+    if (seen[entry.key]) continue;
+    seen[entry.key] = true;
+    QVariantMap pad;
+    pad[QStringLiteral("note")] = entry.key;
+    pad[QStringLiteral("name")] = QString::fromStdString(entry.name);
+    pads.append(pad);
+  }
+  out[QStringLiteral("pads")] = pads;
+  return out;
+}
+
 void MixerModel::setSequencerCell(int row, int slot, int pattern, int lane,
                                  int step, int note, int velocity, bool on,
                                  qreal chance, bool accent, bool tie) {

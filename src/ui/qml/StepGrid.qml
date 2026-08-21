@@ -54,8 +54,11 @@ Popup {
     readonly property int pageSteps: 16
     readonly property int patternCount: 16
 
-    readonly property int lowNote: 36
-    readonly property int highNote: 84
+    // Skyline's vertical window, same 48-semitone span as before. Moving
+    // a pitch in Grid recenters this so that note sits in the middle.
+    property int lowNote: 36
+    property int highNote: 84
+    readonly property int skylineSpan: 48
 
     readonly property var scaleNames: [
         qsTr("chrom"), qsTr("maj"), qsTr("min"), qsTr("dor"),
@@ -102,11 +105,30 @@ Popup {
     property int scaleId: 0
     property int root: 0
     property int playhead: -1
+    // The insert immediately below this sequencer: who the MIDI actually
+    // hits. Empty name means nothing sits there. Pads are that chip's own
+    // named keys, not General MIDI.
+    property string targetName: ""
+    property var targetPads: []
+    // Pitches the grid can show, low to high: the chip's pads, the eight
+    // lane notes, anything Skyline has painted, and (with no chip map) the
+    // same C2–C6 span Skyline draws. Grid and Skyline share this list.
+    property var rowPitches: []
+    // View offset into rowPitches. QML-only — scrolling does not rewrite
+    // lane notes; a kick pattern stays on the kick, and may leave the screen.
+    property int padWindow: 0
+    // Which pitch row is selected in Grid. A voice can own several pitches
+    // (the pad plus Skyline locks); only one row is the selection, not all
+    // of them. QML-only — the engine still focuses a lane.
+    property int focusedPitch: -1
+    readonly property int unlockedNote: 255
     // Set once, the first time this ever opens - after that the popup stays
     // wherever it was last dragged, the same as a real tool window would.
     property bool positioned: false
 
     readonly property int focusedLength: root.laneLength(root.focusedLane)
+    readonly property bool padView: root.kitView
+    readonly property int padWindowMax: Math.max(0, root.rowPitches.length - root.laneCount)
     readonly property int pageCount: Math.max(1, Math.ceil(
         (root.viewMode === 1 ? root.maxSteps : root.focusedLength) / root.pageSteps))
     readonly property int stepOffset: Math.min(root.page, root.pageCount - 1) * root.pageSteps
@@ -215,6 +237,13 @@ Popup {
     }
     function cellTie(lane, step) { return (root.tie[root.cellIndex(lane, step)] ?? 0) !== 0 }
     function cellNote(lane, step) { return root.note[root.cellIndex(lane, step)] ?? 60 }
+
+    // What that step actually plays: a locked Skyline pitch, or the lane's pad.
+    function soundingNote(lane, step) {
+        const locked = Math.round(root.cellNote(lane, step))
+        if (locked === root.unlockedNote) return root.laneNote(lane)
+        return locked
+    }
     function cellVel(lane, step) { return root.vel[root.cellIndex(lane, step)] ?? 100 }
     function cellChance(lane, step) { return root.chance[root.cellIndex(lane, step)] ?? 1 }
     function cellRatchet(lane, step) { return root.ratchet[root.cellIndex(lane, step)] ?? 1 }
@@ -252,6 +281,7 @@ Popup {
         root.note = root.setField(root.note, i, noteValue)
         root.on = root.setField(root.on, i, 1)
         root.sendCell(lane, step)
+        root.rebuildRowPitches()
     }
 
     function setOn(lane, step, value) {
@@ -318,13 +348,23 @@ Popup {
         root.swing = snap.swing ?? 0
         root.scaleId = snap.scale ?? 0
         root.root = snap.root ?? 0
+        root.readTarget()
+        root.rebuildRowPitches()
+    }
+
+    function readTarget() {
+        const t = Mixer.insertSequencerTarget(root.targetRow, root.targetSlot)
+        root.targetName = t.name || ""
+        root.targetPads = t.pads || []
     }
 
     function openFor(row, slot) {
         root.targetRow = row
         root.targetSlot = slot
         root.pluginName = Mixer.insertName(row, slot)
+        root.padWindow = 0
         root.readAll()
+        root.revealFocusedVoice()
         root.page = 0
         if (!root.positioned) {
             root.x = Math.round((Overlay.overlay.width - root.width) / 2)
@@ -357,21 +397,342 @@ Popup {
         return names[((n % 12) + 12) % 12] + (Math.floor(n / 12) - 1)
     }
 
-    // GM percussion, the names a kit row actually is. Anything outside the
-    // drum map keeps the chromatic name, so a bassline lane is still A3.
+    // The next chip's own name for this key, or the note. Never General MIDI:
+    // MIDI 39 is only a clap if that sampler said so.
     function padName(midi) {
         const n = Math.round(midi)
-        const drums = {
-            35: qsTr("kick"), 36: qsTr("kick"), 37: qsTr("stick"),
-            38: qsTr("snare"), 39: qsTr("clap"), 40: qsTr("snare"),
-            41: qsTr("tom"), 42: qsTr("chh"), 43: qsTr("tom"),
-            44: qsTr("hh"), 45: qsTr("tom"), 46: qsTr("ohh"),
-            47: qsTr("tom"), 48: qsTr("tom"), 49: qsTr("crash"),
-            50: qsTr("tom"), 51: qsTr("ride"), 52: qsTr("china"),
-            53: qsTr("bell"), 54: qsTr("tamb"), 55: qsTr("splash"),
-            56: qsTr("cow")
+        const pads = root.targetPads
+        for (let i = 0; i < pads.length; ++i) {
+            if (pads[i].note === n) return pads[i].name
         }
-        return drums[n] || root.noteName(n)
+        return root.noteName(n)
+    }
+
+    function setLanePitch(lane, note) {
+        Mixer.setSequencerLane(
+            root.targetRow, root.targetSlot, lane,
+            Math.max(0, Math.min(127, Math.round(note))),
+            root.laneLength(lane),
+            root.laneDivision(lane),
+            root.laneDirection(lane),
+            root.laneChannel(lane),
+            root.laneMuted(lane),
+            root.laneGate(lane))
+        root.readAll()
+    }
+
+    // Walk the chip's pad list when it has one, otherwise a semitone.
+    function nextPadNote(current, dir) {
+        const pads = root.targetPads
+        if (!pads || pads.length === 0)
+            return Math.max(0, Math.min(127, current + dir))
+        if (dir > 0) {
+            for (let i = 0; i < pads.length; ++i) {
+                if (pads[i].note > current) return pads[i].note
+            }
+            return pads[pads.length - 1].note
+        }
+        for (let i = pads.length - 1; i >= 0; --i) {
+            if (pads[i].note < current) return pads[i].note
+        }
+        return pads[0].note
+    }
+
+    function bumpLaneNote(lane, dir) {
+        root.setLanePitch(lane, root.nextPadNote(root.laneNote(lane), dir))
+    }
+
+    function nearestPad(want) {
+        const pads = root.targetPads
+        if (!pads || pads.length === 0)
+            return Math.max(0, Math.min(127, want))
+        let best = pads[0].note
+        let bestD = 999
+        for (let i = 0; i < pads.length; ++i) {
+            const d = Math.abs(pads[i].note - want)
+            if (d < bestD) {
+                bestD = d
+                best = pads[i].note
+            }
+        }
+        return best
+    }
+
+    function shiftOctave(lane, dir) {
+        const want = root.laneNote(lane) + dir * 12
+        root.setLanePitch(lane, root.nearestPad(want))
+    }
+
+    function shiftAllOctaves(dir) {
+        for (let i = 0; i < root.laneCount; ++i) {
+            Mixer.setSequencerLane(
+                root.targetRow, root.targetSlot, i,
+                root.nearestPad(root.laneNote(i) + dir * 12),
+                root.laneLength(i),
+                root.laneDivision(i),
+                root.laneDirection(i),
+                root.laneChannel(i),
+                root.laneMuted(i),
+                root.laneGate(i))
+        }
+        root.readAll()
+    }
+
+    function rowPitch(row) {
+        const n = root.rowPitches[root.padWindow + row]
+        return n === undefined ? -1 : n
+    }
+
+    function visiblePad(row) {
+        const n = root.rowPitch(row)
+        if (n < 0) return null
+        return { note: n, name: root.padName(n) }
+    }
+
+    function laneForPad(midi) {
+        const n = Math.round(midi)
+        for (let i = 0; i < root.laneCount; ++i) {
+            if (root.laneNote(i) === n) return i
+        }
+        return -1
+    }
+
+    function padInKit(midi) {
+        const n = Math.round(midi)
+        for (let i = 0; i < root.targetPads.length; ++i) {
+            if (root.targetPads[i].note === n) return true
+        }
+        return false
+    }
+
+    function laneSoundingAt(midi, step) {
+        const n = Math.round(midi)
+        for (let l = 0; l < root.laneCount; ++l) {
+            if (!root.cellOn(l, step)) continue
+            if (root.soundingNote(l, step) === n) return l
+        }
+        return -1
+    }
+
+    function laneForPitch(midi) {
+        const n = Math.round(midi)
+        let lane = root.laneForPad(n)
+        if (lane >= 0) return lane
+        for (let l = 0; l < root.laneCount; ++l) {
+            const len = root.laneLength(l)
+            for (let s = 0; s < len; ++s) {
+                if (root.cellOn(l, s) && root.soundingNote(l, s) === n)
+                    return l
+            }
+        }
+        return -1
+    }
+
+    function pitchOn(midi, step) {
+        return root.laneSoundingAt(midi, step) >= 0
+    }
+
+    function laneForRow(row) {
+        const n = root.rowPitch(row)
+        if (n < 0) return -1
+        return root.laneForPitch(n)
+    }
+
+    // A kit pad with no owner gets a free voice. A Skyline pitch that the
+    // chip does not name (or any pitch when there is no chip) stays on the
+    // focused lane as a locked step — never retunes the whole pad.
+    function claimLaneForPad(midi) {
+        let lane = root.laneForPad(midi)
+        if (lane >= 0) return lane
+        if (!root.padInKit(midi))
+            return root.focusedLane
+        for (let i = 0; i < root.laneCount; ++i) {
+            if (root.laneMuted(i) && !root.padInKit(root.laneNote(i))) {
+                root.setLanePitch(i, midi)
+                return i
+            }
+        }
+        for (let i = 0; i < root.laneCount; ++i) {
+            if (!root.padInKit(root.laneNote(i))) {
+                root.setLanePitch(i, midi)
+                return i
+            }
+        }
+        root.setLanePitch(root.focusedLane, midi)
+        return root.focusedLane
+    }
+
+    function rebuildRowPitches() {
+        const seen = {}
+        const list = []
+        const add = n => {
+            n = Math.round(n)
+            if (n < 0 || n > 127 || n === root.unlockedNote) return
+            if (seen[n]) return
+            seen[n] = true
+            list.push(n)
+        }
+        for (let i = 0; i < root.targetPads.length; ++i)
+            add(root.targetPads[i].note)
+        for (let l = 0; l < root.laneCount; ++l)
+            add(root.laneNote(l))
+        if (root.note.length > 0) {
+            for (let l = 0; l < root.laneCount; ++l) {
+                for (let s = 0; s < root.maxSteps; ++s) {
+                    const locked = Math.round(root.cellNote(l, s))
+                    if (locked !== root.unlockedNote)
+                        add(locked)
+                    if (root.cellOn(l, s))
+                        add(root.soundingNote(l, s))
+                }
+            }
+        }
+        // No chip map: the grid is the same span Skyline can paint.
+        if (root.targetPads.length === 0) {
+            for (let n = root.lowNote; n <= root.highNote; ++n)
+                add(n)
+        }
+        list.sort((a, b) => a - b)
+        const prev = root.rowPitches
+        let same = prev.length === list.length
+        if (same) {
+            for (let i = 0; i < list.length; ++i) {
+                if (prev[i] !== list[i]) { same = false; break }
+            }
+        }
+        if (!same)
+            root.rowPitches = list
+        const maxWindow = Math.max(0, list.length - root.laneCount)
+        if (root.padWindow > maxWindow)
+            root.padWindow = maxWindow
+    }
+
+    function revealPitch(midi) {
+        const n = Math.round(midi)
+        const list = root.rowPitches
+        let idx = -1
+        for (let i = 0; i < list.length; ++i) {
+            if (list[i] === n) { idx = i; break }
+        }
+        if (idx < 0) return
+        if (idx < root.padWindow)
+            root.padWindow = idx
+        else if (idx >= root.padWindow + root.laneCount)
+            root.padWindow = Math.max(0, idx - root.laneCount + 1)
+    }
+
+    function centerSkylineOn(midi) {
+        const n = Math.max(0, Math.min(127, Math.round(midi)))
+        const span = root.skylineSpan
+        let lo = n - Math.floor(span / 2)
+        let hi = lo + span
+        if (lo < 0) {
+            hi -= lo
+            lo = 0
+        }
+        if (hi > 127) {
+            lo -= hi - 127
+            hi = 127
+        }
+        root.lowNote = Math.max(0, lo)
+        root.highNote = Math.min(127, Math.max(root.lowNote + 1, hi))
+    }
+
+    function enterSkyline() {
+        const pitch = root.focusedPitch >= 0
+            ? root.focusedPitch : root.laneNote(root.focusedLane)
+        let lane = root.laneForPitch(pitch)
+        if (lane < 0) lane = root.focusedLane
+        root.focusedPitch = pitch
+        root.setParam(root.idView, 0)
+        root.setParam(root.idFocusedLane, lane)
+        root.centerSkylineOn(pitch)
+        root.page = Math.floor(Math.max(0, root.editStep) / root.pageSteps)
+        root.readAll()
+    }
+
+    function revealFocusedVoice() {
+        const pad = root.laneNote(root.focusedLane)
+        root.revealPitch(pad)
+        if (root.cellOn(root.focusedLane, root.editStep)) {
+            const painted = root.soundingNote(root.focusedLane, root.editStep)
+            root.revealPitch(painted)
+            root.focusedPitch = painted
+        } else if (root.focusedPitch < 0) {
+            root.focusedPitch = pad
+        }
+    }
+
+    function rowIsSelected(pitch) {
+        if (pitch < 0) return false
+        if (root.focusedPitch >= 0) return pitch === root.focusedPitch
+        return pitch === root.laneNote(root.focusedLane)
+    }
+
+    function focusRow(row) {
+        const n = root.rowPitch(row)
+        if (n < 0) return
+        let lane = root.laneForPitch(n)
+        if (lane < 0) lane = root.claimLaneForPad(n)
+        root.focusedPitch = n
+        root.setParam(root.idFocusedLane, lane)
+        root.readAll()
+    }
+
+    function toggleRowStep(row, step) {
+        const midi = root.rowPitch(row)
+        if (midi < 0) return
+        root.focusedPitch = midi
+        const existing = root.laneSoundingAt(midi, step)
+        if (existing >= 0) {
+            for (let l = 0; l < root.laneCount; ++l) {
+                if (root.cellOn(l, step) && root.soundingNote(l, step) === midi)
+                    root.setOn(l, step, false)
+            }
+            root.rebuildRowPitches()
+            return
+        }
+        const lane = root.claimLaneForPad(midi)
+        const i = root.cellIndex(lane, step)
+        const store = root.laneNote(lane) === midi ? root.unlockedNote : midi
+        root.note = root.setField(root.note, i, store)
+        root.on = root.setField(root.on, i, 1)
+        root.sendCell(lane, step)
+        root.rebuildRowPitches()
+    }
+
+    // Put this window of the kit onto the eight lanes. Explicit — scrolling
+    // the view does not do this; the groove stays on the pads that own it.
+    function pullPadWindow(start) {
+        const pads = root.targetPads
+        if (!pads || pads.length === 0) return
+        const maxW = Math.max(0, pads.length - root.laneCount)
+        const from = Math.max(0, Math.min(start, maxW))
+        for (let i = 0; i < root.laneCount; ++i) {
+            const pad = pads[from + i]
+            if (!pad) break
+            Mixer.setSequencerLane(
+                root.targetRow, root.targetSlot, i, pad.note,
+                root.laneLength(i),
+                root.laneDivision(i),
+                root.laneDirection(i),
+                root.laneChannel(i),
+                root.laneMuted(i),
+                root.laneGate(i))
+        }
+        root.readAll()
+        if (pads[from])
+            root.revealPitch(pads[from].note)
+    }
+
+    function scrollPadWindow(start) {
+        root.padWindow = Math.max(0, Math.min(start, root.padWindowMax))
+    }
+
+    // The window moves. Hits stay on their pitch — a Skyline C5 is still
+    // C5 after you scroll, it just may leave the eight visible rows.
+    function nudgeVertical(dir) {
+        root.scrollPadWindow(root.padWindow + dir)
     }
 
     readonly property bool kitView: root.viewMode === 1
@@ -446,11 +807,27 @@ Popup {
         spacing: Skin.spacingXS
         clip: true
 
-        Text {
-            text: root.pluginName
-            color: Skin.text
-            font.pixelSize: Skin.fontL
-            font.bold: true
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Skin.spacingS
+
+            Text {
+                text: root.pluginName
+                color: Skin.text
+                font.pixelSize: Skin.fontL
+                font.bold: true
+            }
+            Text {
+                visible: root.targetName.length > 0
+                text: "→ " + root.targetName
+                color: Skin.textDim
+                font.pixelSize: Skin.fontS
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+            }
+            Item {
+                Layout.fillWidth: root.targetName.length === 0
+            }
         }
 
         // Rec / Fill / bank on their own row so the sixteen pads are not
@@ -557,7 +934,7 @@ Popup {
                 label: qsTr("Skyline")
                 active: root.viewMode === 0
                 tip: qsTr("One lane, pitch as a bar. The instrument for a melody or a bassline.")
-                onClicked: { root.setParam(root.idView, 0); root.page = 0; root.readAll() }
+                onClicked: root.enterSkyline()
             }
             StripButton {
                 Layout.preferredWidth: Px.px(44)
@@ -565,7 +942,12 @@ Popup {
                 label: qsTr("Grid")
                 active: root.viewMode === 1
                 tip: qsTr("Kit view: eight drum pads. Hits, Euclid, Fill and mute are the beat tools — scale and Notes hide.")
-                onClicked: { root.setParam(root.idView, 1); root.page = 0; root.readAll() }
+                onClicked: {
+                    root.setParam(root.idView, 1)
+                    root.page = 0
+                    root.readAll()
+                    root.revealFocusedVoice()
+                }
             }
 
             Item { Layout.preferredWidth: Skin.spacingS }
@@ -637,6 +1019,31 @@ Popup {
                     root.readAll()
                 }
             }
+
+            StripButton {
+                visible: root.kitView
+                Layout.preferredWidth: Px.px(32)
+                Layout.minimumWidth: 0
+                label: "−12"
+                tip: qsTr("Focused pad, down an octave. Wheel a row to walk it; Shift+wheel is an octave. Skyline still reaches any pitch on a step.")
+                onClicked: root.shiftOctave(root.focusedLane, -1)
+            }
+            StripButton {
+                visible: root.kitView
+                Layout.preferredWidth: Px.px(32)
+                Layout.minimumWidth: 0
+                label: "+12"
+                tip: qsTr("Focused pad, up an octave.")
+                onClicked: root.shiftOctave(root.focusedLane, 1)
+            }
+            StripButton {
+                visible: root.kitView && root.targetPads.length > 0
+                Layout.preferredWidth: Px.px(40)
+                Layout.minimumWidth: 0
+                label: qsTr("pads")
+                tip: qsTr("Assign this window of %1 to the eight lanes. Scrolling the grid does not do that — the kick pattern stays on the kick.").arg(root.targetName)
+                onClicked: root.pullPadWindow(root.padWindow)
+            }
         }
 
         RowLayout {
@@ -698,6 +1105,18 @@ Popup {
                 Layout.fillHeight: true
                 spacing: Px.px(2)
 
+                StripButton {
+                    visible: root.kitView
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: Px.px(16)
+                    Layout.maximumHeight: Px.px(16)
+                    flat: true
+                    label: "▲"
+                    enabled: root.padWindow < root.padWindowMax
+                    tip: qsTr("Show higher pitches. Hits stay where Skyline put them — a C5 does not become a C6.")
+                    onClicked: root.nudgeVertical(1)
+                }
+
                 Repeater {
                     model: root.laneCount
 
@@ -705,20 +1124,52 @@ Popup {
                         id: laneRow
                         required property int index
 
-                        readonly property bool focused: root.focusedLane === laneRow.index
-                        readonly property bool muted: root.laneMuted(laneRow.index)
+                        readonly property var pad: root.visiblePad(laneRow.index)
+                        // Skyline is eight voices in order. Grid is a pitch
+                        // window — mute/focus must follow the pad on that row,
+                        // not lane-index-as-row, or Lane 1 mutes the kick.
+                        readonly property int lane: root.kitView
+                            ? root.laneForRow(laneRow.index) : laneRow.index
+                        readonly property bool assigned: laneRow.lane >= 0
+                        readonly property bool focused: root.kitView
+                            ? (laneRow.pad !== null
+                               && root.rowIsSelected(laneRow.pad.note))
+                            : root.focusedLane === laneRow.index
+                        readonly property bool muted:
+                            laneRow.assigned && root.laneMuted(laneRow.lane)
 
+                        visible: !root.kitView || laneRow.pad !== null
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         radius: Skin.radiusS
                         color: laneRow.focused ? Skin.slotHover : Skin.slot
                         border.width: laneRow.focused ? 1 : 0
                         border.color: Skin.accent
+                        opacity: !root.kitView || laneRow.assigned ? 1 : 0.55
 
                         TapHandler {
                             onTapped: {
-                                root.setParam(root.idFocusedLane, laneRow.index)
-                                root.readAll()
+                                if (root.kitView)
+                                    root.focusRow(laneRow.index)
+                                else {
+                                    root.setParam(root.idFocusedLane, laneRow.index)
+                                    root.readAll()
+                                }
+                            }
+                        }
+                        WheelHandler {
+                            enabled: root.kitView
+                            onWheel: event => {
+                                const dir = event.angleDelta.y > 0 ? 1 : -1
+                                if (root.padView && !(event.modifiers & Qt.ShiftModifier)) {
+                                    root.scrollPadWindow(root.padWindow + dir)
+                                } else if (laneRow.assigned) {
+                                    if (event.modifiers & Qt.ShiftModifier)
+                                        root.shiftOctave(laneRow.lane, dir)
+                                    else
+                                        root.bumpLaneNote(laneRow.lane, dir)
+                                }
+                                event.accepted = true
                             }
                         }
 
@@ -732,20 +1183,22 @@ Popup {
                                 Layout.preferredHeight: Px.px(20)
                                 flat: true
                                 label: "M"
+                                enabled: laneRow.assigned
                                 active: laneRow.muted
                                 activeColor: Skin.mute
                                 tip: qsTr("Mute lane %1. Its head keeps walking - only the sound stops.")
-                                    .arg(laneRow.index + 1)
+                                    .arg((laneRow.assigned ? laneRow.lane : laneRow.index) + 1)
                                 onClicked: {
+                                    if (!laneRow.assigned) return
                                     Mixer.setSequencerLane(
-                                        root.targetRow, root.targetSlot, laneRow.index,
-                                        root.laneNote(laneRow.index),
-                                        root.laneLength(laneRow.index),
-                                        root.laneDivision(laneRow.index),
-                                        root.laneDirection(laneRow.index),
-                                        root.laneChannel(laneRow.index),
+                                        root.targetRow, root.targetSlot, laneRow.lane,
+                                        root.laneNote(laneRow.lane),
+                                        root.laneLength(laneRow.lane),
+                                        root.laneDivision(laneRow.lane),
+                                        root.laneDirection(laneRow.lane),
+                                        root.laneChannel(laneRow.lane),
                                         !laneRow.muted,
-                                        root.laneGate(laneRow.index))
+                                        root.laneGate(laneRow.lane))
                                     root.readAll()
                                 }
                             }
@@ -757,8 +1210,12 @@ Popup {
                                     text: {
                                         if (!root.kitView)
                                             return qsTr("Lane %1").arg(laneRow.index + 1)
-                                        const name = root.padName(root.laneNote(laneRow.index))
-                                        const n = root.laneLength(laneRow.index)
+                                        if (laneRow.pad)
+                                            return laneRow.pad.name
+                                        if (!laneRow.assigned)
+                                            return qsTr("empty")
+                                        const name = root.padName(root.laneNote(laneRow.lane))
+                                        const n = root.laneLength(laneRow.lane)
                                         return n === 16 ? name : name + " " + n
                                     }
                                     color: laneRow.focused ? Skin.text : Skin.textDim
@@ -769,7 +1226,8 @@ Popup {
                                 }
                                 Text {
                                     visible: !root.kitView
-                                    text: root.noteName(root.laneNote(laneRow.index))
+                                    text: root.noteName(root.laneNote(laneRow.assigned
+                                        ? laneRow.lane : laneRow.index))
                                     color: laneRow.focused ? Skin.text : Skin.textDim
                                     font.pixelSize: Skin.fontXS
                                     font.bold: true
@@ -777,26 +1235,16 @@ Popup {
                             }
 
                             ColumnLayout {
+                                visible: !root.padView
                                 spacing: 0
                                 StripButton {
                                     Layout.preferredWidth: Px.px(16)
                                     Layout.preferredHeight: Px.px(12)
                                     flat: true
                                     label: "+"
-                                    tip: root.kitView
-                                        ? qsTr("This pad's drum note, up a semitone (kick, snare, hat…).")
-                                        : qsTr("This lane's own pitch, up a semitone. What an unlocked step plays.")
-                                    onClicked: {
-                                        Mixer.setSequencerLane(
-                                            root.targetRow, root.targetSlot, laneRow.index,
-                                            Math.min(127, root.laneNote(laneRow.index) + 1),
-                                            root.laneLength(laneRow.index),
-                                            root.laneDivision(laneRow.index),
-                                            root.laneDirection(laneRow.index),
-                                            root.laneChannel(laneRow.index),
-                                            laneRow.muted, root.laneGate(laneRow.index))
-                                        root.readAll()
-                                    }
+                                    tip: qsTr("This lane's own pitch, up a semitone. What an unlocked step plays.")
+                                    onClicked: root.bumpLaneNote(laneRow.assigned
+                                        ? laneRow.lane : laneRow.index, 1)
                                 }
                                 StripButton {
                                     Layout.preferredWidth: Px.px(16)
@@ -804,21 +1252,24 @@ Popup {
                                     flat: true
                                     label: "−"
                                     tip: qsTr("This lane's own pitch, down a semitone.")
-                                    onClicked: {
-                                        Mixer.setSequencerLane(
-                                            root.targetRow, root.targetSlot, laneRow.index,
-                                            Math.max(0, root.laneNote(laneRow.index) - 1),
-                                            root.laneLength(laneRow.index),
-                                            root.laneDivision(laneRow.index),
-                                            root.laneDirection(laneRow.index),
-                                            root.laneChannel(laneRow.index),
-                                            laneRow.muted, root.laneGate(laneRow.index))
-                                        root.readAll()
-                                    }
+                                    onClicked: root.bumpLaneNote(laneRow.assigned
+                                        ? laneRow.lane : laneRow.index, -1)
                                 }
                             }
                         }
                     }
+                }
+
+                StripButton {
+                    visible: root.kitView
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: Px.px(16)
+                    Layout.maximumHeight: Px.px(16)
+                    flat: true
+                    label: "▼"
+                    enabled: root.padWindow > 0
+                    tip: qsTr("Show lower pitches. Hits stay where Skyline put them.")
+                    onClicked: root.nudgeVertical(-1)
                 }
             }
 
@@ -854,11 +1305,14 @@ Popup {
                                 root.playhead >= 0 && root.playhead === column.step
                             readonly property bool extraHere:
                                 root.extraHeadOnStep(column.lane, column.step)
-                            readonly property real note: root.cellNote(column.lane, column.step)
+                            readonly property real note: root.soundingNote(column.lane, column.step)
                             readonly property real velocity: root.cellVel(column.lane, column.step)
                             readonly property real chance: root.cellChance(column.lane, column.step)
                             readonly property bool accented: root.cellAccent(column.lane, column.step)
                             readonly property bool tied: root.cellTie(column.lane, column.step)
+                            readonly property bool selectedStep: column.step === root.editStep
+                            readonly property bool selectedPitch: root.focusedPitch >= 0
+                                && Math.round(column.note) === root.focusedPitch
 
                             width: (skylineColumns.width - (root.pageSteps - 1) * Px.px(2))
                                    / root.pageSteps
@@ -869,6 +1323,8 @@ Popup {
                                 anchors.fill: parent
                                 color: column.index % 4 === 0 ? Skin.strip : "transparent"
                                 radius: Skin.radiusS
+                                border.width: column.selectedStep ? 1 : 0
+                                border.color: Skin.accent
                             }
 
                             Rectangle {
@@ -887,18 +1343,26 @@ Popup {
                                 opacity: column.extraHere ? 0.18 : 0
                             }
 
-                            // Accent: a tap up here, not on the bar, so pitching
-                            // never turns it on by accident.
-                            Rectangle {
+                            // Same gold pip as the grid. Only this corner
+                            // eats the click — a strip across the top stole
+                            // taps meant to arm or mute the step.
+                            Item {
                                 id: accentTick
-                                anchors.left: parent.left
-                                anchors.right: parent.right
                                 anchors.top: parent.top
-                                anchors.margins: Px.px(3)
-                                height: Px.px(8)
-                                radius: Skin.radiusS
-                                color: column.accented ? Skin.solo : Skin.slot
-                                opacity: column.on ? 1 : 0.45
+                                anchors.right: parent.right
+                                width: Px.px(16)
+                                height: Px.px(16)
+
+                                Rectangle {
+                                    visible: column.accented
+                                    anchors.top: parent.top
+                                    anchors.right: parent.right
+                                    anchors.margins: Px.px(3)
+                                    width: Px.px(5)
+                                    height: Px.px(5)
+                                    radius: Px.px(2.5)
+                                    color: Skin.solo
+                                }
 
                                 TapHandler {
                                     onTapped: root.setAccent(column.lane, column.step,
@@ -916,8 +1380,8 @@ Popup {
                                 anchors.left: parent.left
                                 anchors.right: parent.right
                                 anchors.margins: Px.px(3)
-                                anchors.top: accentTick.bottom
-                                anchors.topMargin: Px.px(2)
+                                anchors.top: parent.top
+                                anchors.topMargin: Px.px(4)
                                 anchors.bottom: chanceStrip.top
                                 anchors.bottomMargin: Px.px(2)
                                 radius: Skin.radiusS
@@ -935,6 +1399,8 @@ Popup {
                                     opacity: column.on
                                              ? 0.55 + 0.45 * (column.velocity / 127)
                                              : 0.5
+                                    border.width: column.selectedPitch && column.on ? 1 : 0
+                                    border.color: Skin.text
 
                                     Behavior on color {
                                         ColorAnimation { duration: Skin.fast }
@@ -946,11 +1412,12 @@ Popup {
                             }
 
                             Text {
-                                anchors.horizontalCenter: parent.horizontalCenter
-                                anchors.bottom: pitchFill.top
-                                anchors.bottomMargin: Px.px(2)
+                                anchors.horizontalCenter: pitchFill.horizontalCenter
+                                anchors.top: pitchFill.top
+                                anchors.topMargin: Px.px(2)
                                 visible: column.on && column.width > Px.px(22)
-                                text: root.noteName(root.heardNote(column.note))
+                                         && pitchFill.height > Px.px(16)
+                                text: root.padName(root.heardNote(column.note))
                                 color: Skin.text
                                 font.pixelSize: Skin.fontXS
                             }
@@ -1042,7 +1509,7 @@ Popup {
                             // a real drag never reaches this, so painting a run
                             // of steps below never fights with it.
                             TapHandler {
-                                onSingleTapped: eventPoint => {
+                                onTapped: eventPoint => {
                                     if (column.on) {
                                         root.setOn(column.lane, column.step, false)
                                     } else {
@@ -1058,7 +1525,10 @@ Popup {
                             // moment it crosses into a neighbour that step - and
                             // every one between here and there - gets stamped
                             // with whatever note this one last held, armed
-                            // whether or not it already was.
+                            // whether or not it already was. A click with a
+                            // couple of jitter pixels is not a drag — that
+                            // used to paint the step back on and eat the tap
+                            // that would have turned it off.
                             DragHandler {
                                 id: pitchDrag
                                 target: null
@@ -1066,6 +1536,15 @@ Popup {
                                 yAxis.enabled: true
 
                                 property int paintNote: 60
+                                property bool painting: false
+
+                                function movedEnough() {
+                                    const dx = pitchDrag.centroid.position.x
+                                             - pitchDrag.centroid.pressPosition.x
+                                    const dy = pitchDrag.centroid.position.y
+                                             - pitchDrag.centroid.pressPosition.y
+                                    return Math.sqrt(dx * dx + dy * dy) >= Px.px(8)
+                                }
 
                                 function updatePaint() {
                                     const cellStep = column.width + Px.px(2)
@@ -1079,8 +1558,17 @@ Popup {
                                         root.stepOffset + targetIndex, pitchDrag.paintNote)
                                 }
 
-                                onActiveChanged: if (pitchDrag.active) pitchDrag.updatePaint()
-                                onCentroidChanged: if (pitchDrag.active) pitchDrag.updatePaint()
+                                onActiveChanged: {
+                                    if (!pitchDrag.active)
+                                        pitchDrag.painting = false
+                                }
+                                onCentroidChanged: {
+                                    if (!pitchDrag.active) return
+                                    if (!pitchDrag.painting && !pitchDrag.movedEnough())
+                                        return
+                                    pitchDrag.painting = true
+                                    pitchDrag.updatePaint()
+                                }
                             }
                         }
                     }
@@ -1111,10 +1599,18 @@ Popup {
                             id: gridRow
                             required property int index
 
+                            readonly property int pitch: root.rowPitch(gridRow.index)
+                            readonly property var pad: root.visiblePad(gridRow.index)
+                            readonly property int lane: gridRow.pitch < 0
+                                ? -1 : root.laneForPitch(gridRow.pitch)
+                            readonly property bool assigned: gridRow.lane >= 0
+
+                            visible: gridRow.pitch >= 0
                             width: gridRows.width
                             height: (gridRows.height - (root.laneCount - 1) * Px.px(2))
                                     / root.laneCount
                             spacing: Px.px(2)
+                            opacity: gridRow.assigned || !root.padView ? 1 : 0.55
 
                             Repeater {
                                 model: root.pageSteps
@@ -1123,22 +1619,37 @@ Popup {
                                     id: cell
                                     required property int index
 
-                                    readonly property int lane: gridRow.index
                                     readonly property int step: root.stepOffset + cell.index
-                                    readonly property bool on: root.cellOn(cell.lane, cell.step)
-                                    readonly property bool inPattern:
-                                        cell.step < root.laneLength(cell.lane)
-                                    readonly property bool atPlayhead:
-                                        root.nativeHeadStep(cell.lane) === cell.step
+                                    readonly property int lane: {
+                                        if (gridRow.pitch < 0) return -1
+                                        const sounding = root.laneSoundingAt(
+                                            gridRow.pitch, cell.step)
+                                        return sounding >= 0 ? sounding : gridRow.lane
+                                    }
+                                    readonly property bool on:
+                                        gridRow.pitch >= 0
+                                        && root.pitchOn(gridRow.pitch, cell.step)
+                                    readonly property bool inPattern: {
+                                        const voice = cell.lane >= 0
+                                            ? cell.lane : root.focusedLane
+                                        return cell.step < root.laneLength(voice)
+                                    }
+                                    readonly property bool atPlayhead: {
+                                        if (cell.lane < 0) return false
+                                        return root.nativeHeadStep(cell.lane) === cell.step
+                                    }
                                     // The focused lane's step, drawn on every row so a
                                     // polymeter offset is a second light, not a mystery.
                                     readonly property bool atKitBeat:
                                         root.playhead >= 0 &&
                                         root.nativeHeadStep(root.focusedLane) === cell.step
                                     readonly property bool extraHere:
-                                        root.extraHeadOnStep(cell.lane, cell.step)
-                                    readonly property real velocity: root.cellVel(cell.lane, cell.step)
-                                    readonly property bool accented: root.cellAccent(cell.lane, cell.step)
+                                        cell.lane >= 0
+                                        && root.extraHeadOnStep(cell.lane, cell.step)
+                                    readonly property real velocity: cell.lane >= 0
+                                        ? root.cellVel(cell.lane, cell.step) : 100
+                                    readonly property bool accented: cell.lane >= 0
+                                        && root.cellAccent(cell.lane, cell.step)
 
                                     width: (gridRow.width - (root.pageSteps - 1) * Px.px(2))
                                            / root.pageSteps
@@ -1148,7 +1659,7 @@ Popup {
                                     color: cell.on
                                         ? Skin.accent
                                         : (cell.index % 4 === 0 ? Skin.strip : Skin.slot)
-                                    border.width: cell.lane === root.focusedLane ? 1 : 0
+                                    border.width: root.rowIsSelected(gridRow.pitch) ? 1 : 0
                                     border.color: Skin.accent
 
                                     Rectangle {
@@ -1187,7 +1698,7 @@ Popup {
                                     }
 
                                     TapHandler {
-                                        onTapped: root.setOn(cell.lane, cell.step, !cell.on)
+                                        onTapped: root.toggleRowStep(gridRow.index, cell.step)
                                     }
                                 }
                             }
@@ -1198,6 +1709,36 @@ Popup {
         }
 
         // --- page nav, when a lane or the grid runs past sixteen -------------------
+        RowLayout {
+            Layout.fillWidth: true
+            visible: root.kitView && root.rowPitches.length > root.laneCount
+            spacing: Skin.spacingXS
+
+            StripButton {
+                Layout.preferredWidth: Px.px(28)
+                label: "▲"
+                enabled: root.padWindow < root.padWindowMax
+                onClicked: root.scrollPadWindow(root.padWindow + 1)
+            }
+            Text {
+                text: qsTr("pads %1–%2 / %3 · %4")
+                    .arg(root.padWindow + 1)
+                    .arg(Math.min(root.padWindow + root.laneCount, root.targetPads.length))
+                    .arg(root.rowPitches.length)
+                    .arg(root.targetName)
+                color: Skin.textDim
+                font.pixelSize: Skin.fontXS
+                elide: Text.ElideRight
+                Layout.fillWidth: true
+            }
+            StripButton {
+                Layout.preferredWidth: Px.px(28)
+                label: "▼"
+                enabled: root.padWindow > 0
+                onClicked: root.scrollPadWindow(root.padWindow - 1)
+            }
+        }
+
         RowLayout {
             Layout.fillWidth: true
             visible: root.pageCount > 1

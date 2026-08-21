@@ -350,6 +350,11 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE int insertPlayhead(int row, int slot) const;
   // Current-pattern planes plus scalars. Empty if the insert is not a sequencer.
   Q_INVOKABLE QVariantMap insertSequencerSnapshot(int row, int slot) const;
+  // Who this sequencer actually feeds: the next non-empty insert, nobody
+  // else. Two instruments on one strip is two sequencers, not a merged
+  // name list. `{name, pads:[{note,name},...]}`; empty when nothing sits
+  // below, or the chip published no named keys.
+  Q_INVOKABLE QVariantMap insertSequencerTarget(int row, int slot) const;
   Q_INVOKABLE void setSequencerCell(int row, int slot, int pattern, int lane,
                                     int step, int note, int velocity, bool on,
                                     qreal chance, bool accent, bool tie);

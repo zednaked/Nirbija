@@ -155,6 +155,7 @@ class ClapInstance : public PluginInstance {
     // answering this, a patch loaded from the plugin's own editor never
     // reached the session file.
     state_support_.mark_dirty = &ClapInstance::host_mark_dirty;
+    note_name_host_.changed = &ClapInstance::host_note_name_changed;
   }
 
   ~ClapInstance() override { destroy(); }
@@ -349,7 +350,16 @@ class ClapInstance : public PluginInstance {
   }
 
   bool take_state_dirty() override {
-    return state_dirty_.exchange(false, std::memory_order_acq_rel);
+    const bool dirty = state_dirty_.exchange(false, std::memory_order_acq_rel);
+    if (dirty) note_names_valid_.store(false, std::memory_order_release);
+    return dirty;
+  }
+
+  std::vector<NoteName> note_names() const override {
+    if (!note_names_valid_.load(std::memory_order_acquire) ||
+        state_dirty_.load(std::memory_order_acquire))
+      refresh_note_names();
+    return note_names_;
   }
 
   void host_idle() override {
@@ -370,7 +380,9 @@ class ClapInstance : public PluginInstance {
   bool load_state(const std::vector<uint8_t>& blob) override {
     if (state_ == nullptr || blob.empty()) return false;
     InStream stream{&blob};
-    return state_->load(plugin_, &stream.stream);
+    const bool ok = state_->load(plugin_, &stream.stream);
+    note_names_valid_.store(false, std::memory_order_release);
+    return ok;
   }
 
   const PluginDescriptor& descriptor() const override { return desc_; }
@@ -657,20 +669,51 @@ class ClapInstance : public PluginInstance {
     return static_cast<ClapInstance*>(host->host_data);
   }
 
-  // The two event-loop extensions and state. Anything else a plugin asks for is
-  // better left unanswered than half-implemented.
+  // The two event-loop extensions, state, and note names. Anything else a
+  // plugin asks for is better left unanswered than half-implemented.
   static const void* host_get_extension(const clap_host_t* host, const char* id) {
     ClapInstance* self = self_of(host);
     if (std::strcmp(id, CLAP_EXT_TIMER_SUPPORT) == 0) return &self->timer_support_;
     if (std::strcmp(id, CLAP_EXT_POSIX_FD_SUPPORT) == 0) return &self->fd_support_;
     if (std::strcmp(id, CLAP_EXT_STATE) == 0) return &self->state_support_;
+    if (std::strcmp(id, CLAP_EXT_NOTE_NAME) == 0) return &self->note_name_host_;
     return nullptr;
+  }
+
+  static void host_note_name_changed(const clap_host_t* host) {
+    self_of(host)->note_names_valid_.store(false, std::memory_order_release);
+  }
+
+  void refresh_note_names() const {
+    note_names_.clear();
+    if (plugin_ != nullptr) {
+      const auto* ext = static_cast<const clap_plugin_note_name_t*>(
+          plugin_->get_extension(plugin_, CLAP_EXT_NOTE_NAME));
+      if (ext != nullptr && ext->count != nullptr && ext->get != nullptr) {
+        const uint32_t n = ext->count(plugin_);
+        note_names_.reserve(n);
+        for (uint32_t i = 0; i < n; ++i) {
+          clap_note_name_t item{};
+          if (!ext->get(plugin_, i, &item)) continue;
+          if (item.key < 0 || item.key > 127) continue;
+          const size_t len = strnlen(item.name, CLAP_NAME_SIZE);
+          if (len == 0) continue;
+          NoteName named;
+          named.key = item.key;
+          named.name.assign(item.name, len);
+          note_names_.push_back(std::move(named));
+        }
+      }
+    }
+    note_names_valid_.store(true, std::memory_order_release);
   }
 
   // Callable from any thread per the extension, so the flag is atomic and the
   // UI picks it up on its next poll rather than saving from under the plugin.
   static void host_mark_dirty(const clap_host_t* host) {
-    self_of(host)->state_dirty_.store(true, std::memory_order_release);
+    ClapInstance* self = self_of(host);
+    self->state_dirty_.store(true, std::memory_order_release);
+    self->note_names_valid_.store(false, std::memory_order_release);
   }
 
   static void host_request_restart(const clap_host_t*) {}
@@ -746,7 +789,10 @@ class ClapInstance : public PluginInstance {
   clap_host_timer_support_t timer_support_{};
   clap_host_posix_fd_support_t fd_support_{};
   clap_host_state_t state_support_{};
+  clap_host_note_name_t note_name_host_{};
   std::atomic<bool> state_dirty_{false};
+  mutable std::atomic<bool> note_names_valid_{false};
+  mutable std::vector<NoteName> note_names_;
   std::vector<Timer> timers_;
   std::vector<RegisteredFd> fds_;
   std::vector<pollfd> poll_set_;
