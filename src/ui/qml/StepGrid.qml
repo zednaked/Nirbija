@@ -323,8 +323,21 @@ Popup {
         for (let i = lo; i <= hi; ++i) root.armNote(lane, i, value)
     }
 
-    function readAll() {
+    function sameFields(a, b) {
+        if (a.length !== b.length) return false
+        for (let i = 0; i < a.length; ++i) {
+            if (a[i] !== b[i]) return false
+        }
+        return true
+    }
+
+    // pollOnly is for the 50ms playhead timer: it already pays for this
+    // snapshot every tick, but the target-chain query and the row-pitch
+    // scan don't need redoing unless what feeds them actually moved.
+    function readAll(pollOnly) {
         const snap = Mixer.insertSequencerSnapshot(root.targetRow, root.targetSlot)
+        const prevNote = root.note
+        const prevLanes = root.lanes
         root.on = snap.on || []
         root.accent = snap.accent || []
         root.tie = snap.tie || []
@@ -348,6 +361,11 @@ Popup {
         root.swing = snap.swing ?? 0
         root.scaleId = snap.scale ?? 0
         root.root = snap.root ?? 0
+        if (pollOnly === true) {
+            if (!root.sameFields(prevNote, root.note) || !root.sameFields(prevLanes, root.lanes))
+                root.rebuildRowPitches()
+            return
+        }
         root.readTarget()
         root.rebuildRowPitches()
     }
@@ -538,6 +556,17 @@ Popup {
         return root.laneForPitch(n)
     }
 
+    // Retuning a lane changes every unlocked hit already on it, so a lane
+    // with a pattern of its own keeps it even when its current pitch isn't
+    // a kit pad — only a lane with nothing unlocked programmed is "free".
+    function laneHasUnlockedHits(lane) {
+        for (let s = 0; s < root.maxSteps; ++s) {
+            if (root.cellOn(lane, s) && Math.round(root.cellNote(lane, s)) === root.unlockedNote)
+                return true
+        }
+        return false
+    }
+
     // A kit pad with no owner gets a free voice. A Skyline pitch that the
     // chip does not name (or any pitch when there is no chip) stays on the
     // focused lane as a locked step — never retunes the whole pad.
@@ -547,13 +576,14 @@ Popup {
         if (!root.padInKit(midi))
             return root.focusedLane
         for (let i = 0; i < root.laneCount; ++i) {
-            if (root.laneMuted(i) && !root.padInKit(root.laneNote(i))) {
+            if (root.laneMuted(i) && !root.padInKit(root.laneNote(i)) &&
+                !root.laneHasUnlockedHits(i)) {
                 root.setLanePitch(i, midi)
                 return i
             }
         }
         for (let i = 0; i < root.laneCount; ++i) {
-            if (!root.padInKit(root.laneNote(i))) {
+            if (!root.padInKit(root.laneNote(i)) && !root.laneHasUnlockedHits(i)) {
                 root.setLanePitch(i, midi)
                 return i
             }
@@ -693,26 +723,25 @@ Popup {
             return
         }
         const lane = root.claimLaneForPad(midi)
-        const i = root.cellIndex(lane, step)
         const store = root.laneNote(lane) === midi ? root.unlockedNote : midi
-        root.note = root.setField(root.note, i, store)
-        root.on = root.setField(root.on, i, 1)
-        root.sendCell(lane, step)
-        root.rebuildRowPitches()
+        root.armNote(lane, step, store)
     }
 
-    // Put this window of the kit onto the eight lanes. Explicit — scrolling
+    // Put this window of rows onto the eight lanes. Explicit — scrolling
     // the view does not do this; the groove stays on the pads that own it.
+    // start indexes rowPitches (what the grid is showing), same as rowPitch().
     function pullPadWindow(start) {
-        const pads = root.targetPads
-        if (!pads || pads.length === 0) return
-        const maxW = Math.max(0, pads.length - root.laneCount)
+        const rows = root.rowPitches
+        if (!rows || rows.length === 0) return
+        const maxW = Math.max(0, rows.length - root.laneCount)
         const from = Math.max(0, Math.min(start, maxW))
+        let firstNote = -1
         for (let i = 0; i < root.laneCount; ++i) {
-            const pad = pads[from + i]
-            if (!pad) break
+            const note = rows[from + i]
+            if (note === undefined) break
+            if (firstNote < 0) firstNote = note
             Mixer.setSequencerLane(
-                root.targetRow, root.targetSlot, i, pad.note,
+                root.targetRow, root.targetSlot, i, note,
                 root.laneLength(i),
                 root.laneDivision(i),
                 root.laneDirection(i),
@@ -721,8 +750,8 @@ Popup {
                 root.laneGate(i))
         }
         root.readAll()
-        if (pads[from])
-            root.revealPitch(pads[from].note)
+        if (firstNote >= 0)
+            root.revealPitch(firstNote)
     }
 
     function scrollPadWindow(start) {
@@ -792,8 +821,9 @@ Popup {
             // eight heads lit, and Record needs the pattern it is painting.
             // insertSequencerSnapshot is already the size of an insertParameters
             // call on a plugin with a hundred-odd parameters - the same 50ms
-            // timer already paid for that elsewhere.
-            root.readAll()
+            // timer already paid for that elsewhere. pollOnly skips redoing
+            // the target-chain query and row-pitch scan when nothing moved.
+            root.readAll(true)
         }
     }
 
@@ -1158,17 +1188,13 @@ Popup {
                             }
                         }
                         WheelHandler {
-                            enabled: root.kitView
+                            enabled: root.kitView && laneRow.assigned
                             onWheel: event => {
                                 const dir = event.angleDelta.y > 0 ? 1 : -1
-                                if (root.padView && !(event.modifiers & Qt.ShiftModifier)) {
-                                    root.scrollPadWindow(root.padWindow + dir)
-                                } else if (laneRow.assigned) {
-                                    if (event.modifiers & Qt.ShiftModifier)
-                                        root.shiftOctave(laneRow.lane, dir)
-                                    else
-                                        root.bumpLaneNote(laneRow.lane, dir)
-                                }
+                                if (event.modifiers & Qt.ShiftModifier)
+                                    root.shiftOctave(laneRow.lane, dir)
+                                else
+                                    root.bumpLaneNote(laneRow.lane, dir)
                                 event.accepted = true
                             }
                         }

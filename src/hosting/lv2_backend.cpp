@@ -56,6 +56,24 @@ struct LV2_Midnam_Interface {
   void (*free)(char*);
 };
 
+// Pad names in the wild carry XML entities ("Ride &amp; Crash"); attribute
+// values are otherwise taken verbatim, so decode the five predefined ones.
+std::string unescape_xml(std::string_view text) {
+  std::string out;
+  out.reserve(text.size());
+  for (size_t i = 0; i < text.size();) {
+    if (text[i] == '&') {
+      if (text.compare(i, 5, "&amp;") == 0) { out += '&'; i += 5; continue; }
+      if (text.compare(i, 4, "&lt;") == 0) { out += '<'; i += 4; continue; }
+      if (text.compare(i, 4, "&gt;") == 0) { out += '>'; i += 4; continue; }
+      if (text.compare(i, 6, "&quot;") == 0) { out += '"'; i += 6; continue; }
+      if (text.compare(i, 6, "&apos;") == 0) { out += '\''; i += 6; continue; }
+    }
+    out += text[i++];
+  }
+  return out;
+}
+
 std::vector<NoteName> parse_midnam_notes(const char* xml) {
   std::vector<NoteName> out;
   if (xml == nullptr) return out;
@@ -74,7 +92,7 @@ std::vector<NoteName> parse_midnam_notes(const char* xml) {
       return std::string(attrs.substr(start, end - start));
     };
     const std::string number = quoted("Number");
-    const std::string name = quoted("Name");
+    const std::string name = unescape_xml(quoted("Name"));
     if (!number.empty() && !name.empty()) {
       char* endp = nullptr;
       const long key = std::strtol(number.c_str(), &endp, 10);
@@ -545,7 +563,7 @@ class Lv2Instance : public PluginInstance {
 
     midnam_iface_ = static_cast<const LV2_Midnam_Interface*>(
         lilv_instance_get_extension_data(instance_, LV2_MIDNAM__interface));
-    note_names_valid_.store(false, std::memory_order_release);
+    note_names_dirty_gen_.fetch_add(1, std::memory_order_acq_rel);
 
     lilv_instance_activate(instance_);
     return true;
@@ -557,7 +575,7 @@ class Lv2Instance : public PluginInstance {
     lilv_instance_deactivate(instance_);
     worker_iface_ = nullptr;
     midnam_iface_ = nullptr;
-    note_names_valid_.store(false, std::memory_order_release);
+    note_names_dirty_gen_.fetch_add(1, std::memory_order_acq_rel);
     note_names_.clear();
     lilv_instance_free(instance_);
     instance_ = nullptr;
@@ -731,7 +749,7 @@ class Lv2Instance : public PluginInstance {
     lilv_instance_deactivate(instance_);
     lilv_state_restore(state, instance_, &Lv2Instance::set_port_value, this, 0,
                        map_path_features());
-    note_names_valid_.store(false, std::memory_order_release);
+    note_names_dirty_gen_.fetch_add(1, std::memory_order_acq_rel);
     lilv_instance_activate(instance_);
 
     restoring_.store(false, std::memory_order_release);
@@ -757,12 +775,13 @@ class Lv2Instance : public PluginInstance {
 
   bool take_state_dirty() override {
     const bool dirty = state_dirty_.exchange(false, std::memory_order_acq_rel);
-    if (dirty) note_names_valid_.store(false, std::memory_order_release);
+    if (dirty) note_names_dirty_gen_.fetch_add(1, std::memory_order_acq_rel);
     return dirty;
   }
 
   std::vector<NoteName> note_names() const override {
-    if (!note_names_valid_.load(std::memory_order_acquire)) refresh_note_names();
+    if (note_names_cached_gen_ != note_names_dirty_gen_.load(std::memory_order_acquire))
+      refresh_note_names();
     return note_names_;
   }
 
@@ -967,21 +986,31 @@ class Lv2Instance : public PluginInstance {
   }
 
   static void midnam_changed(void* handle) {
-    static_cast<Lv2Instance*>(handle)->note_names_valid_.store(
-        false, std::memory_order_release);
+    static_cast<Lv2Instance*>(handle)->note_names_dirty_gen_.fetch_add(
+        1, std::memory_order_acq_rel);
   }
 
+  // midnam_changed can fire from any thread while this runs (Ardour's
+  // midnam extension makes no threading promise). A plain "valid" flag set
+  // at the end would clobber an invalidation that landed mid-read, so this
+  // retries until the generation it started with is still current.
   void refresh_note_names() const {
-    note_names_.clear();
-    if (instance_ != nullptr && midnam_iface_ != nullptr &&
-        midnam_iface_->midnam != nullptr) {
-      char* xml = midnam_iface_->midnam(lilv_instance_get_handle(instance_));
-      if (xml != nullptr) {
-        note_names_ = parse_midnam_notes(xml);
-        if (midnam_iface_->free != nullptr) midnam_iface_->free(xml);
+    for (;;) {
+      const uint64_t gen = note_names_dirty_gen_.load(std::memory_order_acquire);
+      note_names_.clear();
+      if (instance_ != nullptr && midnam_iface_ != nullptr &&
+          midnam_iface_->midnam != nullptr) {
+        char* xml = midnam_iface_->midnam(lilv_instance_get_handle(instance_));
+        if (xml != nullptr) {
+          note_names_ = parse_midnam_notes(xml);
+          if (midnam_iface_->free != nullptr) midnam_iface_->free(xml);
+        }
+      }
+      if (note_names_dirty_gen_.load(std::memory_order_acquire) == gen) {
+        note_names_cached_gen_ = gen;
+        return;
       }
     }
-    note_names_valid_.store(true, std::memory_order_release);
   }
 
   static char* abstract_path(LV2_State_Map_Path_Handle, const char* path) {
@@ -1191,7 +1220,10 @@ class Lv2Instance : public PluginInstance {
   LV2_Feature worker_feature_{}, map_path_feature_{}, midnam_feature_{};
   LV2_Midnam midnam_host_{};
   const LV2_Midnam_Interface* midnam_iface_ = nullptr;
-  mutable std::atomic<bool> note_names_valid_{false};
+  // See refresh_note_names(): a generation counter, not a bool, so a
+  // cross-thread invalidation during refresh can't be silently overwritten.
+  mutable std::atomic<uint64_t> note_names_dirty_gen_{1};
+  mutable uint64_t note_names_cached_gen_ = 0;
   mutable std::vector<NoteName> note_names_;
   LV2_State_Map_Path map_path_{};
   LV2_Worker_Schedule schedule_{};

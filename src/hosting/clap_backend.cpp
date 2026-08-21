@@ -351,12 +351,12 @@ class ClapInstance : public PluginInstance {
 
   bool take_state_dirty() override {
     const bool dirty = state_dirty_.exchange(false, std::memory_order_acq_rel);
-    if (dirty) note_names_valid_.store(false, std::memory_order_release);
+    if (dirty) note_names_dirty_gen_.fetch_add(1, std::memory_order_acq_rel);
     return dirty;
   }
 
   std::vector<NoteName> note_names() const override {
-    if (!note_names_valid_.load(std::memory_order_acquire) ||
+    if (note_names_cached_gen_ != note_names_dirty_gen_.load(std::memory_order_acquire) ||
         state_dirty_.load(std::memory_order_acquire))
       refresh_note_names();
     return note_names_;
@@ -381,7 +381,7 @@ class ClapInstance : public PluginInstance {
     if (state_ == nullptr || blob.empty()) return false;
     InStream stream{&blob};
     const bool ok = state_->load(plugin_, &stream.stream);
-    note_names_valid_.store(false, std::memory_order_release);
+    note_names_dirty_gen_.fetch_add(1, std::memory_order_acq_rel);
     return ok;
   }
 
@@ -681,31 +681,41 @@ class ClapInstance : public PluginInstance {
   }
 
   static void host_note_name_changed(const clap_host_t* host) {
-    self_of(host)->note_names_valid_.store(false, std::memory_order_release);
+    self_of(host)->note_names_dirty_gen_.fetch_add(1, std::memory_order_acq_rel);
   }
 
+  // host_note_name_changed can fire from any thread while this runs. A plain
+  // "valid" flag set at the end would clobber an invalidation that landed
+  // mid-read, so instead this retries until the generation it started with
+  // is still current when it finishes.
   void refresh_note_names() const {
-    note_names_.clear();
-    if (plugin_ != nullptr) {
-      const auto* ext = static_cast<const clap_plugin_note_name_t*>(
-          plugin_->get_extension(plugin_, CLAP_EXT_NOTE_NAME));
-      if (ext != nullptr && ext->count != nullptr && ext->get != nullptr) {
-        const uint32_t n = ext->count(plugin_);
-        note_names_.reserve(n);
-        for (uint32_t i = 0; i < n; ++i) {
-          clap_note_name_t item{};
-          if (!ext->get(plugin_, i, &item)) continue;
-          if (item.key < 0 || item.key > 127) continue;
-          const size_t len = strnlen(item.name, CLAP_NAME_SIZE);
-          if (len == 0) continue;
-          NoteName named;
-          named.key = item.key;
-          named.name.assign(item.name, len);
-          note_names_.push_back(std::move(named));
+    for (;;) {
+      const uint64_t gen = note_names_dirty_gen_.load(std::memory_order_acquire);
+      note_names_.clear();
+      if (plugin_ != nullptr) {
+        const auto* ext = static_cast<const clap_plugin_note_name_t*>(
+            plugin_->get_extension(plugin_, CLAP_EXT_NOTE_NAME));
+        if (ext != nullptr && ext->count != nullptr && ext->get != nullptr) {
+          const uint32_t n = ext->count(plugin_);
+          note_names_.reserve(n);
+          for (uint32_t i = 0; i < n; ++i) {
+            clap_note_name_t item{};
+            if (!ext->get(plugin_, i, &item)) continue;
+            if (item.key < 0 || item.key > 127) continue;
+            const size_t len = strnlen(item.name, CLAP_NAME_SIZE);
+            if (len == 0) continue;
+            NoteName named;
+            named.key = item.key;
+            named.name.assign(item.name, len);
+            note_names_.push_back(std::move(named));
+          }
         }
       }
+      if (note_names_dirty_gen_.load(std::memory_order_acquire) == gen) {
+        note_names_cached_gen_ = gen;
+        return;
+      }
     }
-    note_names_valid_.store(true, std::memory_order_release);
   }
 
   // Callable from any thread per the extension, so the flag is atomic and the
@@ -713,7 +723,7 @@ class ClapInstance : public PluginInstance {
   static void host_mark_dirty(const clap_host_t* host) {
     ClapInstance* self = self_of(host);
     self->state_dirty_.store(true, std::memory_order_release);
-    self->note_names_valid_.store(false, std::memory_order_release);
+    self->note_names_dirty_gen_.fetch_add(1, std::memory_order_acq_rel);
   }
 
   static void host_request_restart(const clap_host_t*) {}
@@ -791,7 +801,10 @@ class ClapInstance : public PluginInstance {
   clap_host_state_t state_support_{};
   clap_host_note_name_t note_name_host_{};
   std::atomic<bool> state_dirty_{false};
-  mutable std::atomic<bool> note_names_valid_{false};
+  // See refresh_note_names(): a generation counter, not a bool, so a
+  // cross-thread invalidation during refresh can't be silently overwritten.
+  mutable std::atomic<uint64_t> note_names_dirty_gen_{1};
+  mutable uint64_t note_names_cached_gen_ = 0;
   mutable std::vector<NoteName> note_names_;
   std::vector<Timer> timers_;
   std::vector<RegisteredFd> fds_;

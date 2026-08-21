@@ -1064,8 +1064,8 @@ QVariantMap MixerModel::insertSequencerTarget(int row, int slot) const {
       QString::fromStdString(target->descriptor().name);
 
   std::vector<NoteName> named = target->note_names();
-  std::sort(named.begin(), named.end(),
-            [](const NoteName& a, const NoteName& b) { return a.key < b.key; });
+  std::stable_sort(named.begin(), named.end(),
+                    [](const NoteName& a, const NoteName& b) { return a.key < b.key; });
 
   QVariantList pads;
   pads.reserve(static_cast<int>(named.size()));
