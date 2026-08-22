@@ -47,12 +47,30 @@ Rectangle {
     signal sendLevelRequested(int slot, real level)
     signal sendMenuRequested(int slot, var item)
 
+    // How far one strip's left edge sits from the next one's, in the Row that
+    // lays these out - the same width and spacing that Row itself uses, so a
+    // drag past half of it lands past the neighbour's own midpoint.
+    readonly property real stripStep: Skin.stripWidth + Skin.gap
+    // Set from the title's DragHandler below. A transform rather than `x`
+    // itself: `x` here belongs to the parent Row, which repositions every
+    // strip on every reorder - fighting it for the same property is what
+    // broke the meter's mask (see Meter.qml). A transform rides on top of
+    // whatever the Row decides without contesting it.
+    property real dragOffsetX: 0
+    property bool dragging: false
+
     width: Skin.stripWidth
     color: stripHover.hovered ? Skin.stripAlt : Skin.strip
     radius: Skin.radius
+    z: root.dragging ? 10 : 0
+    transform: Translate { x: root.dragOffsetX }
 
     Behavior on color {
         ColorAnimation { duration: Skin.medium }
+    }
+    Behavior on dragOffsetX {
+        enabled: !root.dragging
+        NumberAnimation { duration: Skin.fast; easing.type: Easing.OutQuad }
     }
 
     HoverHandler {
@@ -262,15 +280,63 @@ Rectangle {
         }
 
         // The channel title is where AUM keeps renaming and removal, so it is
-        // a button rather than a label.
+        // a button rather than a label. A sideways drag on it reorders the
+        // strip instead: the same handle for both, since AUM users already
+        // reach for the title to do anything strip-level.
         StripButton {
             id: title
             Layout.fillWidth: true
             Layout.preferredHeight: Px.px(20)
             label: root.channelName
             flat: true
-            tip: qsTr("%1 — click to rename this strip, duplicate it, or remove it.").arg(root.channelName)
+            tip: qsTr("%1 — click to rename this strip, duplicate it, or remove it; drag sideways to move it.").arg(root.channelName)
             onClicked: root.titleClicked(title)
+
+            DragHandler {
+                id: reorderDrag
+                target: null
+                xAxis.enabled: true
+                yAxis.enabled: false
+                // Reordering the model mid-drag (one call per strip crossed)
+                // is what made the drag jump around: each call needed `row`
+                // read back from the Repeater's `index`, and that binding
+                // does not necessarily settle before the pointer moves
+                // again, so a fast drag applied a step to whatever row was
+                // still hanging around from the previous one. Instead this
+                // only tracks how many strips the drag is currently over -
+                // the strip itself just floats on the transform below,
+                // following the pointer 1:1 - and the real reorder happens
+                // once, on release, in one call.
+                property int pendingSteps: 0
+
+                onActiveChanged: {
+                    root.dragging = active
+                    if (active) {
+                        pendingSteps = 0
+                        Mixer.beginChannelReorder()
+                    } else {
+                        root.dragOffsetX = 0
+                        if (pendingSteps !== 0)
+                            Mixer.moveChannelLiveBy(root.row, pendingSteps)
+                        Mixer.endChannelReorder()
+                    }
+                }
+
+                onCentroidChanged: {
+                    if (!active) return
+                    const step = root.stripStep
+                    const minRow = -root.row
+                    const maxRow = Mixer.rowCount() - 1 - root.row
+                    const travelled = centroid.position.x - centroid.pressPosition.x
+                    // A half-step of "give" past the last strip it can still
+                    // promise to land on, so the drag does not feel like it
+                    // hit a hard wall the instant it runs out of neighbours.
+                    root.dragOffsetX = Math.max(minRow * step - step / 2,
+                                       Math.min(maxRow * step + step / 2, travelled))
+                    pendingSteps = Math.max(minRow, Math.min(maxRow,
+                                            Math.round(root.dragOffsetX / step)))
+                }
+            }
         }
     }
 }

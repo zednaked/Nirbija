@@ -1594,17 +1594,50 @@ void MixerModel::duplicateChannel(int row) {
   }
 }
 
+void MixerModel::swapRows(int row, int target) {
+  beginMoveRows({}, row, row, {}, target > row ? target + 1 : target);
+  std::swap(channels_[row], channels_[target]);
+  endMoveRows();
+}
+
 void MixerModel::moveChannel(int row, int direction) {
   const int target = row + direction;
   if (row < 0 || target < 0 || row >= static_cast<int>(channels_.size()) ||
       target >= static_cast<int>(channels_.size()))
     return;
   pushUndo();
-  beginMoveRows({}, row, row, {}, target > row ? target + 1 : target);
-  std::swap(channels_[row], channels_[target]);
-  endMoveRows();
+  swapRows(row, target);
   markDirty();
 }
+
+void MixerModel::beginChannelReorder() { pushUndo(); }
+
+// The whole distance a drag travelled, applied in one call rather than one
+// call per strip crossed. Two reasons: moveChannel() pays for an undo
+// snapshot on every call - snapshot() parks the audio graph and round-trips
+// the whole session through disk (see collectInsertStates()) - which turned
+// a fast drag into a burst of audio dropouts; and calling back into QML once
+// per strip crossed meant reading `row` back from the Repeater's `index` in
+// between calls, which does not necessarily settle before the next call, so
+// steps landed on the wrong row and the strip visibly jumped mid-drag. Doing
+// every swap here, against indices this function owns for its whole
+// duration, needs neither.
+void MixerModel::moveChannelLiveBy(int row, int steps) {
+  int current = row;
+  const int dir = steps > 0 ? 1 : -1;
+  const int count = steps > 0 ? steps : -steps;
+  for (int i = 0; i < count; ++i) {
+    const int target = current + dir;
+    if (current < 0 || target < 0 ||
+        current >= static_cast<int>(channels_.size()) ||
+        target >= static_cast<int>(channels_.size()))
+      break;
+    swapRows(current, target);
+    current = target;
+  }
+}
+
+void MixerModel::endChannelReorder() { markDirty(); }
 
 void MixerModel::setInsertBypassed(int row, int slot, bool on) {
   ChannelStrip* strip = stripFor(row);

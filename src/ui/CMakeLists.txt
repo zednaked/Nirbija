@@ -65,6 +65,16 @@ endforeach()
 # fader - collapsed to nothing instead of just drawing at the wrong size.
 set_source_files_properties(qml/Px.qml PROPERTIES QT_QML_SINGLETON_TYPE true)
 
+# qt6-declarative 6.11.2 miscompiles any two-element array literal bound to a
+# list-typed QML property (e.g. Main.qml's `sequences: [StandardKey.ZoomIn,
+# "Ctrl+="]`) when qmlcachegen compiles it ahead of time to C++: the generated
+# QVariantList{...} init aborts on a Q_ASSERT inside QList<QVariant>'s array
+# ops the moment the binding first runs, crashing the app on every launch.
+# Main.qml is the only file with that pattern, so it alone falls back to
+# interpreted/JIT bytecode rather than paying that cost app-wide; drop this
+# once upstream fixes it.
+set_source_files_properties(qml/Main.qml PROPERTIES QT_QML_SKIP_CACHEGEN true)
+
 # The models live in their own library so a headless test can drive them
 # without the QML front end. The QML module is declared on that library rather
 # than on the executable: the C++ types QML uses (Mixer, Skin, PluginFilterModel)

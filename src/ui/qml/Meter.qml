@@ -80,7 +80,7 @@ Item {
         Rectangle {
             color: Skin.meterTrack
             anchors.top: parent.top
-            anchors.left: parent.left
+            anchors.left: root.vertical ? parent.left : undefined
             anchors.right: root.vertical ? parent.right : undefined
             anchors.bottom: root.vertical ? undefined : parent.bottom
             width: root.vertical ? parent.width

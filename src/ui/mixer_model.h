@@ -213,6 +213,12 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE void duplicateChannel(int row);
   Q_INVOKABLE void moveChannel(int row, int direction);
 
+  // The drag-to-reorder trio, called once each per gesture rather than once
+  // per strip crossed - see moveChannelLiveBy() in mixer_model.cpp for why.
+  Q_INVOKABLE void beginChannelReorder();
+  Q_INVOKABLE void moveChannelLiveBy(int row, int steps);
+  Q_INVOKABLE void endChannelReorder();
+
   Q_INVOKABLE void setInsertBypassed(int row, int slot, bool on);
   Q_INVOKABLE bool insertBypassed(int row, int slot) const;
   Q_INVOKABLE void setInsertPostFader(int row, int slot, bool on);
@@ -474,6 +480,7 @@ class MixerModel : public QAbstractListModel {
   };
 
   ChannelStrip* stripFor(int row) const;
+  void swapRows(int row, int target);
   PluginInstance* insertFor(int row, int slot) const;
 
   // Adds an insert and reports which slot took it, or -1. addInsert and

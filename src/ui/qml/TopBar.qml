@@ -240,8 +240,15 @@ Rectangle {
         StripButton {
             Layout.preferredWidth: Px.px(42)
             label: qsTr("DIM")
+            // Was hard to tell this had done anything: with no activeColor
+            // of its own it lit up the same generic blue as plain focus, a
+            // 12 dB cut you can only hear on a loud source through real
+            // speakers - on a quiet one, or through this box's own meters
+            // sitting well under 0 dBFS already, the button was the only
+            // sign it fired at all, so it needs its own unmistakable colour.
             tip: qsTr("Dim the master by 12 dB without moving the fader.")
             active: Mixer.masterDim
+            activeColor: Skin.focus
             onClicked: Mixer.toggleMasterDim()
         }
         StripButton {
