@@ -588,7 +588,10 @@ Popup {
                 return i
             }
         }
-        root.setLanePitch(root.focusedLane, midi)
+        // Every lane is already carrying a pattern of its own: same fallback
+        // as an out-of-kit pitch, land it on the focused lane as a locked
+        // step rather than retuning — and silently moving — that lane's
+        // whole pattern out from under whatever it was already playing.
         return root.focusedLane
     }
 
@@ -1749,7 +1752,7 @@ Popup {
             Text {
                 text: qsTr("pads %1–%2 / %3 · %4")
                     .arg(root.padWindow + 1)
-                    .arg(Math.min(root.padWindow + root.laneCount, root.targetPads.length))
+                    .arg(Math.min(root.padWindow + root.laneCount, root.rowPitches.length))
                     .arg(root.rowPitches.length)
                     .arg(root.targetName)
                 color: Skin.textDim

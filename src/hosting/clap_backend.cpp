@@ -18,6 +18,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace nirbija {
@@ -209,28 +210,53 @@ class ClapInstance : public PluginInstance {
         plugin_->get_extension(plugin_, CLAP_EXT_LATENCY));
     refresh_latency();
 
-    if (!plugin_->start_processing(plugin_)) {
-      plugin_->deactivate(plugin_);
-      active_ = false;
-      return false;
-    }
-    processing_ = true;
+    want_processing_.store(true, std::memory_order_release);
     return true;
   }
 
   void deactivate() override {
     if (plugin_ == nullptr || !active_) return;
-    if (processing_) {
-      plugin_->stop_processing(plugin_);
-      processing_ = false;
+    want_processing_.store(false, std::memory_order_release);
+
+    // Wait for process() to service the stop request (and thus call
+    // stop_processing on the audio thread) before calling plugin_->deactivate,
+    // which CLAP requires to happen only once processing has stopped. If
+    // nothing is calling process() at all, there is nothing to wait for.
+    const uint64_t seen = process_generation_.load(std::memory_order_acquire);
+    bool moving = false;
+    for (int spins = 0; spins < 5 && !moving; ++spins) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      moving = process_generation_.load(std::memory_order_acquire) > seen;
     }
+    if (moving) {
+      for (int spins = 0;
+           spins < 100 && processing_.load(std::memory_order_acquire);
+           ++spins) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      }
+    }
+
     plugin_->deactivate(plugin_);
     active_ = false;
   }
 
   void process(const float* const* inputs, float* const* outputs,
                uint32_t frames) override {
-    if (!processing_) return;
+    process_generation_.fetch_add(1, std::memory_order_release);
+
+    const bool want = want_processing_.load(std::memory_order_acquire);
+    bool proc = processing_.load(std::memory_order_relaxed);
+    if (want && !proc) {
+      proc = plugin_->start_processing(plugin_);
+      processing_.store(proc, std::memory_order_release);
+      // Don't hammer a plugin that refuses to start on every single block.
+      if (!proc) want_processing_.store(false, std::memory_order_release);
+    } else if (!want && proc) {
+      plugin_->stop_processing(plugin_);
+      proc = false;
+      processing_.store(false, std::memory_order_release);
+    }
+    if (!proc) return;
 
     // Feed every plugin input, duplicating the last strip channel when the
     // plugin is wider than the strip.
@@ -689,7 +715,12 @@ class ClapInstance : public PluginInstance {
   // mid-read, so instead this retries until the generation it started with
   // is still current when it finishes.
   void refresh_note_names() const {
-    for (;;) {
+    // Bounded: a plugin that bumps the generation from its own thread on
+    // every block could otherwise never let this converge, spinning the
+    // calling (UI/main) thread forever. Settle for a possibly-stale result
+    // after a few tries rather than freeze.
+    static constexpr int kMaxAttempts = 8;
+    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
       const uint64_t gen = note_names_dirty_gen_.load(std::memory_order_acquire);
       note_names_.clear();
       if (plugin_ != nullptr) {
@@ -715,6 +746,8 @@ class ClapInstance : public PluginInstance {
         note_names_cached_gen_ = gen;
         return;
       }
+      // Still moving: note_names_cached_gen_ is left stale on purpose, so
+      // the next call (if any) will simply try again, bounded the same way.
     }
   }
 
@@ -813,7 +846,13 @@ class ClapInstance : public PluginInstance {
   std::atomic<bool> callback_requested_{false};
 
   bool active_ = false;
-  bool processing_ = false;
+  // start_processing/stop_processing are [audio-thread] per the CLAP spec,
+  // so activate()/deactivate() (called from the UI/control thread) only
+  // request the state; process() (the audio thread) is what actually calls
+  // them, servicing the request at the top of the next block.
+  std::atomic<bool> want_processing_{false};
+  std::atomic<bool> processing_{false};
+  std::atomic<uint64_t> process_generation_{0};
   int strip_channels_ = 2;
   int64_t steady_time_ = 0;
   std::atomic<uint32_t> latency_{0};

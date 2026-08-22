@@ -529,11 +529,19 @@ class Lv2Instance : public PluginInstance {
     // instance-access to this handle. Grow buffers and reconnect instead.
     if (instance_ != nullptr) {
       if (max_block_frames > max_block_frames_) {
+        // Reallocating buffers instance_ is connected to races the audio
+        // thread the same way a state restore does, so borrow that guard:
+        // silence process() and wait for it to be seen before touching them.
+        restoring_.store(true, std::memory_order_release);
+        wait_until_parked();
         max_block_frames_ = max_block_frames;
         for (auto& buffer : audio_buffers_)
           buffer.assign(max_block_frames_, 0.0f);
+        connect_all();
+        restoring_.store(false, std::memory_order_release);
+      } else {
+        connect_all();
       }
-      connect_all();
       return true;
     }
     max_block_frames_ = max_block_frames;
@@ -744,7 +752,14 @@ class Lv2Instance : public PluginInstance {
     // prove it is out of lilv_instance_run, and only then is the instance
     // deactivated, restored with the full feature set, and brought back.
     restoring_.store(true, std::memory_order_release);
-    wait_until_parked();
+    const bool parked = wait_until_parked();
+    if (!parked) {
+      // Never confirmed the audio thread left lilv_instance_run: restoring
+      // now would race it, so back out instead of risking a use-after-free.
+      restoring_.store(false, std::memory_order_release);
+      lilv_state_free(state);
+      return false;
+    }
 
     lilv_instance_deactivate(instance_);
     lilv_state_restore(state, instance_, &Lv2Instance::set_port_value, this, 0,
@@ -793,7 +808,10 @@ class Lv2Instance : public PluginInstance {
   // process() is not being called — the host graph is already parked, or there
   // is no audio thread. That is the common case on session load, and the old
   // unconditional 100 x 2 ms spin charged it 200 ms for every plugin.
-  void wait_until_parked() {
+  // Returns whether the audio thread was confirmed parked (or was never
+  // running process() at all). False means the wait timed out with the
+  // audio thread still moving, and the caller must not touch the instance.
+  bool wait_until_parked() {
     const uint64_t seen = processed_generation_.load(std::memory_order_acquire);
 
     bool moving = false;
@@ -801,7 +819,7 @@ class Lv2Instance : public PluginInstance {
       std::this_thread::sleep_for(std::chrono::milliseconds(2));
       moving = processed_generation_.load(std::memory_order_acquire) > seen;
     }
-    if (!moving) return;  // nothing is calling process(); nothing to wait for
+    if (!moving) return true;  // nothing is calling process(); nothing to wait for
 
     for (int spins = 0;
          spins < 100 &&
@@ -809,6 +827,7 @@ class Lv2Instance : public PluginInstance {
          ++spins) {
       std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
+    return processed_generation_.load(std::memory_order_acquire) >= seen + 2;
   }
 
   static constexpr size_t kAtomBufferBytes = 4096;
@@ -995,7 +1014,12 @@ class Lv2Instance : public PluginInstance {
   // at the end would clobber an invalidation that landed mid-read, so this
   // retries until the generation it started with is still current.
   void refresh_note_names() const {
-    for (;;) {
+    // Bounded: Ardour's midnam extension makes no threading promise, so a
+    // plugin that keeps bumping the generation could otherwise spin the
+    // calling thread forever. Settle for a possibly-stale result after a
+    // few tries rather than freeze.
+    static constexpr int kMaxAttempts = 8;
+    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
       const uint64_t gen = note_names_dirty_gen_.load(std::memory_order_acquire);
       note_names_.clear();
       if (instance_ != nullptr && midnam_iface_ != nullptr &&
@@ -1010,6 +1034,8 @@ class Lv2Instance : public PluginInstance {
         note_names_cached_gen_ = gen;
         return;
       }
+      // Still moving: note_names_cached_gen_ is left stale on purpose, so
+      // the next call (if any) will simply try again, bounded the same way.
     }
   }
 

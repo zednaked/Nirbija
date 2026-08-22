@@ -76,6 +76,12 @@ Popup {
         const failure = Mixer.insertScriptError(row, slot)
         root.failed = failure.length > 0
         root.message = failure.length > 0 ? failure : qsTr("running")
+        // The knobs must show what the insert actually holds, not wherever
+        // they were left the last time this popup was open.
+        for (const entry of Mixer.insertParameters(row, slot)) {
+            const knobItem = knobRepeater.itemAt(entry.id)
+            if (knobItem) knobItem.value = entry.value
+        }
         if (!root.positioned) {
             root.x = Math.round((Overlay.overlay.width - root.width) / 2)
             root.y = Math.round((Overlay.overlay.height - root.height) / 2)
@@ -169,6 +175,7 @@ Popup {
             columnSpacing: Skin.spacing
 
             Repeater {
+                id: knobRepeater
                 model: 4
 
                 ValueTrack {

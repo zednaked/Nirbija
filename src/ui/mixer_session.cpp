@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include <cstdio>
+#include <vector>
 
 #include "mixer_model.h"
 
@@ -98,17 +99,18 @@ QVector<QVector<QByteArray>> MixerModel::collectInsertStates() const {
   states.resize(static_cast<qsizetype>(channels_.size()));
 
   auto* self = const_cast<MixerModel*>(this);
-  self->engine_.park_graph();
-  for (size_t row = 0; row < channels_.size(); ++row) {
-    ChannelStrip* strip = stripFor(static_cast<int>(row));
-    if (strip == nullptr) continue;
-    for (size_t slot = 0; slot < strip->insert_count(); ++slot) {
-      PluginInstance* insert = strip->insert_at(slot);
-      if (insert == nullptr) continue;  // a hole left by a removal
-      const std::vector<uint8_t> blob = insert->save_state();
-      states[static_cast<qsizetype>(row)].append(
-          QByteArray(reinterpret_cast<const char*>(blob.data()),
-                     static_cast<qsizetype>(blob.size())));
+  if (self->engine_.park_graph()) {
+    for (size_t row = 0; row < channels_.size(); ++row) {
+      ChannelStrip* strip = stripFor(static_cast<int>(row));
+      if (strip == nullptr) continue;
+      for (size_t slot = 0; slot < strip->insert_count(); ++slot) {
+        PluginInstance* insert = strip->insert_at(slot);
+        if (insert == nullptr) continue;  // a hole left by a removal
+        const std::vector<uint8_t> blob = insert->save_state();
+        states[static_cast<qsizetype>(row)].append(
+            QByteArray(reinterpret_cast<const char*>(blob.data()),
+                       static_cast<qsizetype>(blob.size())));
+      }
     }
   }
   self->engine_.unpark_graph();
@@ -388,12 +390,7 @@ int MixerModel::restoreChannel(const QJsonObject& entry, QStringList* missing) {
 
   // Buses are added in the same pass, and they keep their order because a bus
   // may only feed one that comes after it.
-  if (is_bus) {
-    addBus(name);
-  } else {
-    addChannel(name, width);
-  }
-  const int row = rowCount() - 1;
+  const int row = is_bus ? addBus(name) : addChannel(name, width);
   if (row < 0) return -1;  // the graph is full
 
   setGain(row, entry[QStringLiteral("gain")].toDouble(1.0));
@@ -582,9 +579,13 @@ bool MixerModel::loadChannelFrom(const QUrl& file) {
   const QJsonObject entry = channels.first().toObject();
 
   QStringList missing;
-  engine_.park_graph();
-  const int row = restoreChannel(entry, &missing);
+  const bool parked = engine_.park_graph();
+  const int row = parked ? restoreChannel(entry, &missing) : -1;
   engine_.unpark_graph();
+  if (!parked) {
+    emit errorOccurred(tr("The audio graph would not settle; try again"));
+    return false;
+  }
   if (row < 0) {
     emit errorOccurred(tr("There is no room for another strip"));
     return false;
@@ -611,7 +612,10 @@ bool MixerModel::loadChannelFrom(const QUrl& file) {
 
 bool MixerModel::readSession(const QString& target) {
   if (!engine_.running()) return false;
-  engine_.park_graph();
+  if (!engine_.park_graph()) {
+    engine_.unpark_graph();
+    return false;
+  }
 
   QFile file(target);
   if (!file.open(QIODevice::ReadOnly)) {
@@ -637,16 +641,17 @@ bool MixerModel::readSession(const QString& target) {
   restoring_ = true;
 
   const QJsonArray channels = root[QStringLiteral("channels")].toArray();
-  for (const QJsonValue& value : channels) {
-      restoreChannel(value.toObject(), nullptr);
-  }
+  std::vector<int> rows;
+  rows.reserve(static_cast<size_t>(channels.size()));
+  for (const QJsonValue& value : channels)
+    rows.push_back(restoreChannel(value.toObject(), nullptr));
 
   // Destinations and sends last: both can name a bus that appears later in the
-  // list, and only now is every row in place.
-  int row = 0;
-  for (const QJsonValue& value : channels) {
-    restoreChannelLinks(row, value.toObject());
-    ++row;
+  // list, and only now is every row in place. An entry that found no room
+  // (the graph was already full) has no row to wire up.
+  for (int i = 0; i < static_cast<int>(channels.size()); ++i) {
+    if (rows[static_cast<size_t>(i)] < 0) continue;
+    restoreChannelLinks(rows[static_cast<size_t>(i)], channels[i].toObject());
   }
 
   const double tempo = root[QStringLiteral("tempo")].toDouble(120.0);

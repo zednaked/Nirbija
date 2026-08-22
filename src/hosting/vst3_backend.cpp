@@ -131,9 +131,11 @@ struct MemStream : IBStream {
   }
 
   tresult PLUGIN_API write(void* buffer, int32 bytes, int32* written) override {
+    if (bytes < 0 || cursor < 0 || (bytes > 0 && buffer == nullptr))
+      return kInvalidArgument;
     const auto* src = static_cast<const uint8_t*>(buffer);
     if (cursor + bytes > static_cast<int64>(data->size()))
-      data->resize(cursor + bytes);
+      data->resize(static_cast<size_t>(cursor + bytes));
     std::copy_n(src, bytes, data->data() + cursor);
     cursor += bytes;
     if (written != nullptr) *written = bytes;
@@ -655,7 +657,9 @@ class Vst3Instance : public PluginInstance {
     if (midi_mapping_ != nullptr) midi_mapping_->release();
 
     if (controller_ != nullptr) {
-      controller_->setComponentHandler(nullptr);
+      // Only undo what create() actually did: setComponentHandler was never
+      // called on a distinct controller whose own initialize() failed.
+      if (controller_handler_set_) controller_->setComponentHandler(nullptr);
       // A combined component/controller is terminated once, through the
       // component; its controller reference still came from queryInterface and
       // still has to go back. Never terminate a failed initialize.
@@ -693,7 +697,10 @@ class Vst3Instance : public PluginInstance {
     if (controller_ == nullptr)
       component_->queryInterface(Vst::IEditController_iid,
                                  reinterpret_cast<void**>(&controller_));
-    if (controller_ != nullptr) controller_->setComponentHandler(&handler_);
+    if (controller_ != nullptr) {
+      controller_->setComponentHandler(&handler_);
+      controller_handler_set_ = true;
+    }
 
     // A split component and controller talk through connection points; the
     // host's job is only to introduce them.
@@ -764,7 +771,13 @@ class Vst3Instance : public PluginInstance {
       component_->activateBus(Vst::kEvent, Vst::kInput, 0, true);
     component_->activateBus(Vst::kEvent, Vst::kOutput, 0, true);
 
-    if (component_->setActive(true) != kResultOk) return false;
+    if (component_->setActive(true) != kResultOk) {
+      // Roll back the bus activations above so a retry (or the destructor's
+      // implicit deactivate) doesn't leave the component's own bookkeeping
+      // thinking buses are active when setActive never confirmed it.
+      deactivate_buses();
+      return false;
+    }
     processor_->setProcessing(true);
     refresh_latency();
     active_ = true;
@@ -775,7 +788,18 @@ class Vst3Instance : public PluginInstance {
     if (!active_) return;
     processor_->setProcessing(false);
     component_->setActive(false);
+    deactivate_buses();
     active_ = false;
+  }
+
+  void deactivate_buses() {
+    for (size_t i = 0; i < input_buses_.size(); ++i)
+      component_->activateBus(Vst::kAudio, Vst::kInput, static_cast<int32>(i), false);
+    for (size_t i = 0; i < output_buses_.size(); ++i)
+      component_->activateBus(Vst::kAudio, Vst::kOutput, static_cast<int32>(i), false);
+    if (has_event_input_)
+      component_->activateBus(Vst::kEvent, Vst::kInput, 0, false);
+    component_->activateBus(Vst::kEvent, Vst::kOutput, 0, false);
   }
 
   void set_transport(const TransportInfo& transport) override {
@@ -1139,6 +1163,7 @@ class Vst3Instance : public PluginInstance {
   bool controller_distinct_ = false;
   bool component_inited_ = false;
   bool controller_inited_ = false;
+  bool controller_handler_set_ = false;
   bool active_ = false;
   bool has_event_input_ = false;
   int strip_channels_ = 2;

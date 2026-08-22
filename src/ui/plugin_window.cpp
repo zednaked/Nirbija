@@ -286,8 +286,11 @@ void PluginWindow::pump() {
   if (display_ == nullptr) return;
   if (connection_lost_) {
     qWarning("editor '%s': conexao X morreu (IO error)", qUtf8Printable(title_));
-    // The display died under us; everything on it is gone already.
+    // The display died under us; everything X-side is gone already, but the
+    // plugin's own editor teardown (detach) does not depend on X11 being
+    // alive and must still run, or it never will for this instance's life.
     timer_.stop();
+    if (attached_ && gui_ != nullptr) gui_->detach();
     attached_ = false;
     window_ = 0;
     display_ = nullptr;

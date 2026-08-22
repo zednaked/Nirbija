@@ -186,7 +186,7 @@ void ArpeggiatorInstance::play_position(size_t position, uint32_t frame) {
   const auto send = [&](const Held& held, int octave) {
     const int pitch = std::clamp(held.note + octave * 12 + transpose, 0, 127);
     emit(frame, kNoteOn, static_cast<uint8_t>(pitch), held.velocity);
-    if (sounding_count_ < kMaxHeld)
+    if (sounding_count_ < kMaxSounding)
       sounding_[sounding_count_++] = static_cast<uint8_t>(pitch);
   };
 
@@ -281,7 +281,9 @@ void ArpeggiatorInstance::process(const float* const*, float* const*,
 size_t ArpeggiatorInstance::take_midi_output(MidiEvent* out, size_t capacity) {
   std::sort(events_.begin(), events_.begin() + event_count_,
             [](const MidiEvent& a, const MidiEvent& b) {
-              return a.frame < b.frame;
+              if (a.frame != b.frame) return a.frame < b.frame;
+              // Off before on when a repeated pitch turns over on this frame.
+              return (a.data[0] & 0xf0) < (b.data[0] & 0xf0);
             });
   const size_t count = std::min(event_count_, capacity);
   std::copy_n(events_.begin(), count, out);

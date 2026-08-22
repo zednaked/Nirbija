@@ -107,7 +107,10 @@ class ArpeggiatorInstance : public PluginInstance {
   std::array<bool, 128> key_held_{};
   bool restart_on_next_ = false;
 
-  std::array<uint8_t, kMaxHeld> sounding_{};
+  // Chord mode can sound every held note across every octave at once, so this
+  // needs held * octaves slots, not just held (octaves tops out at 4).
+  static constexpr size_t kMaxSounding = kMaxHeld * 4;
+  std::array<uint8_t, kMaxSounding> sounding_{};
   size_t sounding_count_ = 0;
   double sounding_off_ = 0.0;
 

@@ -166,10 +166,11 @@ void FxPadInstance::attack(int pad) {
       // Capture the longest slice the pad can ask for. Playback length
       // then follows the amount, so dragging after the press shortens
       // the loop instead of recapturing and clicking.
-      stutter_cap_ = std::max(32u, static_cast<uint32_t>(fpb * 0.5f));
+      const size_t n = stutter_[0].data.size();
+      stutter_cap_ = std::min(static_cast<uint32_t>(n),
+                               std::max(32u, static_cast<uint32_t>(fpb * 0.5f)));
       stutter_len_ = stutter_cap_;
       stutter_pos_ = 0;
-      const size_t n = stutter_[0].data.size();
       for (int ch = 0; ch < 2; ++ch) {
         for (uint32_t i = 0; i < stutter_cap_ && i < n; ++i)
           stutter_[ch].data[i] = hist_[ch].tap(stutter_cap_ - i);

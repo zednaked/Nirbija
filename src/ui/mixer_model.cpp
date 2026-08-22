@@ -218,7 +218,7 @@ QString MixerModel::nextAccent() const {
   return kAccents[static_cast<qsizetype>(std::distance(used.begin(), least))];
 }
 
-void MixerModel::addChannel(const QString& name, int channels) {
+int MixerModel::addChannel(const QString& name, int channels) {
   // Mono or stereo, whatever the caller or the session file said.
   channels = std::clamp(channels, 1, kMaxStripChannels);
   pushUndo();
@@ -226,14 +226,14 @@ void MixerModel::addChannel(const QString& name, int channels) {
   // reused, so removing a channel and adding another cannot produce two
   // channels with the same name — and the name then matches the JACK ports.
   const size_t index = engine_.add_channel("channel", channels);
-  if (index == kMaxChannels) return;
+  if (index == kMaxChannels) return -1;
 
   const QString label =
       name.isEmpty() ? tr("Channel %1").arg(index + 1) : name;
   engine_.graph().channel(index).set_name(label.toStdString());
 
-  beginInsertRows({}, static_cast<int>(channels_.size()),
-                  static_cast<int>(channels_.size()));
+  const int row = static_cast<int>(channels_.size());
+  beginInsertRows({}, row, row);
   ChannelUi channel;
   channel.slot = index;
   channel.name = label;
@@ -245,6 +245,7 @@ void MixerModel::addChannel(const QString& name, int channels) {
   channels_.push_back(std::move(channel));
   endInsertRows();
   markDirty();
+  return row;
 }
 
 void MixerModel::removeChannel(int row) {
@@ -322,15 +323,15 @@ ChannelStrip* MixerModel::stripFor(int row) const {
   return &graph.channel(channel.slot);
 }
 
-void MixerModel::addBus(const QString& name) {
+int MixerModel::addBus(const QString& name) {
   const size_t index = engine_.add_bus("bus");
-  if (index == kMaxBuses) return;
+  if (index == kMaxBuses) return -1;
 
   const QString label = name.isEmpty() ? tr("Bus %1").arg(index + 1) : name;
   engine_.graph().bus(index).set_name(label.toStdString());
 
-  beginInsertRows({}, static_cast<int>(channels_.size()),
-                  static_cast<int>(channels_.size()));
+  const int row = static_cast<int>(channels_.size());
+  beginInsertRows({}, row, row);
   ChannelUi bus;
   bus.slot = index;
   bus.is_bus = true;
@@ -343,14 +344,14 @@ void MixerModel::addBus(const QString& name) {
   channels_.push_back(std::move(bus));
   endInsertRows();
   markDirty();
+  return row;
 }
 
 int MixerModel::sendRowToNewBus(int row) {
   if (row < 0 || row >= static_cast<int>(channels_.size())) return -1;
 
-  addBus(QString());
-  const int bus_row = rowCount() - 1;
-  if (bus_row < 0 || !channels_[bus_row].is_bus) return -1;
+  const int bus_row = addBus(QString());
+  if (bus_row < 0) return -1;
 
   setDestination(row, static_cast<int>(channels_[bus_row].slot));
   return bus_row;
@@ -1170,6 +1171,7 @@ QString MixerModel::recordingsUrl() {
 }
 
 void MixerModel::learnGain(int row) {
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return;
   pending_learn_ = {true,
                     {.kind = MidiMapping::Kind::Gain,
                      .row = row,
@@ -1180,6 +1182,7 @@ void MixerModel::learnGain(int row) {
 }
 
 void MixerModel::learnPan(int row) {
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return;
   pending_learn_ = {true,
                     {.kind = MidiMapping::Kind::Pan,
                      .row = row,
@@ -1190,6 +1193,7 @@ void MixerModel::learnPan(int row) {
 }
 
 void MixerModel::learnMute(int row) {
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return;
   pending_learn_ = {true,
                     {.kind = MidiMapping::Kind::Mute,
                      .row = row,
@@ -1201,6 +1205,7 @@ void MixerModel::learnMute(int row) {
 
 void MixerModel::learnInsertParam(int row, int slot, int param, qreal min,
                                   qreal max) {
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return;
   pending_learn_ = {true,
                     {.kind = MidiMapping::Kind::Param,
                      .row = row,
@@ -1535,26 +1540,24 @@ void MixerModel::duplicateChannel(int row) {
   std::vector<bool> bypassed;
   std::vector<bool> post_fader;
   if (ChannelStrip* strip = stripFor(row)) {
-    engine_.park_graph();
-    for (size_t slot = 0; slot < strip->insert_count(); ++slot) {
-      PluginInstance* insert = strip->insert_at(slot);
-      if (insert == nullptr) continue;  // a hole left by a removal
-      const PluginDescriptor& descriptor = insert->descriptor();
-      plugin_rows.push_back(plugins_->rowFor(descriptor.format, descriptor.uid));
-      blobs.push_back(insert->save_state());
-      bypassed.push_back(strip->insert_bypassed(slot));
-      post_fader.push_back(strip->insert_post_fader(slot));
+    if (engine_.park_graph()) {
+      for (size_t slot = 0; slot < strip->insert_count(); ++slot) {
+        PluginInstance* insert = strip->insert_at(slot);
+        if (insert == nullptr) continue;  // a hole left by a removal
+        const PluginDescriptor& descriptor = insert->descriptor();
+        plugin_rows.push_back(plugins_->rowFor(descriptor.format, descriptor.uid));
+        blobs.push_back(insert->save_state());
+        bypassed.push_back(strip->insert_bypassed(slot));
+        post_fader.push_back(strip->insert_post_fader(slot));
+      }
     }
     engine_.unpark_graph();
   }
 
-  if (src.is_bus) {
-    addBus(src.name + QStringLiteral(" copy"));
-  } else {
-    addChannel(src.name + QStringLiteral(" copy"), src.width);
-  }
-  const int dest = rowCount() - 1;
-  if (dest == row) return;  // the graph was full
+  const int dest = src.is_bus
+      ? addBus(src.name + QStringLiteral(" copy"))
+      : addChannel(src.name + QStringLiteral(" copy"), src.width);
+  if (dest < 0) return;  // the graph was full
 
   setGain(dest, src.gain);
   setPan(dest, src.pan);
@@ -1565,19 +1568,20 @@ void MixerModel::duplicateChannel(int row) {
 
   // The chain, in order, each plugin handed back the state its twin was in.
   // A copy of a strip that arrives empty is not a copy of anything.
-  engine_.park_graph();
-  for (size_t i = 0; i < plugin_rows.size(); ++i) {
-    if (plugin_rows[i] < 0) continue;  // no longer installed
-    const int slot = placeInsert(dest, plugin_rows[i], -1);
-    if (slot < 0) break;  // the chain is full
-    setInsertBypassed(dest, slot, bypassed[i]);
-    setInsertPostFader(dest, slot, post_fader[i]);
-    if (blobs[i].empty()) continue;
+  if (engine_.park_graph()) {
+    for (size_t i = 0; i < plugin_rows.size(); ++i) {
+      if (plugin_rows[i] < 0) continue;  // no longer installed
+      const int slot = placeInsert(dest, plugin_rows[i], -1);
+      if (slot < 0) break;  // the chain is full
+      setInsertBypassed(dest, slot, bypassed[i]);
+      setInsertPostFader(dest, slot, post_fader[i]);
+      if (blobs[i].empty()) continue;
 
-    ChannelStrip* strip = stripFor(dest);
-    if (strip == nullptr) break;
-    PluginInstance* insert = strip->insert_at(static_cast<size_t>(slot));
-    if (insert != nullptr) insert->load_state(blobs[i]);
+      ChannelStrip* strip = stripFor(dest);
+      if (strip == nullptr) break;
+      PluginInstance* insert = strip->insert_at(static_cast<size_t>(slot));
+      if (insert != nullptr) insert->load_state(blobs[i]);
+    }
   }
   engine_.unpark_graph();
 
@@ -1772,11 +1776,12 @@ void MixerModel::setLooperRecord(int row, int slot, bool on) {
   if (on) {
     // Snapshot before the audio thread starts writing. Parked so the copy
     // cannot tear a sample the process callback is mid-overdub.
-    engine_.park_graph();
-    if (looper->loop_closed())
-      looper->capture_undo();
-    else
-      looper->capture_undo_empty();
+    if (engine_.park_graph()) {
+      if (looper->loop_closed())
+        looper->capture_undo();
+      else
+        looper->capture_undo_empty();
+    }
     engine_.unpark_graph();
   }
   looper->set_parameter(0, on ? 1.0 : 0.0);
@@ -1791,9 +1796,10 @@ void MixerModel::setLooperPlay(int row, int slot, bool on) {
 void MixerModel::clearLooper(int row, int slot) {
   auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
   if (looper == nullptr) return;
-  engine_.park_graph();
-  looper->capture_undo();
-  looper->set_parameter(2, 1.0);
+  if (engine_.park_graph()) {
+    looper->capture_undo();
+    looper->set_parameter(2, 1.0);
+  }
   engine_.unpark_graph();
   markDirty();
 }
@@ -1811,8 +1817,7 @@ bool MixerModel::looperCanRedo(int row, int slot) const {
 void MixerModel::undoLooper(int row, int slot) {
   auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
   if (looper == nullptr || !looper->can_undo()) return;
-  engine_.park_graph();
-  looper->undo();
+  if (engine_.park_graph()) looper->undo();
   engine_.unpark_graph();
   markDirty();
 }
@@ -1820,8 +1825,7 @@ void MixerModel::undoLooper(int row, int slot) {
 void MixerModel::redoLooper(int row, int slot) {
   auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
   if (looper == nullptr || !looper->can_redo()) return;
-  engine_.park_graph();
-  looper->redo();
+  if (engine_.park_graph()) looper->redo();
   engine_.unpark_graph();
   markDirty();
 }
@@ -1829,9 +1833,10 @@ void MixerModel::redoLooper(int row, int slot) {
 void MixerModel::multiplyLooper(int row, int slot) {
   auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
   if (looper == nullptr || !looper->can_multiply()) return;
-  engine_.park_graph();
-  looper->capture_undo();
-  looper->multiply();
+  if (engine_.park_graph()) {
+    looper->capture_undo();
+    looper->multiply();
+  }
   engine_.unpark_graph();
   markDirty();
 }

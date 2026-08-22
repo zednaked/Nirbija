@@ -152,8 +152,9 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE static QString recordingsPath();
   Q_INVOKABLE void rewind();
 
-  Q_INVOKABLE void addChannel(const QString& name, int channels);
-  Q_INVOKABLE void addBus(const QString& name);
+  // Returns the new row, or -1 if the graph is already at its channel/bus cap.
+  Q_INVOKABLE int addChannel(const QString& name, int channels);
+  Q_INVOKABLE int addBus(const QString& name);
 
   // Makes a bus and points `row` at it, which is how one strip comes to feed
   // another. Returns the new bus's row.
