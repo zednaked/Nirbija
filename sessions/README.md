@@ -170,6 +170,38 @@ too expensive to repeat) — four channels:
 - **Room** (bus) — one shared `nirbija.fxpad` Reverb (90% wet), fed by a
   send from each of the three channels.
 
+## jam-emissaries.json
+
+Berlin-school jam after Radio Massacre International's *Emissaries*
+(2005) — not a transcription (RMI improvises live), built from their
+credited rig instead: MemoryMoog/Moog Source pulses, a Mellotron wash,
+sparse hand percussion, and an SH-3A-style repeater on the echo bus.
+Tempo 78, key D dorian. `calf`, `dragonfly-reverb-lv2` and `padthv1-lv2`
+were installed (pacman, official `extra` repo) specifically for this one —
+everything else in this file already ran on plugins other jams here
+reference but this machine didn't have.
+
+- **Pulse** / **Weave** — two `nirbija.stepseq` → Odin2 channels, the MAQ
+  16/3 trick: 16 steps and 18 steps at the same 1/16 division, so the two
+  lines drift in and out of phase instead of ever repeating exactly —
+  neither pattern itself changes, only how they land against each other.
+  They realign every 9 bars (`lcm(16,18)/16`).
+- **Mallets** — `nirbija.stepseq` → avldrums Black Pearl, mostly silent:
+  rim on the off-beats, one soft cowbell, a single ghost hat. Color, not a
+  groove.
+- **Mellotron** — padthv1 → Calf Multi Chorus, played live from the
+  keyboard. padthv1 is additive, not sample-based, but it's the closest
+  free plugin to a string/choir Mellotron patch; open its editor and dial
+  a slow attack.
+- **Theremin** — a second Odin2 → Calf Phaser, played live, monophonic;
+  turn its portamento up for the glide.
+- **Room** (bus) — Dragonfly Room, fed by a send from every channel.
+- **Tape** (bus) — Calf Vintage Delay → Calf Tape Simulator, the
+  SH-3A/tape-echo character; fed less by Mallets, more by the two pulses
+  and the Theremin.
+
+Rebuild after editing the patterns: `python3 sessions/build-emissaries.py`.
+
 ## Cardinal data
 
 Cardinal LV2 is in `~/.lv2`, but the binary still looks for `/usr/share/cardinal`.
