@@ -342,6 +342,7 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE bool insertIsStepSequencer(int row, int slot) const;
   Q_INVOKABLE bool insertIsScript(int row, int slot) const;
   Q_INVOKABLE bool insertIsKeyboardInstrument(int row, int slot) const;
+  Q_INVOKABLE bool insertIsSampler(int row, int slot) const;
   // A physical key going down or up, aimed at one insert rather than a whole
   // channel - see sendNote() above for the channel-wide equivalent. `note`
   // is already absolute; octave and velocity are the caller's own business.
@@ -379,6 +380,27 @@ class MixerModel : public QAbstractListModel {
                                     int length, int transpose, bool mute);
   Q_INVOKABLE bool setInsertFile(int row, int slot, const QUrl& file);
   Q_INVOKABLE QString insertFilePath(int row, int slot) const;
+
+  // Sampler: 16 pads, Rec from the strip, a file onto the focused pad.
+  // Snapshot is the editor's whole view; the grid is not parameters().
+  Q_INVOKABLE QVariantMap insertSamplerSnapshot(int row, int slot) const;
+  Q_INVOKABLE void setSamplerRecord(int row, int slot, bool on);
+  Q_INVOKABLE bool samplerRecording(int row, int slot) const;
+  Q_INVOKABLE bool samplerHasAudio(int row, int slot) const;
+  Q_INVOKABLE void setSamplerFocus(int row, int slot, int pad);
+  Q_INVOKABLE void clearSamplerPad(int row, int slot, int pad);
+  Q_INVOKABLE void setSamplerPad(int row, int slot, int pad, int note,
+                                 bool oneShot, qreal volume, qreal pan,
+                                 qreal pitch);
+  Q_INVOKABLE void setSamplerPadName(int row, int slot, int pad,
+                                     const QString& name);
+  Q_INVOKABLE void setSamplerTrim(int row, int slot, int pad, qreal start,
+                                  qreal end);
+  Q_INVOKABLE bool loadSamplerPad(int row, int slot, int pad, const QUrl& file);
+  Q_INVOKABLE void previewSamplerPad(int row, int slot, int pad, int velocity);
+  Q_INVOKABLE void releaseSamplerPad(int row, int slot, int pad);
+  Q_INVOKABLE QVariantList samplerWaveform(int row, int slot, int pad,
+                                           int buckets) const;
 
   // --- routing ------------------------------------------------------------
   // Ports a channel can be fed from, ready to show in a picker. `midi` picks
@@ -510,7 +532,8 @@ class MixerModel : public QAbstractListModel {
   QJsonObject writeChannel(const ChannelUi& channel, size_t row,
                            const QVector<QByteArray>& row_states) const;
   QString nextAccent() const;
-  int restoreChannel(const QJsonObject& entry, QStringList* missing);
+  int restoreChannel(const QJsonObject& entry, QStringList* missing,
+                     const QString& sample_dir = {});
   void restoreChannelLinks(int row, const QJsonObject& entry);
   // Bindings are stored on the channel, not by graph slot: those numbers
   // are issued fresh every time the mixer starts, and a map that kept one

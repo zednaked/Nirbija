@@ -94,9 +94,9 @@ junto.
 
 | Buraco | Referência | Estado livre |
 |---|---|---|
-| Sampler de performance | Koala Sampler | sfizz quer arquivo SFZ, DrumGizmo quer kit. Nada de "grava e toca" |
-| Arpejador | Rozeta Arpeggio | recebe nota e gera acorde arpejado. O Step Sequencer já tem metade das peças |
-| Looper como plugin | Loopy Pro | SooperLooper (standalone, envelhecido), Luppp. Nada em LV2/CLAP |
+| Sampler de performance | Koala Sampler | ✅ **Sampler** (`nirbija.sampler`) — 16 pads, Rec do strip, WAV |
+| Arpejador | Rozeta Arpeggio | ✅ **Arpeggiator** (`nirbija.arp`) |
+| Looper como plugin | Loopy Pro | ✅ **Looper** (`nirbija.looper`) |
 | Acorde e escala | Scaler 2, Chordjam | x42 força escala; nada composicional |
 
 ### Tier 3 — não vale

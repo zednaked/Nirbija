@@ -2,6 +2,17 @@
 
 ## 0.4.0 — unreleased
 
+### A sampler of its own
+
+**Sampler**, sixteen pads inside the host. Rec from the strip's input onto the
+focused pad, or load a file onto it. One-shot or hold, trim, pitch, pan. The
+pads publish their names, so a step sequencer sitting above the chip writes
+Kick and Snare instead of MIDI 36. The first built-in instrument: MIDI in,
+audio out, nothing else to install. A pad loaded from a file remembers
+the path, like the File Player: the session is a list of samples, not a
+blob of floats. Rec takes still travel inside the blob. `sessions/jam-sampler.json`
+points at `sessions/samples/` — four grooves, a reverb bus, Play.
+
 ### The interface resizes
 
 **Ctrl+=** and **Ctrl+-** while the mixer is open, **Ctrl+0** back to where it
@@ -111,8 +122,8 @@ pad.
 
 ### Also
 
-- The landing page says what the mixer does now: eight entries rather than
-  six, with the sequencers, the Lua plugin and strip files.
+- The landing page says what the mixer does now: nine entries rather than
+  six, with the sequencers, the Lua plugin, the sampler and strip files.
 - The metronome is not Play. Turning the click on walks the grid for the
   looper and sounds the tick; sequencers stay quiet until Play is on.
 - Looper undo peels the last phrase between silences, not the whole Rec

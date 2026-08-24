@@ -37,6 +37,26 @@ NIRBIJA_SESSION="$PWD/sessions/jam-pad-hall.json" \
 Sends use `busName` so they rebind after load. Some channels use
 `destinationKind: bus` (serial into the FX) instead of a send (parallel).
 
+## jam-sampler.json
+
+The sampler demo: nothing but plugins that ship inside the host. Tempo 108.
+
+- **Kit** — `nirbija.stepseq` → `nirbija.sampler`. Eight lanes, four pattern
+  banks (house, boom bap, dembow, break). The kit is eight WAV files in
+  `sessions/samples/` — kick, snare, hats, clap, rim, floor tom, cowbell —
+  and the session names them, it does not swallow them. Play works with no
+  DrumGizmo, no AVL, no SFZ on disk. Replace a wav and rebuild, or just
+  reload: the pad is the file.
+- **Room** (bus) — `nirbija.fxpad` Reverb, fed by a send from Kit.
+
+Switch banks from the sequencer's pattern pads. Rebuild the file after
+editing the kit or the grooves:
+
+```sh
+python3 sessions/build-sampler.py
+sessions/run-jam.sh jam-sampler
+```
+
 ## jam-black-pearl.json
 
 Not ambient: one channel, `nirbija.stepseq` (the native 8-lane step
@@ -201,6 +221,27 @@ reference but this machine didn't have.
   and the Theremin.
 
 Rebuild after editing the patterns: `python3 sessions/build-emissaries.py`.
+
+## jam-chord-demo.json
+
+Demo for `nirbija.chord` (`design/chord.md`) — no live playing needed, press
+Play. One `nirbija.stepseq` drives both halves of the chord plugin at once:
+
+- **Lane 0**, below the split (60) — a I–IV–V–I progression in C major
+  (C48 F53 G55 C48), one chord a beat, each held across its four steps with
+  `tie` so it sustains instead of retriggering (same idiom as
+  `jam-lucretia.json`'s pad lanes). The chord plugin turns each into a
+  seventh chord: Cmaj7, Fmaj7, G7, Cmaj7.
+- **Lane 1**, above the split — a short melody, with two notes placed
+  **deliberately outside C major** (C#5, F#5). `passthrough` is on, so the
+  chord plugin's own quantizer — not the step sequencer's — pulls them onto
+  the scale (D5, G5) before Odin2 ever hears them.
+
+Both lanes land in one `midi_chain_`, exactly as `design/chord.md` describes:
+the sequencer's output and the chord plugin's own trigger logic share the
+strip without either one knowing about the other.
+
+Rebuild after editing the patterns: `python3 sessions/build-chord.py`.
 
 ## Cardinal data
 

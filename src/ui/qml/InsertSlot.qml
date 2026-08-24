@@ -16,6 +16,7 @@ AbstractButton {
     property bool looperRecording: false
     property bool looperPlaying: false
     property bool looperHasAudio: false
+    property bool samplerRecording: false
     readonly property bool empty: pluginName.length === 0
 
     signal menuRequested
@@ -68,13 +69,13 @@ AbstractButton {
             color: Skin.mute
         }
 
-        // A Looper's own transport, at a glance: red while it is armed
+        // A Looper's or Sampler's own Rec, at a glance: red while armed
         // (the thing you must not miss walking into a room full of
-        // channels), green while it is audibly looping. Quiet when there
-        // is nothing to say - an empty or merely loaded Looper draws no dot.
+        // channels), green while a looper is audibly looping. Quiet when
+        // there is nothing to say.
         Rectangle {
             id: stateDot
-            visible: root.looperRecording ||
+            visible: root.looperRecording || root.samplerRecording ||
                      (root.looperPlaying && root.looperHasAudio)
             anchors.right: parent.right
             anchors.top: parent.top
@@ -82,7 +83,8 @@ AbstractButton {
             width: Px.px(7)
             height: Px.px(7)
             radius: width / 2
-            color: root.looperRecording ? Skin.arm : Skin.meterLow
+            color: (root.looperRecording || root.samplerRecording)
+                   ? Skin.arm : Skin.meterLow
             z: 2
 
             // Pulses while armed - the one state worth catching out of the
@@ -90,9 +92,10 @@ AbstractButton {
             // this; only `pulse` is a value source, so the dot settles
             // back to a steady 0.85 the moment recording stops.
             property real pulse: 1.0
-            opacity: root.looperRecording ? stateDot.pulse : 0.85
+            opacity: (root.looperRecording || root.samplerRecording)
+                     ? stateDot.pulse : 0.85
             SequentialAnimation on pulse {
-                running: root.looperRecording
+                running: root.looperRecording || root.samplerRecording
                 loops: Animation.Infinite
                 NumberAnimation { from: 1.0; to: 0.35; duration: Skin.fast * 3 }
                 NumberAnimation { from: 0.35; to: 1.0; duration: Skin.fast * 3 }

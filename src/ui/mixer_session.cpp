@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "mixer_model.h"
+#include "core/sampler.h"
 
 namespace nirbija {
 namespace {
@@ -382,7 +383,8 @@ bool MixerModel::loadSessionFrom(const QUrl& file) {
 // which one is gone by name.
 //
 // Shared with strip presets, which are single-channel files in this format.
-int MixerModel::restoreChannel(const QJsonObject& entry, QStringList* missing) {
+int MixerModel::restoreChannel(const QJsonObject& entry, QStringList* missing,
+                               const QString& sample_dir) {
 
   const int width = entry[QStringLiteral("width")].toInt(2);
   const bool is_bus = entry[QStringLiteral("isBus")].toBool();
@@ -457,6 +459,10 @@ int MixerModel::restoreChannel(const QJsonObject& entry, QStringList* missing) {
     const std::vector<uint8_t> blob(bytes.begin(), bytes.end());
     if (!insert->load_state(blob))
       qWarning("session: %s refused its own saved state", uid.c_str());
+    if (auto* sampler = dynamic_cast<SamplerInstance*>(insert)) {
+      if (!sample_dir.isEmpty())
+        sampler->resolve_paths(sample_dir.toStdString());
+    }
   }
   return row;
 }
@@ -580,7 +586,9 @@ bool MixerModel::loadChannelFrom(const QUrl& file) {
 
   QStringList missing;
   const bool parked = engine_.park_graph();
-  const int row = parked ? restoreChannel(entry, &missing) : -1;
+  const int row = parked ? restoreChannel(entry, &missing,
+                                          QFileInfo(path).absolutePath())
+                         : -1;
   engine_.unpark_graph();
   if (!parked) {
     emit errorOccurred(tr("The audio graph would not settle; try again"));
@@ -643,8 +651,9 @@ bool MixerModel::readSession(const QString& target) {
   const QJsonArray channels = root[QStringLiteral("channels")].toArray();
   std::vector<int> rows;
   rows.reserve(static_cast<size_t>(channels.size()));
+  const QString sample_dir = QFileInfo(target).absolutePath();
   for (const QJsonValue& value : channels)
-    rows.push_back(restoreChannel(value.toObject(), nullptr));
+    rows.push_back(restoreChannel(value.toObject(), nullptr, sample_dir));
 
   // Destinations and sends last: both can name a bus that appears later in the
   // list, and only now is every row in place. An entry that found no room

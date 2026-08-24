@@ -9,6 +9,7 @@
 #include "core/looper.h"
 #include "core/fx_pad.h"
 #include "core/keyboard_instrument.h"
+#include "core/sampler.h"
 
 #include <unistd.h>
 
@@ -16,6 +17,7 @@
 #include <QDir>
 #include <QEvent>
 #include <QFile>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QKeyEvent>
 #include <QUrl>
@@ -168,6 +170,12 @@ QVariant MixerModel::data(const QModelIndex& index, int role) const {
                        looperPlaying(index.row(), slot));
           entry.insert(QStringLiteral("looperHasAudio"),
                        looperHasAudio(index.row(), slot));
+        }
+        if (insertIsSampler(index.row(), slot)) {
+          entry.insert(QStringLiteral("samplerRecording"),
+                       samplerRecording(index.row(), slot));
+          entry.insert(QStringLiteral("samplerHasAudio"),
+                       samplerHasAudio(index.row(), slot));
         }
         details.append(entry);
       }
@@ -907,6 +915,11 @@ bool MixerModel::insertIsKeyboardInstrument(int row, int slot) const {
   return insert != nullptr && insert->descriptor().uid == "nirbija.keyboard";
 }
 
+bool MixerModel::insertIsSampler(int row, int slot) const {
+  PluginInstance* insert = insertFor(row, slot);
+  return insert != nullptr && insert->descriptor().uid == "nirbija.sampler";
+}
+
 void MixerModel::pressComputerKey(int row, int slot, int note, int velocity) {
   auto* keyboard = dynamic_cast<KeyboardInstrumentInstance*>(insertFor(row, slot));
   if (keyboard == nullptr) return;
@@ -1132,19 +1145,143 @@ void MixerModel::setSequencerHead(int row, int slot, int extra, int lane,
 
 bool MixerModel::setInsertFile(int row, int slot, const QUrl& file) {
   auto* player = dynamic_cast<FilePlayerInstance*>(insertFor(row, slot));
-  if (player == nullptr) return false;
-
-  const QString path = file.isLocalFile() ? file.toLocalFile() : file.toString();
-  const bool loaded = player->load(path.toStdString());
-  if (!loaded) qWarning("file player: could not read %s", qUtf8Printable(path));
-  markDirty();
-  return loaded;
+  if (player != nullptr) {
+    const QString path = file.isLocalFile() ? file.toLocalFile() : file.toString();
+    const bool loaded = player->load(path.toStdString());
+    if (!loaded) qWarning("file player: could not read %s", qUtf8Printable(path));
+    markDirty();
+    return loaded;
+  }
+  auto* sampler = dynamic_cast<SamplerInstance*>(insertFor(row, slot));
+  if (sampler == nullptr) return false;
+  return loadSamplerPad(row, slot, sampler->focused(), file);
 }
 
 QString MixerModel::insertFilePath(int row, int slot) const {
   auto* player = dynamic_cast<FilePlayerInstance*>(insertFor(row, slot));
   if (player == nullptr) return {};
   return QString::fromStdString(player->path());
+}
+
+QVariantMap MixerModel::insertSamplerSnapshot(int row, int slot) const {
+  QVariantMap out;
+  auto* sampler = dynamic_cast<SamplerInstance*>(insertFor(row, slot));
+  if (sampler == nullptr) return out;
+  out[QStringLiteral("focused")] = sampler->focused();
+  out[QStringLiteral("recording")] = sampler->recording();
+  out[QStringLiteral("recPad")] = sampler->rec_pad();
+  out[QStringLiteral("gain")] = sampler->parameter_value(0);
+  out[QStringLiteral("quantize")] = sampler->parameter_value(3);
+  out[QStringLiteral("sounding")] =
+      static_cast<int>(sampler->sounding_mask());
+  QVariantList pads;
+  pads.reserve(SamplerInstance::kPads);
+  for (int i = 0; i < SamplerInstance::kPads; ++i) {
+    QVariantMap pad;
+    pad[QStringLiteral("note")] = sampler->pad_note(i);
+    pad[QStringLiteral("name")] = QString::fromStdString(sampler->pad_name(i));
+    pad[QStringLiteral("oneShot")] = sampler->pad_one_shot(i);
+    pad[QStringLiteral("volume")] = sampler->pad_volume(i);
+    pad[QStringLiteral("pan")] = sampler->pad_pan(i);
+    pad[QStringLiteral("pitch")] = sampler->pad_pitch(i);
+    pad[QStringLiteral("start")] = sampler->pad_start(i);
+    pad[QStringLiteral("end")] = sampler->pad_end(i);
+    pad[QStringLiteral("hasAudio")] = sampler->pad_has_audio(i);
+    pads.append(pad);
+  }
+  out[QStringLiteral("pads")] = pads;
+  return out;
+}
+
+void MixerModel::setSamplerRecord(int row, int slot, bool on) {
+  auto* sampler = dynamic_cast<SamplerInstance*>(insertFor(row, slot));
+  if (sampler == nullptr) return;
+  sampler->set_parameter(1, on ? 1.0 : 0.0);
+  markDirty(false);
+}
+
+bool MixerModel::samplerRecording(int row, int slot) const {
+  auto* sampler = dynamic_cast<SamplerInstance*>(insertFor(row, slot));
+  return sampler != nullptr && sampler->recording();
+}
+
+bool MixerModel::samplerHasAudio(int row, int slot) const {
+  auto* sampler = dynamic_cast<SamplerInstance*>(insertFor(row, slot));
+  if (sampler == nullptr) return false;
+  for (int i = 0; i < SamplerInstance::kPads; ++i)
+    if (sampler->pad_has_audio(i)) return true;
+  return false;
+}
+
+void MixerModel::setSamplerFocus(int row, int slot, int pad) {
+  auto* sampler = dynamic_cast<SamplerInstance*>(insertFor(row, slot));
+  if (sampler == nullptr) return;
+  sampler->set_parameter(2, pad + 1);
+  markDirty(false);
+}
+
+void MixerModel::clearSamplerPad(int row, int slot, int pad) {
+  auto* sampler = dynamic_cast<SamplerInstance*>(insertFor(row, slot));
+  if (sampler == nullptr) return;
+  sampler->clear_pad(pad);
+  markDirty();
+}
+
+void MixerModel::setSamplerPad(int row, int slot, int pad, int note,
+                               bool oneShot, qreal volume, qreal pan,
+                               qreal pitch) {
+  auto* sampler = dynamic_cast<SamplerInstance*>(insertFor(row, slot));
+  if (sampler == nullptr) return;
+  sampler->set_pad(pad, note, oneShot, static_cast<float>(volume),
+                   static_cast<float>(pan), static_cast<float>(pitch));
+  markDirty();
+}
+
+void MixerModel::setSamplerPadName(int row, int slot, int pad,
+                                   const QString& name) {
+  auto* sampler = dynamic_cast<SamplerInstance*>(insertFor(row, slot));
+  if (sampler == nullptr) return;
+  sampler->set_pad_name(pad, name.toStdString());
+  markDirty();
+}
+
+void MixerModel::setSamplerTrim(int row, int slot, int pad, qreal start,
+                                qreal end) {
+  auto* sampler = dynamic_cast<SamplerInstance*>(insertFor(row, slot));
+  if (sampler == nullptr) return;
+  sampler->set_trim(pad, start, end);
+  markDirty();
+}
+
+bool MixerModel::loadSamplerPad(int row, int slot, int pad, const QUrl& file) {
+  auto* sampler = dynamic_cast<SamplerInstance*>(insertFor(row, slot));
+  if (sampler == nullptr) return false;
+  const QString path = file.isLocalFile() ? file.toLocalFile() : file.toString();
+  const bool loaded = sampler->load(pad, path.toStdString());
+  if (!loaded) qWarning("sampler: could not read %s", qUtf8Printable(path));
+  markDirty();
+  return loaded;
+}
+
+void MixerModel::previewSamplerPad(int row, int slot, int pad, int velocity) {
+  auto* sampler = dynamic_cast<SamplerInstance*>(insertFor(row, slot));
+  if (sampler == nullptr) return;
+  sampler->preview_down(pad, velocity);
+}
+
+void MixerModel::releaseSamplerPad(int row, int slot, int pad) {
+  auto* sampler = dynamic_cast<SamplerInstance*>(insertFor(row, slot));
+  if (sampler == nullptr) return;
+  sampler->preview_up(pad);
+}
+
+QVariantList MixerModel::samplerWaveform(int row, int slot, int pad,
+                                         int buckets) const {
+  QVariantList out;
+  auto* sampler = dynamic_cast<SamplerInstance*>(insertFor(row, slot));
+  if (sampler == nullptr) return out;
+  for (float peak : sampler->waveform(pad, buckets)) out.append(peak);
+  return out;
 }
 
 void MixerModel::closeAllEditors() { editors_.clear(); }
@@ -1443,6 +1580,9 @@ void MixerModel::pollLevels() {
                   : 0.0);
         }
       }
+      if (auto* sampler = dynamic_cast<SamplerInstance*>(insert)) {
+        if (sampler->commit_take()) plugin_state_moved = true;
+      }
     }
   }
   if (plugin_state_moved) markDirty();
@@ -1580,7 +1720,12 @@ void MixerModel::duplicateChannel(int row) {
       ChannelStrip* strip = stripFor(dest);
       if (strip == nullptr) break;
       PluginInstance* insert = strip->insert_at(static_cast<size_t>(slot));
-      if (insert != nullptr) insert->load_state(blobs[i]);
+      if (insert != nullptr) {
+        insert->load_state(blobs[i]);
+        if (auto* sampler = dynamic_cast<SamplerInstance*>(insert))
+          sampler->resolve_paths(
+              QFileInfo(sessionPath()).absolutePath().toStdString());
+      }
     }
   }
   engine_.unpark_graph();

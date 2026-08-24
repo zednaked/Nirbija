@@ -71,10 +71,11 @@ the host and need nothing installed at all:
 | **FX Pad** | sixteen graduated effects; pitch, filter, comb and ring go both ways |
 | **File Player** | a file into a strip |
 | **Computer Keyboard** | GarageBand-style typing keyboard; no MIDI hardware needed |
+| **Sampler** | sixteen pads; Rec from the strip, or a file; names the step sequencer reads |
 
-They sit in the picker's **midi** bucket alongside everything else. A
-sequencer above a synth in the same strip plays it: the MIDI a plugin makes
-joins what the next one in the chain receives.
+They sit in the picker with everything else. A sequencer above a synth — or
+the sampler — in the same strip plays it: the MIDI a plugin makes joins what
+the next one in the chain receives.
 
 ## Using it
 

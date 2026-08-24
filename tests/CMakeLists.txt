@@ -94,6 +94,14 @@ add_executable(nirbija_script_plugin script_plugin_test.cpp)
 target_link_libraries(nirbija_script_plugin PRIVATE nirbija_core)
 add_test(NAME script_plugin COMMAND nirbija_script_plugin)
 
+add_executable(nirbija_sampler sampler_test.cpp)
+target_link_libraries(nirbija_sampler PRIVATE nirbija_core PkgConfig::SNDFILE)
+add_test(NAME sampler COMMAND nirbija_sampler)
+
+add_executable(nirbija_chord chord_test.cpp)
+target_link_libraries(nirbija_chord PRIVATE nirbija_core)
+add_test(NAME chord COMMAND nirbija_chord)
+
 if(NIRBIJA_VST3)
   add_executable(nirbija_vst3_process vst3_process.cpp)
   target_link_libraries(nirbija_vst3_process PRIVATE nirbija_core)

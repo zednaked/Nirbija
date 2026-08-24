@@ -96,7 +96,8 @@ ApplicationWindow {
     function insertMenu(row, slot, inserts) {
         return [
             { label: qsTr("Load file…"),
-              enabled: Mixer.insertIsFilePlayer(row, slot),
+              enabled: Mixer.insertIsFilePlayer(row, slot)
+                       || Mixer.insertIsSampler(row, slot),
               action: () => window.openFileFor(row, slot) },
             { label: qsTr("Open editor"),
               action: () => window.openEditor(row, slot) },
@@ -285,6 +286,10 @@ ApplicationWindow {
         }
         if (Mixer.insertIsKeyboardInstrument(row, slot)) {
             window.openOrToggle(keyboardLoader, row, slot)
+            return
+        }
+        if (Mixer.insertIsSampler(row, slot)) {
+            window.openOrToggle(samplerLoader, row, slot)
             return
         }
         if (Mixer.openInsertEditor(row, slot)) return
@@ -597,6 +602,12 @@ ApplicationWindow {
         id: keyboardLoader
         active: false
         sourceComponent: KeyboardEditor {}
+    }
+
+    Loader {
+        id: samplerLoader
+        active: false
+        sourceComponent: SamplerEditor {}
     }
 
     Loader {

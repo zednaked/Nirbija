@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "tempo": 92,
+  "metronome": false,
+  "midiMaps": [],
+  "master": {
+    "gain": 0.88,
+    "sink": ""
+  },
+  "channels": [
+    {
+      "name": "Chord Demo",
+      "isBus": false,
+      "width": 2,
+      "gain": 0.8,
+      "pan": 0.0,
+      "muted": false,
+      "soloed": false,
+      "armed": false,
+      "destination": -1,
+      "destinationKind": "master",
+      "inserts": [
+        {
+          "format": "Internal",
+          "uid": "nirbija.stepseq",
+          "bypassed": false,
+          "postFader": false,
+          "state": "dmVyc2lvbiAyCnN3aW5nIDAuMDAwMApkaXJlY3Rpb24gMApzY2FsZSAwCnJvb3QgMAp0cmFuc3Bvc2UgMApwYXR0ZXJuIDAKbmV4dCAtMQpmaWxsIDAKdmlldyAxCmZvY3VzIDAKbWFjcm8gMS4wMDAwIDAuMDAwMCAwLjAwMDAgMS4wMDAwCmxhbmUgMCA0OCAxNiAyIDAgMCAwIDAuOTAwMCAwCmxhbmUgMSA3MiAxNiAyIDAgMCAwIDAuNjAwMCAwCmxhbmUgMiA2MCAxNiAyIDAgMCAwIDAuNTAwMCAwCmxhbmUgMyA2MCAxNiAyIDAgMCAwIDAuNTAwMCAwCmxhbmUgNCA2MCAxNiAyIDAgMCAwIDAuNTAwMCAwCmxhbmUgNSA2MCAxNiAyIDAgMCAwIDAuNTAwMCAwCmxhbmUgNiA2MCAxNiAyIDAgMCAwIDAuNTAwMCAwCmxhbmUgNyA2MCAxNiAyIDAgMCAwIDAuNTAwMCAwCnBzdGVwIDAgMCAwIDQ4IDkwIDEgMS4wMDAwIDAgMSAwLjAwMDAgMSAwIDAKcHN0ZXAgMCAwIDEgNDggOTAgMSAxLjAwMDAgMCAxIDAuMDAwMCAxIDAgMApwc3RlcCAwIDAgMiA0OCA5MCAxIDEuMDAwMCAwIDEgMC4wMDAwIDEgMCAwCnBzdGVwIDAgMCAzIDQ4IDkwIDEgMS4wMDAwIDAgMSAwLjAwMDAgMSAwIDAKcHN0ZXAgMCAwIDQgNTMgODggMSAxLjAwMDAgMCAxIDAuMDAwMCAxIDAgMApwc3RlcCAwIDAgNSA1MyA4OCAxIDEuMDAwMCAwIDEgMC4wMDAwIDEgMCAwCnBzdGVwIDAgMCA2IDUzIDg4IDEgMS4wMDAwIDAgMSAwLjAwMDAgMSAwIDAKcHN0ZXAgMCAwIDcgNTMgODggMSAxLjAwMDAgMCAxIDAuMDAwMCAxIDAgMApwc3RlcCAwIDAgOCA1NSA5NCAxIDEuMDAwMCAwIDEgMC4wMDAwIDEgMCAwCnBzdGVwIDAgMCA5IDU1IDk0IDEgMS4wMDAwIDAgMSAwLjAwMDAgMSAwIDAKcHN0ZXAgMCAwIDEwIDU1IDk0IDEgMS4wMDAwIDAgMSAwLjAwMDAgMSAwIDAKcHN0ZXAgMCAwIDExIDU1IDk0IDEgMS4wMDAwIDAgMSAwLjAwMDAgMSAwIDAKcHN0ZXAgMCAwIDEyIDQ4IDkwIDEgMS4wMDAwIDAgMSAwLjAwMDAgMSAwIDAKcHN0ZXAgMCAwIDEzIDQ4IDkwIDEgMS4wMDAwIDAgMSAwLjAwMDAgMSAwIDAKcHN0ZXAgMCAwIDE0IDQ4IDkwIDEgMS4wMDAwIDAgMSAwLjAwMDAgMSAwIDAKcHN0ZXAgMCAwIDE1IDQ4IDkwIDEgMS4wMDAwIDAgMSAwLjAwMDAgMSAwIDAKcHN0ZXAgMCAxIDAgNzIgODggMSAxLjAwMDAgMSAwIDAuMDAwMCAxIDAgMApwc3RlcCAwIDEgMiA3NCA4MCAxIDEuMDAwMCAwIDAgMC4wMDAwIDEgMCAwCnBzdGVwIDAgMSA0IDczIDc0IDEgMS4wMDAwIDAgMCAwLjAwMDAgMSAwIDAKcHN0ZXAgMCAxIDYgNzcgODYgMSAxLjAwMDAgMCAwIDAuMDAwMCAxIDAgMApwc3RlcCAwIDEgOCA3OSA5MCAxIDEuMDAwMCAxIDAgMC4wMDAwIDEgMCAwCnBzdGVwIDAgMSA5IDc4IDc2IDEgMS4wMDAwIDAgMCAwLjAwMDAgMSAwIDAKcHN0ZXAgMCAxIDEwIDgxIDkyIDEgMS4wMDAwIDAgMCAwLjAwMDAgMSAwIDAKcHN0ZXAgMCAxIDEyIDc5IDg0IDEgMS4wMDAwIDAgMCAwLjAwMDAgMSAwIDAKcHN0ZXAgMCAxIDE0IDc3IDgwIDEgMS4wMDAwIDAgMCAwLjAwMDAgMSAwIDAKcHN0ZXAgMCAxIDE1IDc0IDc2IDEgMS4wMDAwIDAgMCAwLjAwMDAgMSAwIDAK"
+        },
+        {
+          "format": "Internal",
+          "uid": "nirbija.chord",
+          "bypassed": false,
+          "postFader": false,
+          "state": "cm9vdCAwCnNjYWxlIDAKc3BsaXQgNjAKb2N0YXZlIC0xCmludmVyc2lvbiAwCnZvaWNlcyA0CnNwcmVhZCAwCnBhc3N0aHJvdWdoIDEKY2hhbm5lbCAwCg=="
+        },
+        {
+          "format": "LV2",
+          "uid": "https://thewavewarden.com/odin2",
+          "bypassed": false,
+          "postFader": false
+        }
+      ],
+      "sends": [
+        {
+          "bus": -1,
+          "busName": "Room",
+          "level": 0.3
+        }
+      ],
+      "audioSource": "",
+      "midiSources": []
+    },
+    {
+      "name": "Room",
+      "isBus": true,
+      "width": 2,
+      "gain": 0.85,
+      "pan": 0.0,
+      "muted": false,
+      "soloed": false,
+      "armed": false,
+      "destination": -1,
+      "destinationKind": "master",
+      "inserts": [
+        {
+          "format": "Internal",
+          "uid": "nirbija.fxpad",
+          "bypassed": false,
+          "postFader": false,
+          "state": "MAowLjAKMC4wCjAuMAowLjAKMC43MgowLjAKMC4wCjAuMAowLjAKMC4wCjAuMAowLjAKMC4wCjAuMAowLjAKMC4wCg=="
+        }
+      ],
+      "sends": []
+    }
+  ]
+}

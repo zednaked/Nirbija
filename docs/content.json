@@ -58,6 +58,11 @@
       "copy": "quantised. play against yourself."
     },
     {
+      "id": "09",
+      "name": "sample",
+      "copy": "sixteen pads. rec a hit, it is a key."
+    },
+    {
       "id": "07",
       "name": "strips",
       "copy": "save a chain with its state. hand it over."
@@ -71,7 +76,7 @@
   "does": [
     "host the plugins you already have",
     "play them from sequencers of its own",
-    "mix, send, loop, record",
+    "sample into pads, mix, send, loop, record",
     "talk to pipewire, jack, and a clock from outside",
     "keep a session \u2014 or one strip, on its own"
   ],

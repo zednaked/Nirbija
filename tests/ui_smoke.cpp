@@ -693,6 +693,34 @@ int main(int argc, char* argv[]) {
     }
   }
 
+  // --- sampler publishes pad names the sequencer can read --------------------
+  {
+    const int sequencer =
+        mixer.plugins()->rowFor(nirbija::PluginFormat::Internal, "nirbija.stepseq");
+    const int sampler =
+        mixer.plugins()->rowFor(nirbija::PluginFormat::Internal, "nirbija.sampler");
+    if (sequencer < 0 || sampler < 0) {
+      fail("the built-in sampler or sequencer is missing from the picker");
+    } else {
+      mixer.addChannel(QStringLiteral("Pads"), 2);
+      const int row = mixer.rowCount() - 1;
+      mixer.addInsert(row, sequencer);
+      mixer.addInsert(row, sampler);
+      const QVariantMap target = mixer.insertSequencerTarget(row, 0);
+      if (target.value(QStringLiteral("name")).toString() !=
+          QStringLiteral("Sampler"))
+        fail("the sequencer did not see the sampler below it");
+      const QVariantList pads = target.value(QStringLiteral("pads")).toList();
+      if (pads.size() < 8)
+        fail("sampler published " + std::to_string(pads.size()) +
+             " pad names, wanted the factory kit");
+      else if (pads.value(0).toMap().value(QStringLiteral("name")).toString() !=
+               QStringLiteral("Kick"))
+        fail("sampler pad 0 was not Kick");
+      mixer.removeChannel(row);
+    }
+  }
+
   // --- File -> Load session replaces the mixer, it does not add to it --------
   //
   // Loading over a mixer that already had strips left one behind, so a session

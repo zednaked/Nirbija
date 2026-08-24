@@ -11,6 +11,8 @@ add_library(nirbija_core
   core/arpeggiator.cpp
   core/script_plugin.cpp
   core/keyboard_instrument.cpp
+  core/sampler.cpp
+  core/chord.cpp
 )
 target_include_directories(nirbija_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(nirbija_core PUBLIC PkgConfig::JACK

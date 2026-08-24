@@ -12,6 +12,7 @@
 
 #include "mixer_model.h"
 #include "core/looper.h"
+#include "core/sampler.h"
 
 namespace {
 
@@ -158,6 +159,67 @@ int main(int argc, char* argv[]) {
       for (const QVariant& peak : looped.looperWaveform(0, 0, 8))
         heard |= peak.toFloat() > 0.1f;
       if (!heard) fail("the restored looper waveform was empty");
+    }
+    qputenv("NIRBIJA_SESSION", (dir.path() + "/session.json").toLocal8Bit());
+  }
+
+  // The sampler's pads are audio inside the insert blob, the same problem
+  // the looper had: a restart used to come back with empty pads.
+  {
+    qputenv("NIRBIJA_SESSION", (dir.path() + "/sampler.json").toLocal8Bit());
+    const int sampler_row =
+        restored.plugins()->rowFor(nirbija::PluginFormat::Internal,
+                                   "nirbija.sampler");
+    if (sampler_row < 0) {
+      fail("the built-in sampler is not in the plugin list");
+    } else {
+      nirbija::MixerModel with_kit;
+      if (!with_kit.running()) {
+        fail("audio server went away before the sampler round trip");
+      } else {
+        with_kit.addChannel(QStringLiteral("Kit"), 2);
+        if (!with_kit.addInsert(0, sampler_row)) {
+          fail("could not add a sampler");
+        } else {
+          with_kit.engineForTests().park_graph();
+          nirbija::SamplerInstance* sampler =
+              dynamic_cast<nirbija::SamplerInstance*>(
+                  with_kit.engineForTests().graph().channel(0).insert_at(0));
+          if (sampler == nullptr) {
+            fail("the insert was not a sampler");
+          } else {
+            sampler->set_parameter(1, 1.0);
+            std::vector<float> in_l(256, 0.6f), in_r(256, 0.6f);
+            std::vector<float> out_l(256), out_r(256);
+            const float* ins[2] = {in_l.data(), in_r.data()};
+            float* outs[2] = {out_l.data(), out_r.data()};
+            for (int i = 0; i < 8; ++i) sampler->process(ins, outs, 256);
+            sampler->set_parameter(1, 0.0);
+            sampler->process(ins, outs, 256);
+            sampler->set_pad_name(0, "Thump");
+            if (!sampler->commit_take())
+              fail("the sampler take did not commit before the session save");
+          }
+          with_kit.engineForTests().unpark_graph();
+          with_kit.saveSession();
+        }
+      }
+    }
+
+    nirbija::MixerModel kit;
+    if (!kit.samplerHasAudio(0, 0))
+      fail("the sampler came back silent");
+    else {
+      bool heard = false;
+      for (const QVariant& peak : kit.samplerWaveform(0, 0, 0, 8))
+        heard |= peak.toFloat() > 0.1f;
+      if (!heard) fail("the restored sampler waveform was empty");
+      const QVariantMap snap = kit.insertSamplerSnapshot(0, 0);
+      const QVariantList pads = snap.value(QStringLiteral("pads")).toList();
+      if (pads.isEmpty() ||
+          pads.value(0).toMap().value(QStringLiteral("name")).toString() !=
+              QStringLiteral("Thump"))
+        fail("the sampler pad name did not survive the round trip");
     }
     qputenv("NIRBIJA_SESSION", (dir.path() + "/session.json").toLocal8Bit());
   }

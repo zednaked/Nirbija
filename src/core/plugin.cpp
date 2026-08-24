@@ -17,6 +17,8 @@
 #include "core/step_sequencer.h"
 #include "core/fx_pad.h"
 #include "core/keyboard_instrument.h"
+#include "core/sampler.h"
+#include "core/chord.h"
 
 #include <charconv>
 
@@ -62,7 +64,9 @@ class InternalBackend : public PluginBackend {
             StepSequencerInstance::make_descriptor(),
             ArpeggiatorInstance::make_descriptor(),
             ScriptInstance::make_descriptor(),
-            KeyboardInstrumentInstance::make_descriptor()};
+            KeyboardInstrumentInstance::make_descriptor(),
+            SamplerInstance::make_descriptor(),
+            ChordInstance::make_descriptor()};
   }
 
   std::unique_ptr<PluginInstance> instantiate(
@@ -79,6 +83,10 @@ class InternalBackend : public PluginBackend {
       return std::make_unique<ScriptInstance>();
     if (desc.uid == "nirbija.keyboard")
       return std::make_unique<KeyboardInstrumentInstance>();
+    if (desc.uid == "nirbija.sampler")
+      return std::make_unique<SamplerInstance>();
+    if (desc.uid == "nirbija.chord")
+      return std::make_unique<ChordInstance>();
     return nullptr;
   }
 };
