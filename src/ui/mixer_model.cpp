@@ -1174,6 +1174,13 @@ QVariantMap MixerModel::insertSamplerSnapshot(int row, int slot) const {
   out[QStringLiteral("quantize")] = sampler->parameter_value(3);
   out[QStringLiteral("sounding")] =
       static_cast<int>(sampler->sounding_mask());
+  out[QStringLiteral("hitFlash")] =
+      static_cast<int>(sampler->hit_flash_mask());
+  out[QStringLiteral("lastNote")] = sampler->last_midi_note();
+  out[QStringLiteral("lastCc")] = sampler->last_midi_cc();
+  out[QStringLiteral("countIn")] = sampler->parameter_value(10) >= 0.5;
+  out[QStringLiteral("countingIn")] = sampler->counting_in();
+  out[QStringLiteral("countInLeft")] = sampler->count_in_beats_left();
   QVariantList pads;
   pads.reserve(SamplerInstance::kPads);
   for (int i = 0; i < SamplerInstance::kPads; ++i) {
@@ -1186,7 +1193,10 @@ QVariantMap MixerModel::insertSamplerSnapshot(int row, int slot) const {
     pad[QStringLiteral("pitch")] = sampler->pad_pitch(i);
     pad[QStringLiteral("start")] = sampler->pad_start(i);
     pad[QStringLiteral("end")] = sampler->pad_end(i);
+    pad[QStringLiteral("fadeIn")] = sampler->pad_fade_in(i);
+    pad[QStringLiteral("fadeOut")] = sampler->pad_fade_out(i);
     pad[QStringLiteral("hasAudio")] = sampler->pad_has_audio(i);
+    pad[QStringLiteral("canUndo")] = sampler->pad_can_undo(i);
     pads.append(pad);
   }
   out[QStringLiteral("pads")] = pads;
@@ -1253,6 +1263,14 @@ void MixerModel::setSamplerTrim(int row, int slot, int pad, qreal start,
   markDirty();
 }
 
+void MixerModel::setSamplerFades(int row, int slot, int pad, qreal fadeIn,
+                                 qreal fadeOut) {
+  auto* sampler = dynamic_cast<SamplerInstance*>(insertFor(row, slot));
+  if (sampler == nullptr) return;
+  sampler->set_fades(pad, fadeIn, fadeOut);
+  markDirty();
+}
+
 bool MixerModel::loadSamplerPad(int row, int slot, int pad, const QUrl& file) {
   auto* sampler = dynamic_cast<SamplerInstance*>(insertFor(row, slot));
   if (sampler == nullptr) return false;
@@ -1282,6 +1300,21 @@ QVariantList MixerModel::samplerWaveform(int row, int slot, int pad,
   if (sampler == nullptr) return out;
   for (float peak : sampler->waveform(pad, buckets)) out.append(peak);
   return out;
+}
+
+bool MixerModel::undoSamplerPad(int row, int slot, int pad) {
+  auto* sampler = dynamic_cast<SamplerInstance*>(insertFor(row, slot));
+  if (sampler == nullptr) return false;
+  const bool undone = sampler->undo_pad(pad);
+  if (undone) markDirty();
+  return undone;
+}
+
+void MixerModel::setSamplerCountIn(int row, int slot, bool on) {
+  auto* sampler = dynamic_cast<SamplerInstance*>(insertFor(row, slot));
+  if (sampler == nullptr) return;
+  sampler->set_parameter(10, on ? 1.0 : 0.0);
+  markDirty(false);
 }
 
 void MixerModel::closeAllEditors() { editors_.clear(); }
@@ -1356,6 +1389,40 @@ void MixerModel::learnInsertParam(int row, int slot, int param, qreal min,
   emit learnChanged();
 }
 
+void MixerModel::listenSamplerMidi(int row, int slot, bool on) {
+  if (!on) {
+    if (sampler_listen_row_ == row && sampler_listen_slot_ == slot) {
+      sampler_listen_row_ = -1;
+      sampler_listen_slot_ = -1;
+    }
+    return;
+  }
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return;
+  sampler_listen_row_ = row;
+  sampler_listen_slot_ = slot;
+  engine_.connect_all_midi_to_control();
+  // Stack every controller onto this strip as well, so a pad that was
+  // wired to a different channel still reaches the sampler. Left in
+  // place when the editor closes: finger-drumming does not need the
+  // window open.
+  engine_.connect_all_midi_to_channel(
+      static_cast<size_t>(channels_[row].slot));
+}
+
+void MixerModel::learnSamplerPadNote(int row, int slot, int pad) {
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return;
+  if (pad < 0 || pad >= SamplerInstance::kPads) return;
+  pending_learn_ = {true,
+                    {.kind = MidiMapping::Kind::SamplerPadNote,
+                     .row = row,
+                     .graph_slot = static_cast<int>(channels_[row].slot),
+                     .is_bus = channels_[row].is_bus,
+                     .slot = slot,
+                     .param = static_cast<uint32_t>(pad)}};
+  engine_.connect_all_midi_to_control();
+  emit learnChanged();
+}
+
 void MixerModel::cancelLearn() {
   pending_learn_.armed = false;
   emit learnChanged();
@@ -1388,6 +1455,22 @@ void MixerModel::handleControl(int cc, int channel, int value) {
   // Learning takes the message rather than acting on it, so arming a fader and
   // sweeping the knob does not also drag whatever it was bound to before.
   if (pending_learn_.armed) {
+    if (pending_learn_.target.kind == MidiMapping::Kind::SamplerPadNote) {
+      // Pads send notes. A CC arriving while a pad is waiting is a knob
+      // being bumped, not the assignment.
+      if (cc < 128 || value < 1) return;
+      auto* sampler = dynamic_cast<SamplerInstance*>(
+          insertFor(pending_learn_.target.row, pending_learn_.target.slot));
+      if (sampler != nullptr) {
+        const int pad = static_cast<int>(pending_learn_.target.param);
+        sampler->assign_note(pad, cc - 128);
+        sampler->set_parameter(2, pad + 1);
+      }
+      pending_learn_.armed = false;
+      emit learnChanged();
+      markDirty();
+      return;
+    }
     // Notes and hard 0/127 are buttons. A knob's first value almost never
     // sits on the rail, so Rec/Play learned from a toggle pad flip on
     // press instead of tracking the 0 it sends when it latches off.
@@ -1442,6 +1525,8 @@ void MixerModel::handleControl(int cc, int channel, int value) {
         // toggle would fall out of step with it.
         if (channels_[row].muted != (value >= 64)) toggleMute(row);
         break;
+      case MidiMapping::Kind::SamplerPadNote:
+        break;
       case MidiMapping::Kind::Param:
         if (map.toggle) {
           // Releases and the off half of a toggle pad are noise. The press
@@ -1459,6 +1544,17 @@ void MixerModel::handleControl(int cc, int channel, int value) {
                              map.min + (map.max - map.min) * normal);
         }
         break;
+    }
+  }
+
+  if (sampler_listen_row_ >= 0) {
+    auto* sampler = dynamic_cast<SamplerInstance*>(
+        insertFor(sampler_listen_row_, sampler_listen_slot_));
+    if (sampler != nullptr) {
+      if (cc >= 128)
+        sampler->hear_note(cc - 128, value, value > 0);
+      else
+        sampler->hear_cc(cc);
     }
   }
 }

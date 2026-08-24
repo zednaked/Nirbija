@@ -13,6 +13,8 @@
 
 namespace nirbija {
 
+class BleMidi;
+
 // A parameter edit travelling from the UI thread to the audio thread. Anything
 // that would allocate is built before the message is pushed.
 struct EngineCommand {
@@ -117,6 +119,10 @@ class Engine {
   // Wires every MIDI source into the control port. Called when learning
   // starts, so "move a knob" works without a routing step first.
   void connect_all_midi_to_control();
+  // Same, stacked onto a channel's MIDI input without dropping whatever
+  // is already wired — a pad controller can reach a sampler that lives
+  // on a different strip than the one the matrix named.
+  void connect_all_midi_to_channel(size_t channel);
 
   // --- recording ----------------------------------------------------------
   // Records every armed channel plus the master, one file each, into a new
@@ -198,11 +204,13 @@ class Engine {
   RtQueue<MidiEvent, 256> control_events_;
   RtQueue<InjectedMidi, 256> injected_midi_;
   std::vector<ChannelPorts> channel_ports_;
+  uint8_t midi_running_status_{0};
 
   double sample_rate_ = 0.0;
   uint32_t block_frames_ = 0;
 
   std::unique_ptr<AudioGraph> graph_;
+  std::unique_ptr<BleMidi> ble_midi_;
   Recorder recorder_;
 
   std::atomic<bool> playing_{false};

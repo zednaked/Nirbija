@@ -2,6 +2,23 @@
 
 ## 0.4.0 — unreleased
 
+### A ratchet used to die after its own first pulse
+
+A step's ratchet — up to 8 rapid retriggers packed into one step, the
+sequencer's own way of doing a roll — only ever played its first hit once
+the lane's gate was under 1.0. Every lane's own factory gate is 0.5, so
+this was not an edge case: it was every ratchet, on every pattern anyone
+had built, everywhere but a test that happened to force gate to full.
+
+The gate closing between two pulses on purpose — the same silence a short
+gate leaves between two ordinary steps — looked identical to the voice
+having been cancelled from outside, and the second pulse's own check for
+that treated them the same way. The two are different questions now: the
+note a ratchet keeps retriggering is remembered on its own, separately
+from whether that note happens to be sounding at this exact instant.
+Found building `sessions/jam-breakbeat.json`, a stress-test session that
+leans on exactly this for its snare roll.
+
 ### A sampler of its own
 
 **Sampler**, sixteen pads inside the host. Rec from the strip's input onto the
@@ -12,6 +29,68 @@ audio out, nothing else to install. A pad loaded from a file remembers
 the path, like the File Player: the session is a list of samples, not a
 blob of floats. Rec takes still travel inside the blob. `sessions/jam-sampler.json`
 points at `sessions/samples/` — four grooves, a reverb bus, Play.
+
+### The sampler forgives a bad take
+
+**Undo** on a pad swaps back to whatever it held before its last Rec, Load or
+Clear — one press, not a history to dig through, because what a bad take
+wants is "let me hear the old one," and a second press swaps forward again if
+the old one wasn't it after all.
+
+**Count-in** puts a bar of clicks ahead of Rec, so the phrase you meant to
+catch does not start with the sound of the button being pressed. Borrowed
+from the looper, which solved this the same way.
+
+### Packs: the kit, on its own
+
+**Save Pack** and **Open Pack** in the Sampler editor write and read just the
+sixteen pads — not gain, not quantize, not count-in, not whatever sits in
+front of the Sampler in the chain. Swap the kit under a sequencer without
+resetting how Rec behaves, or carry a kit between sessions the way a sample
+pack travels. `sessions/packs/` ships two: **808 Trap** and **Techno Clang**,
+built by the same tiny synth as `jam-sampler.json`'s house kit
+(`sessions/drum_synth.py`, factored out so both generator scripts share it).
+
+### The sampler's waveform is the trim now
+
+Drag the tall handles to trim a pad, the round ones just inside them to fade
+it in and out — the looper's own waveform editor, brought over pad by pad
+instead of one long tape. The two numeric start/end sliders are gone; the
+waveform was always the more honest picture of what they meant.
+
+Fade is new under the hood too: each pad gets its own fade-in and fade-out,
+each capped at half the trim window the same way the looper's is, so a short
+pad with both turned up crossfades through the middle instead of one eating
+the other's tail. Travels with save_state, a pack, and the fixed 64-sample
+anti-click envelope everything already had — a musical fade on top of the
+click guard, not instead of it.
+
+### The sampler takes a MIDI controller
+
+**MAP** in the Sampler editor, the same gesture as the looper and the FX pad:
+tap Rec, Clear, Undo, Count-in, a knob, then turn the control. Tap a pad,
+then hit a pad on the controller, and that pad's MIDI note is the one that
+just arrived — so an SMC-PAD (or anything else with sixteen pads) can be
+wired by hitting them, rather than by typing note numbers. Two pads that
+would share a note swap instead, so the grid never has two keys for the
+same hit. MAP stays on so the next pad can follow.
+
+A note that names a pad also focuses it, so the knobs and Rec follow
+whichever pad the controller just played.
+
+The editor listens to every MIDI source while it is open, and stacks those
+same sources onto the sampler's strip so a pad still plays after the
+window closes.
+
+Bluetooth LE MIDI is taken from BlueZ directly. PipeWire advertises the
+SMC-PAD as a JACK port but never AcquireNotify's the GATT characteristic,
+so the port exists and stays silent; we open the notify FD ourselves and
+decode the BLE packets. The SMC-PAD's performance preset speaks notes
+0–15 on channel 10, not General MIDI 36–51 — those hits land on the 4×4
+instead of vanishing. Second and last rows of that grid are swapped to
+match the hardware. The header says `note 13` (or `CC 20` if the
+controller is sending knobs). The hit itself is a bright wash, not a
+faint border.
 
 ### The interface resizes
 

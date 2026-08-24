@@ -224,6 +224,86 @@ int main(int argc, char* argv[]) {
     qputenv("NIRBIJA_SESSION", (dir.path() + "/session.json").toLocal8Bit());
   }
 
+  // A sampler pack: the pads on their own, saved and loaded apart from the
+  // session and apart from the rest of the strip they sit in.
+  {
+    qputenv("NIRBIJA_SESSION", (dir.path() + "/pack-source.json").toLocal8Bit());
+    const int sampler_row =
+        restored.plugins()->rowFor(nirbija::PluginFormat::Internal,
+                                   "nirbija.sampler");
+    const QString pack_path = dir.path() + "/kit.pack.json";
+    if (sampler_row < 0) {
+      fail("the built-in sampler is not in the plugin list");
+    } else {
+      nirbija::MixerModel source;
+      if (!source.running()) {
+        fail("audio server went away before the pack round trip");
+      } else {
+        source.addChannel(QStringLiteral("Kit"), 2);
+        if (!source.addInsert(0, sampler_row)) {
+          fail("could not add a sampler for the pack test");
+        } else {
+          source.engineForTests().park_graph();
+          nirbija::SamplerInstance* sampler =
+              dynamic_cast<nirbija::SamplerInstance*>(
+                  source.engineForTests().graph().channel(0).insert_at(0));
+          if (sampler == nullptr) {
+            fail("the pack test insert was not a sampler");
+          } else {
+            sampler->set_parameter(1, 1.0);
+            std::vector<float> in_l(256, 0.6f), in_r(256, 0.6f);
+            std::vector<float> out_l(256), out_r(256);
+            const float* ins[2] = {in_l.data(), in_r.data()};
+            float* outs[2] = {out_l.data(), out_r.data()};
+            for (int i = 0; i < 8; ++i) sampler->process(ins, outs, 256);
+            sampler->set_parameter(1, 0.0);
+            sampler->process(ins, outs, 256);
+            sampler->set_pad_name(0, "Packed");
+            if (!sampler->commit_take())
+              fail("the pack's take did not commit before saving it");
+          }
+          source.engineForTests().unpark_graph();
+          if (!source.saveSamplerPackTo(0, 0, QUrl::fromLocalFile(pack_path)))
+            fail("saveSamplerPackTo failed");
+        }
+      }
+    }
+
+    // A fresh mixer, a fresh sampler, nothing to do with the session above:
+    // the pack file is what carries the kit, not the autosave.
+    qputenv("NIRBIJA_SESSION", (dir.path() + "/pack-target.json").toLocal8Bit());
+    if (sampler_row >= 0) {
+      nirbija::MixerModel target;
+      if (!target.running()) {
+        fail("audio server went away before loading the pack");
+      } else {
+        target.addChannel(QStringLiteral("Kit"), 2);
+        if (!target.addInsert(0, sampler_row)) {
+          fail("could not add a sampler to load the pack into");
+        } else if (!target.loadSamplerPackFrom(
+                       0, 0, QUrl::fromLocalFile(pack_path))) {
+          fail("loadSamplerPackFrom refused a pack it just wrote");
+        } else {
+          if (!target.samplerHasAudio(0, 0))
+            fail("the pack came back silent");
+          const QVariantMap snap = target.insertSamplerSnapshot(0, 0);
+          const QVariantList pads = snap.value(QStringLiteral("pads")).toList();
+          if (pads.isEmpty() ||
+              pads.value(0).toMap().value(QStringLiteral("name")).toString() !=
+                  QStringLiteral("Packed"))
+            fail("the pack's pad name did not survive the round trip");
+        }
+
+        // A file that is not a pack — the session itself — must be refused,
+        // not half-applied.
+        if (target.loadSamplerPackFrom(
+                0, 0, QUrl::fromLocalFile(dir.path() + "/pack-source.json")))
+          fail("loadSamplerPackFrom accepted a file that was not a pack");
+      }
+    }
+    qputenv("NIRBIJA_SESSION", (dir.path() + "/session.json").toLocal8Bit());
+  }
+
   // MIDI maps used to keep the graph slot from the run that learned them.
   // That number is new every launch, so a pad bound to CC 21 came back
   // unbound. They travel on the channel now, and a strip file takes them too.

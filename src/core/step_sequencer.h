@@ -199,6 +199,12 @@ class StepSequencerInstance : public PluginInstance {
     double pulse_dur = 0;      // gate * spacing
     double step_end_beat = 0;
     int pulse_vel = 100;
+    // The note a ratchet keeps retriggering, independent of `pitch` above:
+    // that one goes to -1 between pulses whenever gate closes early, which
+    // a short gate on every pulse but the last always does. Set once at the
+    // ratchet's own trigger, read by every pulse after.
+    int ratchet_pitch = -1;
+    uint8_t ratchet_channel = 0;
   };
 
   struct Capture {

@@ -324,6 +324,14 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE void learnMute(int row);
   Q_INVOKABLE void learnInsertParam(int row, int slot, int param,
                                     qreal min, qreal max);
+  // Next note-on from any controller becomes this pad's MIDI key. Not a
+  // lasting binding: the pad then plays that note the ordinary way. A CC
+  // is ignored so a knob sweep while wiring pads does not steal the learn.
+  Q_INVOKABLE void learnSamplerPadNote(int row, int slot, int pad);
+  // While the Sampler editor is open, every controller on the machine
+  // lights that chip's pads — the strip's own MIDI routing does not have
+  // to be right first. Off when the editor closes.
+  Q_INVOKABLE void listenSamplerMidi(int row, int slot, bool on);
   Q_INVOKABLE void cancelLearn();
   Q_INVOKABLE void clearMidiMaps(int row);
   Q_INVOKABLE bool insertParamMapped(int row, int slot, int param) const;
@@ -396,11 +404,19 @@ class MixerModel : public QAbstractListModel {
                                      const QString& name);
   Q_INVOKABLE void setSamplerTrim(int row, int slot, int pad, qreal start,
                                   qreal end);
+  Q_INVOKABLE void setSamplerFades(int row, int slot, int pad, qreal fadeIn,
+                                   qreal fadeOut);
   Q_INVOKABLE bool loadSamplerPad(int row, int slot, int pad, const QUrl& file);
   Q_INVOKABLE void previewSamplerPad(int row, int slot, int pad, int velocity);
   Q_INVOKABLE void releaseSamplerPad(int row, int slot, int pad);
   Q_INVOKABLE QVariantList samplerWaveform(int row, int slot, int pad,
                                            int buckets) const;
+  Q_INVOKABLE bool undoSamplerPad(int row, int slot, int pad);
+  Q_INVOKABLE void setSamplerCountIn(int row, int slot, bool on);
+  // The pads on their own, without the rest of the strip — a kit you can
+  // save and load independent of what sits in front of the sampler.
+  Q_INVOKABLE bool saveSamplerPackTo(int row, int slot, const QUrl& file);
+  Q_INVOKABLE bool loadSamplerPackFrom(int row, int slot, const QUrl& file);
 
   // --- routing ------------------------------------------------------------
   // Ports a channel can be fed from, ready to show in a picker. `midi` picks
@@ -546,7 +562,8 @@ class MixerModel : public QAbstractListModel {
   struct MidiMapping {
     int cc = -1;
     int midi_channel = -1;
-    enum class Kind { Gain, Pan, Mute, Param } kind = Kind::Gain;
+    enum class Kind { Gain, Pan, Mute, Param, SamplerPadNote } kind =
+        Kind::Gain;
     int row = -1;
     int graph_slot = -1;
     bool is_bus = false;
@@ -566,6 +583,8 @@ class MixerModel : public QAbstractListModel {
     bool armed = false;
     MidiMapping target;
   } pending_learn_;
+  int sampler_listen_row_ = -1;
+  int sampler_listen_slot_ = -1;
   QTimer autosave_timer_;
   // Restoring fires the same setters the UI does; without this every one of
   // them would queue another save of what was just loaded.

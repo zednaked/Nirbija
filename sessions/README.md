@@ -46,7 +46,8 @@ The sampler demo: nothing but plugins that ship inside the host. Tempo 108.
   `sessions/samples/` — kick, snare, hats, clap, rim, floor tom, cowbell —
   and the session names them, it does not swallow them. Play works with no
   DrumGizmo, no AVL, no SFZ on disk. Replace a wav and rebuild, or just
-  reload: the pad is the file.
+  reload: the pad is the file. Count-in ships on, so hitting Rec shows the
+  bar of clicks before it punches in.
 - **Room** (bus) — `nirbija.fxpad` Reverb, fed by a send from Kit.
 
 Switch banks from the sequencer's pattern pads. Rebuild the file after
@@ -55,6 +56,50 @@ editing the kit or the grooves:
 ```sh
 python3 sessions/build-sampler.py
 sessions/run-jam.sh jam-sampler
+```
+
+## jam-breakbeat.json
+
+A stress test, not a demo. Four bars at 172 BPM in the spirit of a chopped
+breakbeat — syncopated kick, ghost snares, a hi-hat driving every 16th —
+with the fourth bar handed over entirely to a snare roll built from the
+step sequencer's own ratchet field (up to 8 retriggers inside one 16th).
+No sample of an actual breakbeat is used; the roll is the point, and
+ratchets are how this engine already does one. The kit is **808 Trap**
+(`sessions/packs/808-trap/`), pointed at in place rather than duplicated.
+
+Building this session is what found and fixed a real bug: a ratchet's own
+gate closing between pulses (anything under a full 1.0, which is every
+lane's own default) used to look identical to the voice being cancelled
+from outside, so every pulse past the first quietly died. A regression
+test in `tests/step_sequencer_test.cpp` covers it now.
+
+```sh
+python3 sessions/build-breakbeat.py
+sessions/run-jam.sh jam-breakbeat
+```
+
+## sessions/packs/ — extra kits for the Sampler
+
+Not sessions — files for the Sampler editor's own **Open Pack** button. A
+pack is a kit on its own: sixteen pads' worth of tuning and either a Rec take
+or, here, a path into the pack's own `samples/` folder next to it — the same
+"the pad is the file" idea as `jam-sampler.json` above, just scoped to the
+Sampler insert instead of the whole session. Loading one replaces the pads
+without touching gain, quantize, count-in, or whatever else sits in front of
+the Sampler in the chain.
+
+- **808 Trap** (`packs/808-trap/`) — a long sub kick, a tight clap-forward
+  snare, hats front to back.
+- **Techno Clang** (`packs/techno-clang/`) — a punchy distorted kick, harsh
+  metallic hats, a clang where the cowbell usually sits.
+
+Both come out of the same tiny synth as the house kit above (`drum_synth.py`,
+shared by both generator scripts) — different numbers in, a different kit
+out. Rebuild after tuning a voice:
+
+```sh
+python3 sessions/build-packs.py
 ```
 
 ## jam-black-pearl.json

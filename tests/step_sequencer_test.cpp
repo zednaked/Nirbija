@@ -1344,6 +1344,42 @@ int main() {
     }
   }
 
+  // --- a ratchet survives its own gate closing between pulses ----------------
+  //
+  // Gate under 1.0 means the note-off between two ratchet pulses fires
+  // before the next pulse's time comes around — completely normal, the
+  // same silence gate leaves between two ordinary steps. That used to look
+  // exactly like the voice having been cancelled from outside, so every
+  // ratchet but the very first pulse quietly died the moment gate left its
+  // default of 0.5. No lane in this file touches gate, so this is the
+  // lane's own factory setting, not a contrived edge case.
+  {
+    Seq seq;
+    seq.activate(kRate, kBlock);
+    seq.set_parameter(13, 1.0);
+    seq.set_parameter(194, 1.0);  // ratchet macro fully on; gate stays 0.5
+    seq.set_cell(0, 0, 0, 60, 100, true, 1.0f);
+    seq.set_trig(0, 0, 0, 0.0f, 4, Seq::Always, 0);
+    const std::vector<Note> notes =
+        run(seq, static_cast<int>(std::ceil(1.0 / block_beats)));
+    std::vector<double> ons;
+    for (const Note& note : notes)
+      if (note.on) ons.push_back(note.beat);
+    expect(ons.size() >= 4,
+           "a ratchet at the lane's default gate should still emit four "
+           "ons, got " +
+               std::to_string(ons.size()));
+    if (ons.size() >= 4) {
+      const double tol = block_beats;
+      expect(std::fabs(ons[1] - 0.0625) < tol,
+             "ratchet pulse 1 missed 0.0625 with gate under 1.0");
+      expect(std::fabs(ons[2] - 0.125) < tol,
+             "ratchet pulse 2 missed 0.125 with gate under 1.0");
+      expect(std::fabs(ons[3] - 0.1875) < tol,
+             "ratchet pulse 3 missed 0.1875 with gate under 1.0");
+    }
+  }
+
   // --- ratchet 8 in a 1024-frame block includes pulse 2 in the same block ---
   {
     Seq seq;

@@ -252,7 +252,8 @@ void MixerModel::applyMapsJson(int row, const QJsonArray& maps) {
     map.min = saved[QStringLiteral("min")].toDouble(0.0);
     map.max = saved[QStringLiteral("max")].toDouble(1.0);
     map.toggle = saved[QStringLiteral("toggle")].toBool(false);
-    if (map.cc >= 0) midi_maps_.push_back(map);
+    if (map.cc >= 0 && map.kind != MidiMapping::Kind::SamplerPadNote)
+      midi_maps_.push_back(map);
   }
 }
 
@@ -618,6 +619,92 @@ bool MixerModel::loadChannelFrom(const QUrl& file) {
   return true;
 }
 
+// --- a sampler pack, on its own -------------------------------------------
+//
+// The pads without the rest of the strip, and without the instrument's own
+// knobs: swap the kit under a sequencer without touching what it plays or
+// resetting gain, quantize or count-in. save_pads()/load_pads() are the
+// engine's own pads-only shape; the paths inside resolve the same way a
+// strip preset's do — against the pack file's own folder, not the session's.
+
+bool MixerModel::saveSamplerPackTo(int row, int slot, const QUrl& file) {
+  const QString path = file.isLocalFile() ? file.toLocalFile() : file.toString();
+  if (path.isEmpty()) return false;
+  auto* sampler = dynamic_cast<SamplerInstance*>(insertFor(row, slot));
+  if (sampler == nullptr) return false;
+
+  // Same reason any other save_state() call is parked: whatever the plugin
+  // does to gather its own state is not guaranteed safe under a concurrent
+  // process(), even though this particular one happens to be.
+  if (!engine_.park_graph()) {
+    engine_.unpark_graph();
+    emit errorOccurred(tr("The audio graph would not settle; try again"));
+    return false;
+  }
+  const std::vector<uint8_t> blob = sampler->save_pads();
+  engine_.unpark_graph();
+
+  QJsonObject root;
+  root[QStringLiteral("version")] = kSessionVersion;
+  root[QStringLiteral("kind")] = QStringLiteral("samplerPack");
+  root[QStringLiteral("state")] = QString::fromLatin1(
+      QByteArray(reinterpret_cast<const char*>(blob.data()),
+                 static_cast<qsizetype>(blob.size()))
+          .toBase64());
+
+  QFile out(path);
+  if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+    emit errorOccurred(tr("Could not write %1").arg(QFileInfo(path).fileName()));
+    return false;
+  }
+  out.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+  out.close();
+  return true;
+}
+
+bool MixerModel::loadSamplerPackFrom(int row, int slot, const QUrl& file) {
+  const QString path = file.isLocalFile() ? file.toLocalFile() : file.toString();
+  if (path.isEmpty()) return false;
+  auto* sampler = dynamic_cast<SamplerInstance*>(insertFor(row, slot));
+  if (sampler == nullptr) return false;
+
+  QFile in(path);
+  if (!in.open(QIODevice::ReadOnly)) {
+    emit errorOccurred(tr("Could not open %1").arg(QFileInfo(path).fileName()));
+    return false;
+  }
+  const QJsonDocument document = QJsonDocument::fromJson(in.readAll());
+  in.close();
+  if (!document.isObject() ||
+      document.object()[QStringLiteral("kind")].toString() !=
+          QLatin1String("samplerPack")) {
+    emit errorOccurred(
+        tr("%1 is not a Nirbija sampler pack").arg(QFileInfo(path).fileName()));
+    return false;
+  }
+
+  const QByteArray bytes = QByteArray::fromBase64(
+      document.object()[QStringLiteral("state")].toString().toLatin1());
+  const std::vector<uint8_t> blob(bytes.begin(), bytes.end());
+
+  if (!engine_.park_graph()) {
+    engine_.unpark_graph();
+    emit errorOccurred(tr("The audio graph would not settle; try again"));
+    return false;
+  }
+  const bool ok = sampler->load_pads(blob);
+  if (ok)
+    sampler->resolve_paths(QFileInfo(path).absolutePath().toStdString());
+  engine_.unpark_graph();
+  if (!ok) {
+    emit errorOccurred(
+        tr("%1 refused its own saved state").arg(QFileInfo(path).fileName()));
+    return false;
+  }
+  markDirty();
+  return true;
+}
+
 bool MixerModel::readSession(const QString& target) {
   if (!engine_.running()) return false;
   if (!engine_.park_graph()) {
@@ -708,7 +795,8 @@ bool MixerModel::readSession(const QString& target) {
         map.graph_slot = saved[QStringLiteral("graphSlot")].toInt(-1);
         map.is_bus = saved[QStringLiteral("bus")].toBool();
       }
-      if (map.cc >= 0) midi_maps_.push_back(map);
+      if (map.cc >= 0 && map.kind != MidiMapping::Kind::SamplerPadNote)
+        midi_maps_.push_back(map);
     }
   }
   if (!midi_maps_.empty()) engine_.connect_all_midi_to_control();

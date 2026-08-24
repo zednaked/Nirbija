@@ -1,4 +1,5 @@
 #include "core/engine.h"
+#include "core/ble_midi.h"
 
 #include <jack/midiport.h>
 
@@ -9,6 +10,96 @@
 
 namespace nirbija {
 namespace {
+
+int midi_data_bytes(uint8_t status) {
+  const uint8_t high = status & 0xf0;
+  if (high == 0xc0 || high == 0xd0) return 1;  // program change, pressure
+  if (status >= 0xf8) return 0;                // realtime
+  if (status >= 0xf0) return 1;                // coarse: SysEx handled elsewhere
+  return 2;
+}
+
+// JACK / PipeWire may hand us a clean 3-byte note, a 4-byte UMP MIDI 1.0
+// packet, or a BLE MIDI blob with timestamps. Turn whatever that is into
+// one or more 1–3 byte channel-voice messages.
+size_t unpack_jack_midi(const uint8_t* src, size_t len, uint32_t frame,
+                        MidiEvent* out, size_t cap, uint8_t* running) {
+  if (src == nullptr || len == 0 || cap == 0) return 0;
+
+  size_t written = 0;
+  auto push = [&](uint8_t status, uint8_t d1, uint8_t d2, uint8_t bytes) {
+    if (written >= cap || bytes < 1) return;
+    MidiEvent& event = out[written++];
+    event.frame = frame;
+    event.size = bytes;
+    event.data[0] = status;
+    event.data[1] = d1;
+    event.data[2] = d2;
+  };
+
+  if (len <= 3) {
+    uint8_t status = src[0];
+    if (status < 0x80) {
+      if (*running < 0x80) return 0;
+      const int need = midi_data_bytes(*running);
+      if (need == 1)
+        push(*running, src[0], 0, 2);
+      else if (len >= 2)
+        push(*running, src[0], src[1], 3);
+      return written;
+    }
+    if (status < 0xf8) *running = status;
+    push(src[0], len > 1 ? src[1] : 0, len > 2 ? src[2] : 0,
+         static_cast<uint8_t>(len));
+    return written;
+  }
+
+  // UMP MIDI 1.0 channel voice: 0x2n status d1 d2
+  if (len == 4 && (src[0] & 0xf0) == 0x20 && src[1] >= 0x80) {
+    *running = src[1];
+    push(src[1], src[2], src[3], 3);
+    return written;
+  }
+
+  uint8_t status = *running;
+  for (size_t i = 0; i < len && written < cap;) {
+    const uint8_t byte = src[i++];
+    if (byte >= 0xf8) continue;  // clock, etc.
+    if (byte >= 0x80) {
+      status = byte;
+      *running = byte;
+      continue;
+    }
+    if (status < 0x80 || status >= 0xf0) continue;
+    const int need = midi_data_bytes(status);
+    uint8_t d1 = byte;
+    uint8_t d2 = 0;
+    if (need == 2) {
+      if (i >= len) break;
+      if (src[i] >= 0x80) continue;
+      d2 = src[i++];
+    }
+    push(status, d1, d2, static_cast<uint8_t>(need + 1));
+  }
+  return written;
+}
+
+size_t drain_jack_midi_port(jack_port_t* port, uint32_t frames, MidiEvent* out,
+                            size_t cap, uint8_t* running) {
+  if (port == nullptr || cap == 0) return 0;
+  void* buffer = jack_port_get_buffer(port, frames);
+  if (buffer == nullptr) return 0;
+  const jack_nframes_t count = jack_midi_get_event_count(buffer);
+  size_t written = 0;
+  for (jack_nframes_t i = 0; i < count && written < cap; ++i) {
+    jack_midi_event_t event;
+    if (jack_midi_event_get(&event, buffer, i) != 0) continue;
+    if (event.size == 0 || event.buffer == nullptr) continue;
+    written += unpack_jack_midi(event.buffer, event.size, event.time,
+                                out + written, cap - written, running);
+  }
+  return written;
+}
 
 // Reads a channel's audio straight out of its JACK input ports. Only ever used
 // from inside the process callback, where jack_port_get_buffer is realtime-safe.
@@ -79,28 +170,12 @@ class JackMidiSource : public MidiSource {
   explicit JackMidiSource(jack_port_t* port) : port_(port) {}
 
   size_t read(MidiEvent* out, size_t capacity, uint32_t frames) override {
-    void* buffer = jack_port_get_buffer(port_, frames);
-    if (buffer == nullptr) return 0;
-
-    const jack_nframes_t count = jack_midi_get_event_count(buffer);
-    size_t written = 0;
-    for (jack_nframes_t i = 0; i < count && written < capacity; ++i) {
-      jack_midi_event_t event;
-      if (jack_midi_event_get(&event, buffer, i) != 0) continue;
-      // Anything longer than three bytes is SysEx, which nothing downstream
-      // takes yet; dropping it beats truncating it into a bogus message.
-      if (event.size == 0 || event.size > 3) continue;
-
-      MidiEvent& target = out[written++];
-      target.frame = event.time;
-      target.size = static_cast<uint8_t>(event.size);
-      std::copy_n(event.buffer, event.size, target.data);
-    }
-    return written;
+    return drain_jack_midi_port(port_, frames, out, capacity, &running_);
   }
 
  private:
   jack_port_t* port_;
+  uint8_t running_{0};
 };
 
 }  // namespace
@@ -141,10 +216,19 @@ bool Engine::start(const std::string& client_name) {
     stop();
     return false;
   }
+  // After JACK is up: PipeWire lists the SMC-PAD as a MIDI port but never
+  // AcquireNotify's the BLE characteristic, so the port stays silent. We
+  // take the notify FD ourselves.
+  ble_midi_ = std::make_unique<BleMidi>();
+  ble_midi_->start();
   return true;
 }
 
 void Engine::stop() {
+  if (ble_midi_) {
+    ble_midi_->stop();
+    ble_midi_.reset();
+  }
   if (client_ == nullptr) return;
   jack_deactivate(client_);
   jack_client_close(client_);
@@ -647,24 +731,33 @@ void Engine::connect_all_midi_to_control() {
     jack_connect(client_, source.c_str(), jack_port_name(control_in_));
 }
 
+void Engine::connect_all_midi_to_channel(size_t channel) {
+  if (client_ == nullptr || channel >= channel_ports_.size()) return;
+  jack_port_t* midi = channel_ports_[channel].midi;
+  if (midi == nullptr) return;
+  for (const std::string& source : available_sources(true))
+    jack_connect(client_, source.c_str(), jack_port_name(midi));
+}
+
 int Engine::process(jack_nframes_t frames) {
   drain_commands();
 
   // Controller traffic is handed to the UI thread whole; the mappings live
   // there.
-  if (control_in_ != nullptr) {
-    void* buffer = jack_port_get_buffer(control_in_, frames);
-    const jack_nframes_t count =
-        buffer != nullptr ? jack_midi_get_event_count(buffer) : 0;
-    for (jack_nframes_t i = 0; i < count; ++i) {
-      jack_midi_event_t event;
-      if (jack_midi_event_get(&event, buffer, i) != 0) continue;
-      if (event.size == 0 || event.size > 3) continue;
-      MidiEvent forwarded;
-      forwarded.frame = event.time;
-      forwarded.size = static_cast<uint8_t>(event.size);
-      std::copy_n(event.buffer, event.size, forwarded.data);
-      control_events_.push(forwarded);
+  MidiEvent midi_block[64];
+  const size_t midi_n = drain_jack_midi_port(
+      control_in_, frames, midi_block, 64, &midi_running_status_);
+  for (size_t i = 0; i < midi_n; ++i) control_events_.push(midi_block[i]);
+
+  if (ble_midi_ != nullptr) {
+    MidiEvent ble[32];
+    const size_t ble_n = ble_midi_->pop(ble, 32);
+    for (size_t i = 0; i < ble_n; ++i) {
+      control_events_.push(ble[i]);
+      for (size_t ch = 0; ch < channel_ports_.size(); ++ch) {
+        if (graph_->channel_alive(ch))
+          graph_->push_injected_midi(ch, ble[i]);
+      }
     }
   }
 

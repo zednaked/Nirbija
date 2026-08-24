@@ -732,8 +732,12 @@ void StepSequencerInstance::process(const float* const*, float* const*,
   const auto drain_ratchet = [&](int voice, bool muted) {
     if (armed || muted) return;
     HeadVoice& v = voices_[static_cast<size_t>(voice)];
-    const int held = v.pitch;
-    const uint8_t ch = v.channel;
+    // Not v.pitch: gate closes that between pulses on purpose (see the
+    // field comment on ratchet_pitch), and treating "off right now" as
+    // "cancelled" used to kill every roll but the last pulse whenever gate
+    // was under 1.0 — which is most of the time.
+    const int held = v.ratchet_pitch;
+    const uint8_t ch = v.ratchet_channel;
     while (v.ratchet_left > 0) {
       if (v.next_pulse_beat < start_beat) {
         --v.ratchet_left;
@@ -741,10 +745,6 @@ void StepSequencerInstance::process(const float* const*, float* const*,
         continue;
       }
       if (v.next_pulse_beat >= end_beat) break;
-      if (held < 0) {
-        v.ratchet_left = 0;
-        break;
-      }
       const uint32_t frame = frame_for(v.next_pulse_beat);
       stop_sounding(voice, frame);
       emit(frame, static_cast<uint8_t>(kNoteOn | ch),
@@ -937,6 +937,8 @@ void StepSequencerInstance::process(const float* const*, float* const*,
             voice_state.pulse_vel = velocity;
             voice_state.next_pulse_beat = sound_beat + voice_state.pulse_spacing;
             voice_state.ratchet_left = n - 1;
+            voice_state.ratchet_pitch = pitch;
+            voice_state.ratchet_channel = channel;
             voice_state.off_beat =
                 std::min(sound_beat + voice_state.pulse_dur, next);
             last_tied_[static_cast<size_t>(voice)] = false;

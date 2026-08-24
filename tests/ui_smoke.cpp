@@ -355,6 +355,58 @@ int main(int argc, char* argv[]) {
     }
   }
 
+  // A sampler pad learns a controller note rather than a lasting CC bind:
+  // the next note-on becomes that pad's key, a CC is ignored, and a note
+  // already taken by another pad swaps so the grid never shares a key.
+  {
+    const int sampler =
+        mixer.plugins()->rowFor(nirbija::PluginFormat::Internal,
+                                "nirbija.sampler");
+    if (sampler >= 0) {
+      mixer.addChannel(QStringLiteral("Kit"), 2);
+      const int row = mixer.rowCount() - 1;
+      if (!mixer.addInsert(row, sampler)) {
+        fail("could not add a sampler to learn a pad note onto");
+      } else {
+        mixer.learnSamplerPadNote(row, 0, 0);
+        if (!mixer.learning()) fail("arming a pad note did not enter learn");
+        mixer.injectControl(21, 0, 64);
+        if (!mixer.learning()) fail("a CC stole pad-note learn");
+        mixer.injectControl(128 + 44, 0, 0);
+        if (!mixer.learning()) fail("a note-off closed pad-note learn");
+        mixer.injectControl(128 + 44, 0, 100);
+        if (mixer.learning()) fail("a note-on did not assign the pad");
+        const QVariantMap snap = mixer.insertSamplerSnapshot(row, 0);
+        const QVariantList pads = snap.value(QStringLiteral("pads")).toList();
+        if (pads.value(0).toMap().value(QStringLiteral("note")).toInt() != 44)
+          fail("the pad did not take the learned note");
+        if (snap.value(QStringLiteral("focused")).toInt() != 0)
+          fail("learning a pad did not focus it");
+
+        mixer.learnSamplerPadNote(row, 0, 0);
+        mixer.injectControl(128 + 38, 0, 100);  // factory snare, pad 1
+        const QVariantList swapped =
+            mixer.insertSamplerSnapshot(row, 0)
+                .value(QStringLiteral("pads"))
+                .toList();
+        if (swapped.value(0).toMap().value(QStringLiteral("note")).toInt() != 38)
+          fail("relearning a taken note did not move it onto the pad");
+        if (swapped.value(1).toMap().value(QStringLiteral("note")).toInt() != 44)
+          fail("the pad that owned the note did not take the old one");
+
+        mixer.listenSamplerMidi(row, 0, true);
+        mixer.injectControl(128 + 48, 0, 100);  // C1 grid, no factory pad owns 48
+        const QVariantMap heard = mixer.insertSamplerSnapshot(row, 0);
+        if (heard.value(QStringLiteral("lastNote")).toInt() != 48)
+          fail("an open sampler editor did not hear a controller note");
+        if (heard.value(QStringLiteral("focused")).toInt() != 4)
+          fail("an unowned C1-grid note did not focus its cell");
+        mixer.listenSamplerMidi(row, 0, false);
+      }
+      mixer.removeChannel(row);
+    }
+  }
+
   // --- the picker's kind filter --------------------------------------------
   //
   // Runs against whatever is installed rather than a fixture, so it asserts the

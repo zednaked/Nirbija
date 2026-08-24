@@ -13,10 +13,13 @@ add_library(nirbija_core
   core/keyboard_instrument.cpp
   core/sampler.cpp
   core/chord.cpp
+  core/ble_midi.cpp
 )
 target_include_directories(nirbija_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+pkg_check_modules(SYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
+find_package(Threads REQUIRED)
 target_link_libraries(nirbija_core PUBLIC PkgConfig::JACK
-  PRIVATE PkgConfig::SNDFILE PkgConfig::LUA)
+  PRIVATE PkgConfig::SNDFILE PkgConfig::LUA PkgConfig::SYSTEMD Threads::Threads)
 
 if(NIRBIJA_LV2)
   target_sources(nirbija_core PRIVATE hosting/lv2_backend.cpp)

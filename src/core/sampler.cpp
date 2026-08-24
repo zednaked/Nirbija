@@ -22,10 +22,14 @@ enum Params : uint32_t {
   kVolume = 7,
   kPan = 8,
   kNote = 9,
+  kCountIn = 10,
+  kUndo = 11,
 };
 
 constexpr char kMagic1[] = "NJSMP01\n";
 constexpr char kMagic2[] = "NJSMP02\n";
+constexpr char kPackMagic[] = "NJSMPK1\n";
+constexpr double kPi = 3.14159265358979323846;
 
 struct Seed {
   int note;
@@ -136,11 +140,32 @@ void SamplerInstance::seed_defaults() {
     pads_[i].pitch.store(0.0f, std::memory_order_relaxed);
     pads_[i].start.store(0.0, std::memory_order_relaxed);
     pads_[i].end.store(1.0, std::memory_order_relaxed);
+    pads_[i].fade_in.store(0.0, std::memory_order_relaxed);
+    pads_[i].fade_out.store(0.0, std::memory_order_relaxed);
     pads_[i].name = kSeed[i].name;
     pads_[i].path.clear();
     pads_[i].live.store(nullptr, std::memory_order_relaxed);
     pads_[i].owned.reset();
+    pads_[i].undo_owned.reset();
+    pads_[i].undo_path.clear();
+    pads_[i].undo_start = 0.0;
+    pads_[i].undo_end = 1.0;
+    pads_[i].undo_fade_in = 0.0;
+    pads_[i].undo_fade_out = 0.0;
+    pads_[i].has_undo = false;
   }
+}
+
+void SamplerInstance::stash_undo(int pad) {
+  if (pad < 0 || pad >= kPads) return;
+  Pad& p = pads_[pad];
+  p.undo_owned = p.owned;
+  p.undo_path = p.path;
+  p.undo_start = p.start.load(std::memory_order_relaxed);
+  p.undo_end = p.end.load(std::memory_order_relaxed);
+  p.undo_fade_in = p.fade_in.load(std::memory_order_relaxed);
+  p.undo_fade_out = p.fade_out.load(std::memory_order_relaxed);
+  p.has_undo = true;
 }
 
 void SamplerInstance::publish(int pad, std::shared_ptr<Buffer> buffer) {
@@ -158,6 +183,7 @@ void SamplerInstance::publish(int pad, std::shared_ptr<Buffer> buffer) {
 
 bool SamplerInstance::load(int pad, const std::string& path) {
   if (pad < 0 || pad >= kPads) return false;
+  stash_undo(pad);
   // Remember the name even if the file is missing: a session can travel
   // ahead of its samples folder, and resolve_paths fills the pad later.
   pads_[pad].path = path;
@@ -182,6 +208,7 @@ bool SamplerInstance::commit_take() {
   if (frames == 0 || pad < 0 || pad >= kPads) return false;
   if (rec_buffer_.size() < frames * 2) return false;
 
+  stash_undo(pad);
   auto buffer = std::make_shared<Buffer>();
   buffer->frames = frames;
   buffer->sample_rate = engine_rate_ > 0.0 ? engine_rate_ : 48000.0;
@@ -196,10 +223,46 @@ bool SamplerInstance::commit_take() {
 
 void SamplerInstance::clear_pad(int pad) {
   if (pad < 0 || pad >= kPads) return;
+  stash_undo(pad);
   pads_[pad].path.clear();
   publish(pad, nullptr);
   pads_[pad].start.store(0.0, std::memory_order_relaxed);
   pads_[pad].end.store(1.0, std::memory_order_relaxed);
+  pads_[pad].fade_in.store(0.0, std::memory_order_relaxed);
+  pads_[pad].fade_out.store(0.0, std::memory_order_relaxed);
+}
+
+bool SamplerInstance::undo_pad(int pad) {
+  if (pad < 0 || pad >= kPads) return false;
+  Pad& p = pads_[pad];
+  if (!p.has_undo) return false;
+
+  std::shared_ptr<Buffer> swap_owned = std::move(p.undo_owned);
+  std::string swap_path = std::move(p.undo_path);
+  const double swap_start = p.undo_start;
+  const double swap_end = p.undo_end;
+  const double swap_fade_in = p.undo_fade_in;
+  const double swap_fade_out = p.undo_fade_out;
+
+  p.undo_owned = p.owned;
+  p.undo_path = p.path;
+  p.undo_start = p.start.load(std::memory_order_relaxed);
+  p.undo_end = p.end.load(std::memory_order_relaxed);
+  p.undo_fade_in = p.fade_in.load(std::memory_order_relaxed);
+  p.undo_fade_out = p.fade_out.load(std::memory_order_relaxed);
+
+  p.path = std::move(swap_path);
+  publish(pad, std::move(swap_owned));
+  p.start.store(swap_start, std::memory_order_relaxed);
+  p.end.store(swap_end, std::memory_order_relaxed);
+  p.fade_in.store(swap_fade_in, std::memory_order_relaxed);
+  p.fade_out.store(swap_fade_out, std::memory_order_relaxed);
+  return true;
+}
+
+bool SamplerInstance::pad_can_undo(int pad) const {
+  if (pad < 0 || pad >= kPads) return false;
+  return pads_[pad].has_undo;
 }
 
 std::string SamplerInstance::pad_path(int pad) const {
@@ -252,6 +315,14 @@ void SamplerInstance::set_trim(int pad, double start, double end) {
   pads_[pad].end.store(end, std::memory_order_relaxed);
 }
 
+void SamplerInstance::set_fades(int pad, double fade_in, double fade_out) {
+  if (pad < 0 || pad >= kPads) return;
+  pads_[pad].fade_in.store(std::clamp(fade_in, 0.0, 1.0),
+                           std::memory_order_relaxed);
+  pads_[pad].fade_out.store(std::clamp(fade_out, 0.0, 1.0),
+                            std::memory_order_relaxed);
+}
+
 void SamplerInstance::set_pad(int pad, int note, bool one_shot, float volume,
                               float pan, float pitch) {
   if (pad < 0 || pad >= kPads) return;
@@ -262,6 +333,17 @@ void SamplerInstance::set_pad(int pad, int note, bool one_shot, float volume,
   pads_[pad].pan.store(std::clamp(pan, -1.0f, 1.0f), std::memory_order_relaxed);
   pads_[pad].pitch.store(std::clamp(pitch, -24.0f, 24.0f),
                          std::memory_order_relaxed);
+}
+
+void SamplerInstance::assign_note(int pad, int note) {
+  if (pad < 0 || pad >= kPads) return;
+  note = std::clamp(note, 0, 127);
+  const int previous = pads_[pad].note.load(std::memory_order_relaxed);
+  if (previous == note) return;
+  const int other = pad_for_note(note);
+  pads_[pad].note.store(note, std::memory_order_relaxed);
+  if (other >= 0 && other != pad)
+    pads_[other].note.store(previous, std::memory_order_relaxed);
 }
 
 std::string SamplerInstance::pad_name(int pad) const {
@@ -302,6 +384,16 @@ double SamplerInstance::pad_start(int pad) const {
 double SamplerInstance::pad_end(int pad) const {
   if (pad < 0 || pad >= kPads) return 1.0;
   return pads_[pad].end.load(std::memory_order_relaxed);
+}
+
+double SamplerInstance::pad_fade_in(int pad) const {
+  if (pad < 0 || pad >= kPads) return 0.0;
+  return pads_[pad].fade_in.load(std::memory_order_relaxed);
+}
+
+double SamplerInstance::pad_fade_out(int pad) const {
+  if (pad < 0 || pad >= kPads) return 0.0;
+  return pads_[pad].fade_out.load(std::memory_order_relaxed);
 }
 
 bool SamplerInstance::pad_has_audio(int pad) const {
@@ -363,6 +455,14 @@ bool SamplerInstance::activate(double sample_rate, uint32_t) {
   incoming_count_ = 0;
   voices_ = {};
   recording_.store(false, std::memory_order_relaxed);
+  counting_ = false;
+  count_in_left_.store(0, std::memory_order_relaxed);
+  click_remaining_ = 0;
+  hit_flash_frames_ = {};
+  hit_flash_mask_.store(0, std::memory_order_relaxed);
+  ping_mask_.store(0, std::memory_order_relaxed);
+  last_midi_note_.store(-1, std::memory_order_relaxed);
+  last_midi_cc_.store(-1, std::memory_order_relaxed);
   return true;
 }
 
@@ -372,6 +472,14 @@ void SamplerInstance::deactivate() {
   recording_.store(false, std::memory_order_relaxed);
   rec_waiting_ = false;
   sounding_mask_.store(0, std::memory_order_relaxed);
+  counting_ = false;
+  count_in_left_.store(0, std::memory_order_relaxed);
+  click_remaining_ = 0;
+  hit_flash_frames_ = {};
+  hit_flash_mask_.store(0, std::memory_order_relaxed);
+  ping_mask_.store(0, std::memory_order_relaxed);
+  last_midi_note_.store(-1, std::memory_order_relaxed);
+  last_midi_cc_.store(-1, std::memory_order_relaxed);
 }
 
 void SamplerInstance::queue_midi(const MidiEvent& event) {
@@ -382,7 +490,19 @@ void SamplerInstance::queue_midi(const MidiEvent& event) {
 int SamplerInstance::pad_for_note(int note) const {
   for (int i = 0; i < kPads; ++i)
     if (pads_[i].note.load(std::memory_order_relaxed) == note) return i;
-  return -1;
+  int local = -1;
+  if (note >= 36 && note < 36 + kPads)
+    local = note - 36;
+  else if (note >= 0 && note < 36)
+    local = note & (kPads - 1);
+  if (local < 0) return -1;
+  // The SMC-PAD's 4×4 is top row first, then the last row where the
+  // second should be (and the second where the last should be). The
+  // other two rows already match the editor.
+  const int row = local / 4;
+  const int col = local % 4;
+  const int mapped = (row == 1) ? 3 : (row == 3) ? 1 : row;
+  return mapped * 4 + col;
 }
 
 void SamplerInstance::chase_pad(int pad) {
@@ -425,12 +545,42 @@ void SamplerInstance::start_voice(int pad, int velocity, uint32_t /*frame*/) {
   voice.buffer = buffer;
   voice.position = static_cast<double>(start_frame);
   voice.step = step > 0.0 ? step : 1.0;
+  voice.start_frame = start_frame;
   voice.end_frame = end_frame;
   voice.gain_l = amp * pan_l;
   voice.gain_r = amp * pan_r;
   voice.attack = 0;
   voice.release = kFade;
   voice.releasing = false;
+}
+
+float SamplerInstance::fade_gain(int pad, uint64_t position, uint64_t start,
+                                 uint64_t end) const {
+  if (pad < 0 || pad >= kPads || end <= start) return 1.0f;
+  const uint64_t span = end - start;
+  const uint64_t into = position >= start ? position - start : 0;
+  const uint64_t remaining = position < end ? end - position : 0;
+
+  const double fade_in_frac =
+      std::clamp(pads_[pad].fade_in.load(std::memory_order_relaxed), 0.0, 1.0);
+  const double fade_out_frac = std::clamp(
+      pads_[pad].fade_out.load(std::memory_order_relaxed), 0.0, 1.0);
+  // Each fade is capped at half the trim window, the same as the looper's,
+  // so a short pad with both turned up crossfades through the middle
+  // instead of one swallowing the other's tail.
+  const uint64_t fade_in_frames =
+      static_cast<uint64_t>(fade_in_frac * static_cast<double>(span) / 2.0);
+  const uint64_t fade_out_frames =
+      static_cast<uint64_t>(fade_out_frac * static_cast<double>(span) / 2.0);
+
+  float gain = 1.0f;
+  if (fade_in_frames > 0 && into < fade_in_frames)
+    gain = std::min(gain, static_cast<float>(into) /
+                              static_cast<float>(fade_in_frames));
+  if (fade_out_frames > 0 && remaining < fade_out_frames)
+    gain = std::min(gain, static_cast<float>(remaining) /
+                              static_cast<float>(fade_out_frames));
+  return gain;
 }
 
 void SamplerInstance::release_voice(int pad) {
@@ -441,14 +591,54 @@ void SamplerInstance::release_voice(int pad) {
   voice.releasing = true;
 }
 
+void SamplerInstance::fire_count_click(bool downbeat) {
+  if (engine_rate_ <= 0.0) return;
+  click_length_ = static_cast<uint32_t>(engine_rate_ * 0.03);
+  click_remaining_ = click_length_;
+  click_phase_ = 0.0;
+  click_step_ = 2.0 * kPi * (downbeat ? 1568.0 : 1046.5) / engine_rate_;
+}
+
+void SamplerInstance::flash_pad(int pad) {
+  if (pad < 0 || pad >= kPads) return;
+  // Long enough to survive a couple of UI polls and still read as a
+  // hit, short enough not to look latched.
+  hit_flash_frames_[static_cast<size_t>(pad)] =
+      static_cast<int>(engine_rate_ * 0.35);
+}
+
+void SamplerInstance::hear_note(int note, int velocity, bool down) {
+  last_midi_note_.store(note, std::memory_order_relaxed);
+  last_midi_cc_.store(-1, std::memory_order_relaxed);
+  if (!down || velocity <= 0) return;
+  const int pad = pad_for_note(note);
+  if (pad < 0) return;
+  ping_mask_.fetch_or(1u << pad, std::memory_order_relaxed);
+  focused_.store(pad, std::memory_order_relaxed);
+}
+
+void SamplerInstance::hear_cc(int cc) {
+  last_midi_cc_.store(cc, std::memory_order_relaxed);
+  last_midi_note_.store(-1, std::memory_order_relaxed);
+}
+
 void SamplerInstance::handle_midi(const MidiEvent& event) {
   if (event.size < 2) return;
   const uint8_t status = event.data[0] & 0xf0;
   const int note = event.data[1];
   const int velocity = event.size >= 3 ? event.data[2] : 0;
   if (status == 0x90 && velocity > 0) {
+    last_midi_note_.store(note, std::memory_order_relaxed);
+    last_midi_cc_.store(-1, std::memory_order_relaxed);
     const int pad = pad_for_note(note);
-    if (pad >= 0) start_voice(pad, velocity, event.frame);
+    if (pad >= 0) {
+      start_voice(pad, velocity, event.frame);
+      flash_pad(pad);
+      // Last pad hit is the one Rec and the knobs talk about, so a
+      // controller punch selects the pad the same way tapping the
+      // editor does.
+      focused_.store(pad, std::memory_order_relaxed);
+    }
   } else if (status == 0x80 || (status == 0x90 && velocity == 0)) {
     const int pad = pad_for_note(note);
     if (pad >= 0) release_voice(pad);
@@ -466,18 +656,41 @@ void SamplerInstance::process(const float* const* inputs, float* const* outputs,
   for (int p = 0; p < kPads; ++p)
     if ((stops & (1u << p)) != 0) chase_pad(p);
 
+  const uint32_t pings = ping_mask_.exchange(0, std::memory_order_relaxed);
+  for (int p = 0; p < kPads; ++p)
+    if ((pings & (1u << p)) != 0) flash_pad(p);
+
   Preview preview;
   while (preview_.pop(preview)) {
-    if (preview.down)
+    if (preview.down) {
       start_voice(preview.pad, preview.velocity, 0);
-    else
+      flash_pad(preview.pad);
+    } else {
       release_voice(preview.pad);
+    }
   }
 
   const bool want_rec = rec_request_.load(std::memory_order_acquire);
   const int quantize =
       std::clamp(quantize_.load(std::memory_order_relaxed), 0, 2);
   const bool rolling = transport_.rolling || transport_.playing;
+
+  // Count-in: dropping Rec, or turning Count-in off mid-count, cancels the
+  // whole pending take rather than just silencing the click — a count that
+  // finishes into a Rec nobody asked for anymore would be worse than none.
+  if (counting_) {
+    if (!want_rec || !count_in_.load(std::memory_order_relaxed)) {
+      counting_ = false;
+      count_in_left_.store(0, std::memory_order_relaxed);
+    }
+  } else if (want_rec && !recording_.load(std::memory_order_relaxed) &&
+             count_in_.load(std::memory_order_relaxed)) {
+    counting_ = true;
+    count_phase_ = 0.0;
+    count_total_ = std::max(1, transport_.numerator);
+    count_in_left_.store(count_total_, std::memory_order_relaxed);
+    fire_count_click(true);
+  }
 
   auto boundary_frame = [&](uint32_t from) -> uint32_t {
     if (quantize <= 0 || !rolling || transport_.tempo_bpm <= 0.0 ||
@@ -508,7 +721,7 @@ void SamplerInstance::process(const float* const* inputs, float* const* outputs,
                              std::memory_order_release);
       }
     }
-  } else if (!recording_.load(std::memory_order_relaxed)) {
+  } else if (!recording_.load(std::memory_order_relaxed) && !counting_) {
     rec_waiting_ = quantize > 0 && rolling;
     if (!rec_waiting_) {
       rec_written_ = 0;
@@ -526,7 +739,35 @@ void SamplerInstance::process(const float* const* inputs, float* const* outputs,
     while (midi_i < incoming_count_ && incoming_[midi_i].frame <= i)
       handle_midi(incoming_[midi_i++]);
 
-    if (want_rec && rec_waiting_ && !recording_.load(std::memory_order_relaxed)) {
+    if (counting_) {
+      const double tempo =
+          transport_.tempo_bpm > 0.0 ? transport_.tempo_bpm : 120.0;
+      const double beats_per_frame = tempo / 60.0 / std::max(engine_rate_, 1.0);
+      const double before = count_phase_;
+      count_phase_ += beats_per_frame;
+      if (count_phase_ >= static_cast<double>(count_total_)) {
+        // The count is the wait: skip the quantize grid so Rec does not
+        // wait a bar for the count and another for the boundary.
+        counting_ = false;
+        count_in_left_.store(0, std::memory_order_relaxed);
+        rec_written_ = 0;
+        rec_ready_frames_.store(0, std::memory_order_relaxed);
+        rec_pad_.store(focused_.load(std::memory_order_relaxed),
+                       std::memory_order_relaxed);
+        recording_.store(true, std::memory_order_relaxed);
+        rec_waiting_ = false;
+      } else if (std::floor(before) != std::floor(count_phase_)) {
+        const int beat = static_cast<int>(std::floor(count_phase_));
+        const int bar = std::max(1, transport_.numerator);
+        fire_count_click(beat % bar == 0);
+        const int left = static_cast<int>(
+            std::ceil(static_cast<double>(count_total_) - count_phase_));
+        count_in_left_.store(std::max(left, 1), std::memory_order_relaxed);
+      }
+    }
+
+    if (want_rec && rec_waiting_ && !recording_.load(std::memory_order_relaxed) &&
+        !counting_) {
       if (i >= boundary_frame(0)) {
         rec_written_ = 0;
         rec_ready_frames_.store(0, std::memory_order_relaxed);
@@ -596,10 +837,22 @@ void SamplerInstance::process(const float* const* inputs, float* const* outputs,
       const float b_r = read_sample(*voice.buffer, next, 1);
       const float s_l = static_cast<float>(a_l + (b_l - a_l) * fraction);
       const float s_r = static_cast<float>(a_r + (b_r - a_r) * fraction);
+      env *= fade_gain(p, index, voice.start_frame, voice.end_frame);
       out_l += s_l * voice.gain_l * env;
       out_r += s_r * voice.gain_r * env;
       voice.position += voice.step;
       sounding |= 1u << p;
+    }
+
+    if (click_remaining_ > 0 && click_length_ > 0) {
+      const float envelope = static_cast<float>(click_remaining_) /
+                             static_cast<float>(click_length_);
+      const float click =
+          static_cast<float>(std::sin(click_phase_)) * envelope * envelope * 0.4f;
+      click_phase_ += click_step_;
+      --click_remaining_;
+      out_l += click;
+      out_r += click;
     }
 
     if (outputs != nullptr) {
@@ -615,6 +868,16 @@ void SamplerInstance::process(const float* const* inputs, float* const* outputs,
   while (midi_i < incoming_count_) handle_midi(incoming_[midi_i++]);
   incoming_count_ = 0;
   sounding_mask_.store(sounding, std::memory_order_relaxed);
+
+  uint32_t hit_flash = 0;
+  for (int p = 0; p < kPads; ++p) {
+    int& left = hit_flash_frames_[static_cast<size_t>(p)];
+    if (left <= 0) continue;
+    left -= static_cast<int>(frames);
+    if (left > 0) hit_flash |= 1u << p;
+  }
+  hit_flash_mask_.store(hit_flash, std::memory_order_relaxed);
+
   process_generation_.fetch_add(1, std::memory_order_release);
 }
 
@@ -630,6 +893,8 @@ std::vector<ParameterInfo> SamplerInstance::parameters() const {
       {kVolume, "Pad volume", 0.0, 2.0, 1.0},
       {kPan, "Pad pan", -1.0, 1.0, 0.0},
       {kNote, "Pad note", 0.0, 127.0, 36.0},
+      {kCountIn, "Count-in", 0.0, 1.0, 0.0},
+      {kUndo, "Undo pad", 0.0, 1.0, 0.0},
   };
 }
 
@@ -647,6 +912,8 @@ double SamplerInstance::parameter_value(uint32_t id) const {
     case kVolume: return pad_volume(pad);
     case kPan: return pad_pan(pad);
     case kNote: return pad_note(pad);
+    case kCountIn: return count_in_.load(std::memory_order_relaxed) ? 1.0 : 0.0;
+    case kUndo: return 0.0;
     default: return 0.0;
   }
 }
@@ -697,6 +964,18 @@ void SamplerInstance::set_parameter(uint32_t id, double value) {
       if (value >= 0.5)
         clear_pad(focused_.load(std::memory_order_relaxed));
       break;
+    case kCountIn: {
+      const bool on = value >= 0.5;
+      count_in_.store(on, std::memory_order_relaxed);
+      // Turning the toggle off mid-count aborts the pending take rather
+      // than leaving Rec armed for a count that no longer runs.
+      if (!on && count_in_left_.load(std::memory_order_relaxed) > 0)
+        rec_request_.store(false, std::memory_order_release);
+      break;
+    }
+    case kUndo:
+      if (value >= 0.5) undo_pad(focused_.load(std::memory_order_relaxed));
+      break;
     default:
       apply_focused_param(id, value);
       break;
@@ -715,30 +994,9 @@ std::vector<NoteName> SamplerInstance::note_names() const {
   return names;
 }
 
-std::vector<uint8_t> SamplerInstance::save_state() const {
-  // A take that Rec just closed is still in rec_buffer_ until commit_take
-  // runs. The caller is on the UI thread with the graph parked, so we can
-  // publish it before walking the pads. const_cast is the same trick the
-  // looper uses when an open pass has to become a closed loop on save.
-  const_cast<SamplerInstance*>(this)->commit_take();
-
-  uint64_t total_frames = 0;
-  for (int i = 0; i < kPads; ++i) {
-    if (!pads_[i].path.empty()) continue;
-    const Buffer* buffer = pads_[i].live.load(std::memory_order_acquire);
-    if (buffer != nullptr) total_frames += buffer->frames;
-  }
-
-  std::vector<uint8_t> out;
-  out.reserve(8 + 16 + static_cast<size_t>(kPads) * 96 +
-              static_cast<size_t>(total_frames) * 2 * sizeof(float));
-  out.insert(out.end(), kMagic2, kMagic2 + 8);
-  append_pod(out, gain_.load(std::memory_order_relaxed));
-  append_pod(out, focused_.load(std::memory_order_relaxed));
-  append_pod(out, quantize_.load(std::memory_order_relaxed));
+void SamplerInstance::write_pads_to(std::vector<uint8_t>& out) const {
   const int32_t pad_count = kPads;
   append_pod(out, pad_count);
-
   for (int i = 0; i < kPads; ++i) {
     const Pad& pad = pads_[i];
     const Buffer* buffer = pad.live.load(std::memory_order_acquire);
@@ -779,6 +1037,124 @@ std::vector<uint8_t> SamplerInstance::save_state() const {
       out.insert(out.end(), samples, samples + frames * 2 * sizeof(float));
     }
   }
+  // Trailing and optional, the same append-only trick as Count-in: a reader
+  // that predates fades just sees extra bytes it does not look for. One
+  // pair per pad, in pad order, since pad_count above is always kPads on
+  // anything this engine writes.
+  for (int i = 0; i < kPads; ++i) {
+    append_pod(out, pads_[i].fade_in.load(std::memory_order_relaxed));
+    append_pod(out, pads_[i].fade_out.load(std::memory_order_relaxed));
+  }
+}
+
+bool SamplerInstance::read_pads_from(const uint8_t*& cursor, const uint8_t* end,
+                                     int pad_count, bool has_path_field) {
+  const int n = std::min(pad_count, kPads);
+  for (int i = 0; i < n; ++i) {
+    int32_t note = kSeed[i].note;
+    int32_t one_shot = 1;
+    float volume = 1.0f, pan = 0.0f, pitch = 0.0f;
+    double trim_start = 0.0, trim_end = 1.0;
+    uint64_t frames = 0;
+    double rate = 48000.0;
+    uint32_t name_len = 0;
+    if (!read_pod(cursor, end, &note) || !read_pod(cursor, end, &one_shot) ||
+        !read_pod(cursor, end, &volume) || !read_pod(cursor, end, &pan) ||
+        !read_pod(cursor, end, &pitch) || !read_pod(cursor, end, &trim_start) ||
+        !read_pod(cursor, end, &trim_end) || !read_pod(cursor, end, &frames) ||
+        !read_pod(cursor, end, &rate) || !read_pod(cursor, end, &name_len))
+      break;
+    if (static_cast<size_t>(end - cursor) < name_len) break;
+    std::string name(reinterpret_cast<const char*>(cursor), name_len);
+    cursor += name_len;
+    std::string path;
+    if (has_path_field) {
+      uint32_t path_len = 0;
+      if (!read_pod(cursor, end, &path_len)) break;
+      if (static_cast<size_t>(end - cursor) < path_len) break;
+      path.assign(reinterpret_cast<const char*>(cursor), path_len);
+      cursor += path_len;
+    }
+    set_pad(i, note, one_shot != 0, volume, pan, pitch);
+    set_trim(i, trim_start, trim_end);
+    set_pad_name(i, std::move(name));
+    pads_[i].path = path;
+
+    const size_t bytes = static_cast<size_t>(frames) * 2 * sizeof(float);
+    if (frames > 0) {
+      if (static_cast<size_t>(end - cursor) < bytes) break;
+      auto buffer = std::make_shared<Buffer>();
+      buffer->frames = frames;
+      buffer->sample_rate = rate > 0.0 ? rate : 48000.0;
+      buffer->samples.resize(static_cast<size_t>(frames) * 2);
+      std::memcpy(buffer->samples.data(), cursor, bytes);
+      cursor += bytes;
+      publish(i, std::move(buffer));
+    } else if (!path.empty()) {
+      auto loaded = decode_file(path);
+      if (loaded != nullptr) publish(i, std::move(loaded));
+      else publish(i, nullptr);
+    } else {
+      publish(i, nullptr);
+    }
+  }
+  // Trailing and optional: older blobs simply end before the fades, and
+  // those pads stay at no fade rather than aborting the whole load.
+  for (int i = 0; i < n; ++i) {
+    double fade_in = 0.0, fade_out = 0.0;
+    if (!read_pod(cursor, end, &fade_in) || !read_pod(cursor, end, &fade_out))
+      break;
+    set_fades(i, fade_in, fade_out);
+  }
+  return true;
+}
+
+std::vector<uint8_t> SamplerInstance::save_pads() const {
+  // Rec takes waiting to be committed are pads too, the same as save_state.
+  const_cast<SamplerInstance*>(this)->commit_take();
+  std::vector<uint8_t> out;
+  out.insert(out.end(), kPackMagic, kPackMagic + 8);
+  write_pads_to(out);
+  return out;
+}
+
+bool SamplerInstance::load_pads(const std::vector<uint8_t>& blob) {
+  if (blob.size() < 8 || std::memcmp(blob.data(), kPackMagic, 8) != 0)
+    return false;
+  const uint8_t* cursor = blob.data() + 8;
+  const uint8_t* end = blob.data() + blob.size();
+  int32_t pad_count = 0;
+  if (!read_pod(cursor, end, &pad_count)) return false;
+  return read_pads_from(cursor, end, pad_count, /*has_path_field=*/true);
+}
+
+std::vector<uint8_t> SamplerInstance::save_state() const {
+  // A take that Rec just closed is still in rec_buffer_ until commit_take
+  // runs. The caller is on the UI thread with the graph parked, so we can
+  // publish it before walking the pads. const_cast is the same trick the
+  // looper uses when an open pass has to become a closed loop on save.
+  const_cast<SamplerInstance*>(this)->commit_take();
+
+  uint64_t total_frames = 0;
+  for (int i = 0; i < kPads; ++i) {
+    if (!pads_[i].path.empty()) continue;
+    const Buffer* buffer = pads_[i].live.load(std::memory_order_acquire);
+    if (buffer != nullptr) total_frames += buffer->frames;
+  }
+
+  std::vector<uint8_t> out;
+  out.reserve(8 + 16 + static_cast<size_t>(kPads) * 96 +
+              static_cast<size_t>(total_frames) * 2 * sizeof(float));
+  out.insert(out.end(), kMagic2, kMagic2 + 8);
+  append_pod(out, gain_.load(std::memory_order_relaxed));
+  append_pod(out, focused_.load(std::memory_order_relaxed));
+  append_pod(out, quantize_.load(std::memory_order_relaxed));
+  write_pads_to(out);
+  // Trailing and optional, the way the looper's own count-in byte is: older
+  // blobs simply end before it, and load_state below just leaves the toggle
+  // at its default when the bytes are not there.
+  const int32_t count_in = count_in_.load(std::memory_order_relaxed) ? 1 : 0;
+  append_pod(out, count_in);
   return out;
 }
 
@@ -802,55 +1178,12 @@ bool SamplerInstance::load_state(const std::vector<uint8_t>& blob) {
   set_parameter(kFocus, focused + 1);
   set_parameter(kQuantize, quantize);
 
-  const int n = std::min(static_cast<int>(pad_count), kPads);
-  for (int i = 0; i < n; ++i) {
-    int32_t note = kSeed[i].note;
-    int32_t one_shot = 1;
-    float volume = 1.0f, pan = 0.0f, pitch = 0.0f;
-    double trim_start = 0.0, trim_end = 1.0;
-    uint64_t frames = 0;
-    double rate = 48000.0;
-    uint32_t name_len = 0;
-    if (!read_pod(cursor, end, &note) || !read_pod(cursor, end, &one_shot) ||
-        !read_pod(cursor, end, &volume) || !read_pod(cursor, end, &pan) ||
-        !read_pod(cursor, end, &pitch) || !read_pod(cursor, end, &trim_start) ||
-        !read_pod(cursor, end, &trim_end) || !read_pod(cursor, end, &frames) ||
-        !read_pod(cursor, end, &rate) || !read_pod(cursor, end, &name_len))
-      break;
-    if (static_cast<size_t>(end - cursor) < name_len) break;
-    std::string name(reinterpret_cast<const char*>(cursor), name_len);
-    cursor += name_len;
-    std::string path;
-    if (v2) {
-      uint32_t path_len = 0;
-      if (!read_pod(cursor, end, &path_len)) break;
-      if (static_cast<size_t>(end - cursor) < path_len) break;
-      path.assign(reinterpret_cast<const char*>(cursor), path_len);
-      cursor += path_len;
-    }
-    set_pad(i, note, one_shot != 0, volume, pan, pitch);
-    set_trim(i, trim_start, trim_end);
-    set_pad_name(i, std::move(name));
-    pads_[i].path = path;
+  read_pads_from(cursor, end, pad_count, /*has_path_field=*/v2);
 
-    const size_t bytes = static_cast<size_t>(frames) * 2 * sizeof(float);
-    if (frames > 0) {
-      if (static_cast<size_t>(end - cursor) < bytes) break;
-      auto buffer = std::make_shared<Buffer>();
-      buffer->frames = frames;
-      buffer->sample_rate = rate > 0.0 ? rate : 48000.0;
-      buffer->samples.resize(static_cast<size_t>(frames) * 2);
-      std::memcpy(buffer->samples.data(), cursor, bytes);
-      cursor += bytes;
-      publish(i, std::move(buffer));
-    } else if (!path.empty()) {
-      auto buffer = decode_file(path);
-      if (buffer != nullptr) publish(i, std::move(buffer));
-      else publish(i, nullptr);
-    } else {
-      publish(i, nullptr);
-    }
-  }
+  // Trailing and optional: a blob saved before Count-in existed simply ends
+  // here, and the toggle stays at its default of off.
+  int32_t count_in = 0;
+  if (read_pod(cursor, end, &count_in)) set_parameter(kCountIn, count_in);
   return true;
 }
 
