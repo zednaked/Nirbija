@@ -23,7 +23,10 @@ often need `__GLX_VENDOR_LIBRARY_NAME=mesa`.
 __GLX_VENDOR_LIBRARY_NAME=mesa ./build/src/ui/nirbija
 ```
 
-A Hyprland window rule for class `nirbija-plugin` should float editor windows.
+Plugin editors are X11 windows of their own and want to float rather than tile.
+Under Hyprland the app arranges that itself at startup, over the compositor's
+IPC socket; `NIRBIJA_NO_WM_RULES=1` turns it off. Other compositors still want
+the rule by hand — `packaging/README.md` has it.
 
 `nirbija --version` reports the version and which backends the binary carries;
 `nirbija --help` lists the environment variables it reads.

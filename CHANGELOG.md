@@ -2,6 +2,32 @@
 
 ## 0.4.0 — unreleased
 
+### Plugin editors float on their own under Hyprland
+
+Installing meant pasting a window rule into the compositor's config before the
+first plugin editor opened at a sane size — and the instructions for it sat in
+`packaging/README.md`, which is exactly where nobody looks until something is
+already wrong. Tiled, an editor stretches to fill the tile: the plugin keeps
+drawing at its own size and the rest is dead space around it.
+
+The app now asks for the rule itself, at startup, over Hyprland's IPC socket.
+Nothing to paste, nothing to install, and `NIRBIJA_NO_WM_RULES=1` for anyone
+who would rather own their compositor's config outright.
+
+Hyprland is the only compositor that takes a rule at runtime, so it is the only
+one handled; everywhere else the rule stays manual and `packaging/README.md`
+still carries it, Sway's form included. The request goes in as Lua: 0.56 moved
+the config over and its `keyword` command now refuses a windowrule with
+`keyword can't work with non-legacy parsers. Use eval.` — `keyword windowrulev2`
+is kept as the fallback for older builds. The rule is named, so relaunching
+replaces it instead of stacking a second copy.
+
+While proving it: on a systemd distro `NIRBIJA_DEBUG_EMBED` and the other
+traces go to the journal, not to the terminal. Qt routes its logging there when
+stderr is not a tty, so redirecting stderr catches an empty file and the flag
+reads as broken. `journalctl --user -f`, or `QT_FORCE_STDERR_LOGGING=1`. Said
+now in `--help` and in both READMEs.
+
 ### A ratchet used to die after its own first pulse
 
 A step's ratchet — up to 8 rapid retriggers packed into one step, the

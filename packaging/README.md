@@ -44,21 +44,50 @@ __GLX_VENDOR_LIBRARY_NAME=mesa ./nirbija-0.1.0-x86_64.AppImage
 
 ## Hyprland
 
-Testado no Hyprland 0.56, cuja sintaxe de regra usa `match:class` e campos com
-valor — a forma antiga `windowrule = float, class:...` é recusada com
-`invalid field float: missing a value`.
+Nothing to paste. Under Hyprland the app asks the compositor to float plugin
+editors itself, at startup, over its IPC socket — the rule is named
+`nirbija_plugin_editor` and matches class `nirbija-plugin`. Set
+`NIRBIJA_NO_WM_RULES=1` to keep the compositor's config entirely your own.
+
+The rule matters because editors are X11 windows of their own: tiled, the
+plugin keeps drawing at its own size and the rest of the tile is dead space.
+
+Hyprland 0.56 moved its config to Lua, and its `keyword` command now refuses a
+windowrule outright — `keyword can't work with non-legacy parsers. Use eval.`
+So the rule goes in as Lua, with `keyword windowrulev2` left as the fallback for
+older builds. Written by hand it reads:
+
+```lua
+hl.window_rule({
+    name = "nirbija_plugin_editor",
+    match = { class = "^(nirbija-plugin)$" },
+    float = true,
+    center = true,
+})
+```
+
+A bind, if you want one — this is the only part still worth adding by hand:
+
+```lua
+hl.bind("SUPER SHIFT, N", hl.dsp.exec_cmd("nirbija"))
+```
+
+## Other compositors
+
+Only Hyprland can be told at runtime, so everywhere else the rule is still
+manual. Sway, in `~/.config/sway/config`:
 
 ```
-bind = $mainMod SHIFT, N, exec, env __GLX_VENDOR_LIBRARY_NAME=mesa $HOME/dev/Nirbija/build/src/ui/nirbija
-
-windowrule {
-    name = nirbija_plugin_editor
-    match:class = ^(nirbija-plugin)$
-    float = true
-    center = true
-}
+for_window [class="nirbija-plugin"] floating enable, move position center
 ```
 
-A regra de flutuante importa: as editoras de plugin são janelas X11 próprias, e
-tiladas elas ficam esticadas com área morta em volta do desenho do plugin. Elas
-carregam a classe `nirbija-plugin` justamente para poderem ser alvo de regra.
+## Traces go to the journal
+
+`NIRBIJA_DEBUG_EMBED=1` and friends print through Qt's logging, which on a
+systemd distro is routed to the journal rather than to the terminal — a
+redirect of stderr catches nothing and the flag looks broken. Read them with
+`journalctl --user -f`, or force the old behaviour:
+
+```sh
+QT_FORCE_STDERR_LOGGING=1 NIRBIJA_DEBUG_EMBED=1 nirbija
+```

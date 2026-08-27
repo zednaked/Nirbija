@@ -87,6 +87,8 @@ qt_add_qml_module(nirbija_ui
   URI Nirbija
   VERSION 1.0
   SOURCES
+    compositor_rules.cpp
+    compositor_rules.h
     mixer_model.cpp
     mixer_model.h
     mixer_session.cpp

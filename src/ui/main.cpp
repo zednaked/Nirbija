@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "compositor_rules.h"
 #include "platform.h"
 
 namespace {
@@ -44,12 +45,19 @@ environment:
   NIRBIJA_UI_SCALE       size of the whole interface, 1.0 is the default
   NIRBIJA_SKIN_COLOR     accent colour, as #rrggbb
   NIRBIJA_ALLOW_WAYLAND  keep the session's platform; loses embedded editors
+  NIRBIJA_NO_WM_RULES    do not ask the compositor to float plugin editors
   NIRBIJA_DEBUG_EMBED    trace plugin editor window embedding
   NIRBIJA_DEBUG_TRANSPORT  trace transport and tempo
 
 Editors are X11 windows, so the app puts itself on xcb/XWayland by default.
-Plugin editors carry the window class `nirbija-plugin` so a compositor rule
-can float them.
+They carry the window class `nirbija-plugin`; under Hyprland the app asks the
+compositor at startup to float that class, so nothing has to be pasted into a
+config. Any other compositor still wants the rule by hand - see
+packaging/README.md.
+
+The traces above go through Qt's logging, which on a systemd distro means the
+journal rather than the terminal: `journalctl --user -f`, or run with
+QT_FORCE_STDERR_LOGGING=1 to get them back on stderr.
 )",
               argv0);
 }
@@ -71,6 +79,9 @@ int main(int argc, char* argv[]) {
   }
 
   nirbija::force_x11_platform();
+  // Same subject: make the desktop treat plugin editors the way they need to
+  // be treated. Quiet no-op unless a Hyprland is listening.
+  nirbija::apply_compositor_rules();
 
   // QApplication, not QGuiApplication, and the interface here draws no widget.
   // Plenty of plugin editors are built on Qt Widgets - padthv1 is one - and the
