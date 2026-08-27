@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Passe de sanitizer antes de deixar o push sair.
+#
+# Este e o guardiao do projeto, e mora aqui e nao no GitHub Actions de
+# proposito: o repo e privado, e la o Actions consome cota da conta. Aqui e de
+# graca e o retorno vem antes do push, nao depois. O workflow continua no
+# repositorio, so que sob demanda, para quando fizer falta uma arvore limpa.
+#
+# Ligar (uma vez por clone):
+#
+#     git config core.hooksPath .githooks
+#
+# Pular numa emergencia:
+#
+#     NIRBIJA_SKIP_CHECK=1 git push        (ou git push --no-verify)
+
+set -uo pipefail
+
+[ "${NIRBIJA_SKIP_CHECK:-0}" = "1" ] && exit 0
+
+raiz=$(git rev-parse --show-toplevel)
+build=$raiz/build-asan
+
+# Sem a arvore de sanitizer nao ha o que rodar. Isso avisa e deixa passar em vez
+# de barrar: quem acabou de clonar nao deve descobrir o hook sendo impedido de
+# empurrar.
+if [ ! -f "$build/CMakeCache.txt" ]; then
+  cat >&2 <<AVISO
+
+  pre-push: sem arvore de sanitizer, seguindo sem checar.
+  Para ligar a checagem, uma vez:
+
+    cmake -S . -B build-asan -G Ninja \\
+      -DNIRBIJA_UI=OFF -DNIRBIJA_TESTS=ON -DCMAKE_BUILD_TYPE=Debug \\
+      -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \\
+      -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+AVISO
+  exit 0
+fi
+
+printf '\n  pre-push: compilando sob ASan+UBSan...\n' >&2
+if ! cmake --build "$build" -j"$(nproc)" >/tmp/nirbija-prepush.log 2>&1; then
+  printf '\n  pre-push: a compilacao falhou. Push barrado.\n' >&2
+  tail -25 /tmp/nirbija-prepush.log >&2
+  printf '\n  Log inteiro em /tmp/nirbija-prepush.log\n' >&2
+  printf '  Para empurrar assim mesmo: NIRBIJA_SKIP_CHECK=1 git push\n\n' >&2
+  exit 1
+fi
+
+# detect_leaks=0 nao e preguica: o LeakSanitizer acusa vazamento dentro de
+# pw_context_load_module quando o libjack abre o cliente, e o vazamento e do
+# PipeWire. Sem isso quatro testes parecem quebrados.
+printf '  pre-push: rodando a suite...\n' >&2
+if ! ASAN_OPTIONS=detect_leaks=0 \
+     UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=0 \
+     ctest --test-dir "$build" --output-on-failure >/tmp/nirbija-prepush.log 2>&1; then
+  printf '\n  pre-push: teste falhou. Push barrado.\n\n' >&2
+  tail -40 /tmp/nirbija-prepush.log >&2
+  printf '\n  Log inteiro em /tmp/nirbija-prepush.log\n' >&2
+  printf '  Para empurrar assim mesmo: NIRBIJA_SKIP_CHECK=1 git push\n\n' >&2
+  exit 1
+fi
+
+printf '  pre-push: %s\n\n' "$(grep -E 'tests passed' /tmp/nirbija-prepush.log | tail -1)" >&2
+exit 0

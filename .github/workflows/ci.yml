@@ -1,33 +1,30 @@
 name: build e testes
 
-# Dois trabalhos, de propósito diferentes.
-#
-# `sanitizers` é o que tem de estar sempre verde: sem Qt, dependências mínimas,
-# ASan + UBSan por cima da suíte headless. É barato e é onde a classe de bug que
-# revisão não pega aparece — foi assim que se descobriu que o step sequencer
-# estourava a pilha sob ASan (e portanto o maior módulo do projeto estava fora
-# da cobertura), e que um insert removido sem servidor de áudio nunca era
+# Um passe de sanitizer numa arvore limpa: sem Qt, dependencias minimas,
+# NIRBIJA_UI=OFF, a suite headless inteira sob ASan + UBSan. E onde aparece a
+# classe de bug que revisao nao pega - foi assim que se viu que o step sequencer
+# estourava a pilha sob ASan (e portanto o maior modulo do projeto estava fora
+# da cobertura), e que um insert removido sem servidor de audio nunca era
 # liberado.
 #
-# `arch` é a máquina de verdade: mesmo Qt, mesmo pipewire-jack, com a UI ligada.
-# Roda em contêiner Arch porque o Ubuntu do runner ainda traz Qt 6.4 e o projeto
-# pede 6.5+. Sendo rolling release, este é o que pode quebrar por motivo alheio;
-# por isso ele não é o guardião, é o retrato.
+# O job que compilava com a UI num contentor Arch saiu: a maquina de
+# desenvolvimento e Arch e compila a cada build, entao ele confirmava o que ja
+# se via - e custava mais do que este, 4,5 dos 6,5 minutos da execucao.
 #
-# A suíte inteira já sabe funcionar sem servidor de áudio e sem plugin
-# instalado: engine_smoke e midi_clock_follow devolvem 77 (ctest marca como
-# Skipped), os testes de plugin desistem sozinhos, e os de UI forçam
-# QT_QPA_PLATFORM=offscreen por conta própria. Nada aqui precisa de Xvfb.
+# Nada aqui precisa de Xvfb nem de servidor de audio: engine_smoke e
+# midi_clock_follow devolvem 77 e o ctest marca Skipped, os testes de plugin
+# desistem sozinhos quando nao ha plugin, e os de UI ja forcam
+# QT_QPA_PLATFORM=offscreen por conta propria.
 
+# So sob demanda. Este repo e privado, e em repo privado o Actions consome a
+# cota mensal da conta - diferente de repo publico, onde e ilimitado. Medido na
+# primeira execucao: 2 min o passe de sanitizer, e o mesmo passe roda de graca
+# na maquina, pelo hook de pre-push em .githooks/. O que sobra aqui e o valor
+# que a maquina nao da: uma arvore limpa, num runner que nao e o seu.
+#
+# Rodar: gh workflow run "build e testes"  (ou pelo botao na aba Actions)
 on:
-  push:
-  pull_request:
   workflow_dispatch:
-
-# Um push novo cancela a execução anterior do mesmo branch.
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   sanitizers:
@@ -76,38 +73,3 @@ jobs:
           ASAN_OPTIONS: detect_leaks=0
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=0
         run: ctest --test-dir build --output-on-failure
-
-  arch:
-    name: build completo (Arch, com UI)
-    runs-on: ubuntu-latest
-    container: archlinux:latest
-    steps:
-      - name: dependências
-        run: |
-          pacman -Syu --noconfirm --needed \
-            base-devel cmake ninja git pkgconf \
-            qt6-base qt6-declarative \
-            pipewire-jack libsndfile lilv lua54 systemd-libs
-
-      # Depois do pacman: o checkout precisa do git, que vem de lá.
-      - uses: actions/checkout@v4
-
-      - name: cache dos SDKs buscados
-        uses: actions/cache@v4
-        with:
-          path: build/_deps
-          key: deps-arch-${{ hashFiles('CMakeLists.txt') }}
-
-      - name: configurar
-        run: cmake -S . -B build -G Ninja -DNIRBIJA_UI=ON -DCMAKE_BUILD_TYPE=Release
-
-      - name: compilar
-        run: cmake --build build -j"$(nproc)"
-
-      - name: testes
-        run: ctest --test-dir build --output-on-failure
-
-      # A versão é fonte única em CMakeLists.txt e viaja em todo evento de
-      # telemetria; se o binário não souber dizer qual é, algo se soltou.
-      - name: o binário se identifica
-        run: ./build/src/ui/nirbija --version

@@ -31,6 +31,33 @@ the rule by hand — `packaging/README.md` has it.
 `nirbija --version` reports the version and which backends the binary carries;
 `nirbija --help` lists the environment variables it reads.
 
+## Checagem antes do push
+
+O guardião do projeto é um hook, não CI. Uma vez por clone:
+
+```sh
+git config core.hooksPath .githooks
+cmake -S . -B build-asan -G Ninja \
+  -DNIRBIJA_UI=OFF -DNIRBIJA_TESTS=ON -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
+  -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+```
+
+A partir daí todo `git push` compila e roda a suíte headless sob ASan e UBSan —
+25 segundos, incremental. `NIRBIJA_SKIP_CHECK=1 git push` pula.
+
+Vale a pena porque essa passada acha o que revisão não acha: foi assim que se
+viu que o step sequencer estourava a pilha sob ASan (e portanto o maior módulo
+do projeto estava fora da cobertura) e que um insert removido sem servidor de
+áudio nunca era liberado.
+
+Sem a árvore `build-asan/` o hook avisa e deixa passar, em vez de barrar quem
+acabou de clonar.
+
+`.github/workflows/ci.yml` roda a mesma passada numa árvore limpa, mas só sob
+demanda (`gh workflow run "build e testes"`): em repositório privado o Actions
+consome cota da conta, e o hook já cobre o caso do dia a dia.
+
 ## Install
 
 ```sh
