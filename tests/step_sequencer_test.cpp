@@ -6,10 +6,17 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "core/step_sequencer.h"
+
+// As instancias abaixo vivem no heap de proposito: uma StepSequencerInstance
+// e ~260 KB (16 padroes x 8 lanes x 64 passos de StepCell atomico), e as duas
+// duzias que este arquivo cria em main() estouravam a pilha assim que o
+// AddressSanitizer somava suas redzones - deixando o maior modulo do projeto
+// justamente sem cobertura de sanitizer.
 
 namespace {
 
@@ -74,7 +81,8 @@ int main() {
 
   // --- one note per active step, on the sixteenth ----------------------------
   {
-    nirbija::StepSequencerInstance seq;
+    const auto seq_owned = std::make_unique<nirbija::StepSequencerInstance>();
+    nirbija::StepSequencerInstance& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     // Every step on, so the count is predictable.
     for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i)
@@ -110,7 +118,8 @@ int main() {
   // of its own step, so nothing ever overlaps and the check proves nothing —
   // it only bites when each step is still sounding as the next one starts.
   {
-    nirbija::StepSequencerInstance seq;
+    const auto seq_owned = std::make_unique<nirbija::StepSequencerInstance>();
+    nirbija::StepSequencerInstance& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i)
       seq.set_parameter(80 + i, 1.0);
@@ -134,7 +143,8 @@ int main() {
 
   // --- a step that is off stays silent ---------------------------------------
   {
-    nirbija::StepSequencerInstance seq;
+    const auto seq_owned = std::make_unique<nirbija::StepSequencerInstance>();
+    nirbija::StepSequencerInstance& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i)
       seq.set_parameter(80 + i, 0.0);
@@ -159,7 +169,8 @@ int main() {
   // The failure this guards against is silent and horrible: a synth downstream
   // left ringing on a note whose off never came.
   {
-    nirbija::StepSequencerInstance seq;
+    const auto seq_owned = std::make_unique<nirbija::StepSequencerInstance>();
+    nirbija::StepSequencerInstance& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i)
       seq.set_parameter(80 + i, 1.0);
@@ -203,7 +214,8 @@ int main() {
 
   // --- the pattern wraps at its length ---------------------------------------
   {
-    nirbija::StepSequencerInstance seq;
+    const auto seq_owned = std::make_unique<nirbija::StepSequencerInstance>();
+    nirbija::StepSequencerInstance& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i) {
       seq.set_parameter(80 + i, 1.0);
@@ -237,7 +249,8 @@ int main() {
   // twice - once at the end of one block and again at the start of the next -
   // and the ordinary 256-frame blocks above never line up to catch it.
   {
-    nirbija::StepSequencerInstance seq;
+    const auto seq_owned = std::make_unique<nirbija::StepSequencerInstance>();
+    nirbija::StepSequencerInstance& seq = *seq_owned;
     seq.activate(kRate, 6000);
     for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i)
       seq.set_parameter(80 + i, 1.0);
@@ -267,7 +280,8 @@ int main() {
   // hair behind the first. Either way the step under it has already played,
   // and playing it again is a doubled note.
   {
-    nirbija::StepSequencerInstance seq;
+    const auto seq_owned = std::make_unique<nirbija::StepSequencerInstance>();
+    nirbija::StepSequencerInstance& seq = *seq_owned;
     seq.activate(kRate, 6000);
     for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i)
       seq.set_parameter(80 + i, 1.0);
@@ -293,7 +307,8 @@ int main() {
 
   // --- notes from earlier in the chain pass through ---------------------------
   {
-    nirbija::StepSequencerInstance seq;
+    const auto seq_owned = std::make_unique<nirbija::StepSequencerInstance>();
+    nirbija::StepSequencerInstance& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i)
       seq.set_parameter(80 + i, 0.0);  // silent, so only the passthrough shows
@@ -322,7 +337,8 @@ int main() {
 
   // --- state survives a round trip -------------------------------------------
   {
-    nirbija::StepSequencerInstance seq;
+    const auto seq_owned = std::make_unique<nirbija::StepSequencerInstance>();
+    nirbija::StepSequencerInstance& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_parameter(0, 1.0);      // division 1/8
     seq.set_parameter(1, 7.0);      // seven steps
@@ -333,7 +349,9 @@ int main() {
 
     const std::vector<uint8_t> blob = seq.save_state();
 
-    nirbija::StepSequencerInstance restored;
+    const auto restored_owned = std::make_unique<nirbija::StepSequencerInstance>();
+
+    nirbija::StepSequencerInstance& restored = *restored_owned;
     restored.activate(kRate, kBlock);
     if (!restored.load_state(blob)) fail("load_state refused its own blob");
 
@@ -349,7 +367,8 @@ int main() {
     }
 
     // A truncated blob must give defaults back rather than throw.
-    nirbija::StepSequencerInstance damaged;
+    const auto damaged_owned = std::make_unique<nirbija::StepSequencerInstance>();
+    nirbija::StepSequencerInstance& damaged = *damaged_owned;
     damaged.activate(kRate, kBlock);
     const std::vector<uint8_t> half(blob.begin(), blob.begin() + blob.size() / 2);
     damaged.load_state(half);
@@ -357,7 +376,8 @@ int main() {
 
   // --- swing leans the off-beats late ---------------------------------------
   {
-    nirbija::StepSequencerInstance seq;
+    const auto seq_owned = std::make_unique<nirbija::StepSequencerInstance>();
+    nirbija::StepSequencerInstance& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i)
       seq.set_parameter(80 + i, 1.0);
@@ -382,7 +402,8 @@ int main() {
 
   // --- reverse plays the last step first ------------------------------------
   {
-    nirbija::StepSequencerInstance seq;
+    const auto seq_owned = std::make_unique<nirbija::StepSequencerInstance>();
+    nirbija::StepSequencerInstance& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i) {
       seq.set_parameter(80 + i, 1.0);
@@ -403,7 +424,8 @@ int main() {
 
   // --- pendulum turns without repeating the end -----------------------------
   {
-    nirbija::StepSequencerInstance seq;
+    const auto seq_owned = std::make_unique<nirbija::StepSequencerInstance>();
+    nirbija::StepSequencerInstance& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_parameter(1, 4.0);
     for (int i = 0; i < 4; ++i) {
@@ -429,7 +451,8 @@ int main() {
 
   // --- probability 0 never fires --------------------------------------------
   {
-    nirbija::StepSequencerInstance seq;
+    const auto seq_owned = std::make_unique<nirbija::StepSequencerInstance>();
+    nirbija::StepSequencerInstance& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i) {
       seq.set_parameter(80 + i, 1.0);
@@ -445,7 +468,8 @@ int main() {
 
   // --- accent lifts the velocity --------------------------------------------
   {
-    nirbija::StepSequencerInstance seq;
+    const auto seq_owned = std::make_unique<nirbija::StepSequencerInstance>();
+    nirbija::StepSequencerInstance& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i)
       seq.set_parameter(80 + i, 0.0);
@@ -462,7 +486,8 @@ int main() {
 
   // --- a tie holds the same pitch without retriggering ----------------------
   {
-    nirbija::StepSequencerInstance seq;
+    const auto seq_owned = std::make_unique<nirbija::StepSequencerInstance>();
+    nirbija::StepSequencerInstance& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i) {
       seq.set_parameter(80 + i, 1.0);
@@ -481,7 +506,8 @@ int main() {
 
   // --- euclid 8 in 16 is every other step -----------------------------------
   {
-    nirbija::StepSequencerInstance seq;
+    const auto seq_owned = std::make_unique<nirbija::StepSequencerInstance>();
+    nirbija::StepSequencerInstance& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_parameter(14, 8.0);
     for (int i = 0; i < 16; ++i) {
@@ -495,7 +521,8 @@ int main() {
 
   // --- nudge slides the pattern ---------------------------------------------
   {
-    nirbija::StepSequencerInstance seq;
+    const auto seq_owned = std::make_unique<nirbija::StepSequencerInstance>();
+    nirbija::StepSequencerInstance& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_parameter(16 + 0, 50.0);
     seq.set_parameter(10, 1.0);  // nudge right
@@ -505,7 +532,8 @@ int main() {
 
   // --- the metronome is not Play -------------------------------------------
   {
-    nirbija::StepSequencerInstance seq;
+    const auto seq_owned = std::make_unique<nirbija::StepSequencerInstance>();
+    nirbija::StepSequencerInstance& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i)
       seq.set_parameter(80 + i, 1.0);
@@ -531,7 +559,8 @@ int main() {
 
   // --- new fields survive a round trip; an old blob still loads -------------
   {
-    nirbija::StepSequencerInstance seq;
+    const auto seq_owned = std::make_unique<nirbija::StepSequencerInstance>();
+    nirbija::StepSequencerInstance& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_parameter(5, 0.4);
     seq.set_parameter(6, 2.0);
@@ -540,7 +569,9 @@ int main() {
     seq.set_parameter(176 + 2, 1.0);
     const auto blob = seq.save_state();
 
-    nirbija::StepSequencerInstance restored;
+    const auto restored_owned = std::make_unique<nirbija::StepSequencerInstance>();
+
+    nirbija::StepSequencerInstance& restored = *restored_owned;
     restored.activate(kRate, kBlock);
     if (!restored.load_state(blob)) fail("new state blob was refused");
     if (std::fabs(restored.parameter_value(5) - 0.4) > 1e-4)
@@ -553,7 +584,8 @@ int main() {
 
     const std::string old = "division 2\nlength 16\ngate 0.5000\ntranspose 0\n"
                             "channel 0\nstep 60 100 1\n";
-    nirbija::StepSequencerInstance legacy;
+    const auto legacy_owned = std::make_unique<nirbija::StepSequencerInstance>();
+    nirbija::StepSequencerInstance& legacy = *legacy_owned;
     legacy.activate(kRate, kBlock);
     if (!legacy.load_state(std::vector<uint8_t>(old.begin(), old.end())))
       fail("a pre-swing state blob was refused");
@@ -565,7 +597,8 @@ int main() {
 
   // --- Record snaps a live note to the nearest step, velocity and all ------
   {
-    nirbija::StepSequencerInstance seq;
+    const auto seq_owned = std::make_unique<nirbija::StepSequencerInstance>();
+    nirbija::StepSequencerInstance& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_parameter(15, 1.0);  // arm
 
@@ -603,7 +636,8 @@ int main() {
 
   // --- Record goes quiet itself; what you play still passes through --------
   {
-    nirbija::StepSequencerInstance seq;
+    const auto seq_owned = std::make_unique<nirbija::StepSequencerInstance>();
+    nirbija::StepSequencerInstance& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_parameter(15, 1.0);  // arm
     for (int i = 0; i < nirbija::StepSequencerInstance::kVisibleSteps; ++i)
@@ -640,7 +674,8 @@ int main() {
 
   // --- a note held across steps ties through them, not just the first ------
   {
-    nirbija::StepSequencerInstance seq;
+    const auto seq_owned = std::make_unique<nirbija::StepSequencerInstance>();
+    nirbija::StepSequencerInstance& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_parameter(15, 1.0);  // arm
 
@@ -712,7 +747,8 @@ int main() {
 
   // --- constructor paints a muted kit; no audio needed ----------------------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     const std::vector<uint8_t> blob = seq.save_state();
     const std::string text(blob.begin(), blob.end());
     if (text.find("version 2\n") != 0)
@@ -746,10 +782,12 @@ int main() {
 
   // --- v2 roundtrip preserves a cell the shim cannot reach ------------------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.set_cell(0, 3, 40, 48, 90, true, 0.25f);
     const std::vector<uint8_t> blob = seq.save_state();
-    Seq restored;
+    const auto restored_owned = std::make_unique<Seq>();
+    Seq& restored = *restored_owned;
     if (!restored.load_state(blob)) fail("v2 roundtrip blob was refused");
     if (restored.cell_note(0, 3, 40) != 48)
       fail("v2 roundtrip lost lane 3 step 40 note");
@@ -791,13 +829,16 @@ int main() {
     const std::string blobs[] = {kick, snare, hat, perc};
     const char* names[] = {"kick", "snare", "hat", "perc"};
     for (int b = 0; b < 4; ++b) {
-      Seq seq;
+      const auto seq_owned = std::make_unique<Seq>();
+      Seq& seq = *seq_owned;
       if (!seq.load_state(blob_of(blobs[b])))
         fail(std::string("jam-goth ") + names[b] + " blob was refused");
       lanes_empty_muted(seq, std::string("jam-goth ") + names[b]);
     }
 
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+
+    Seq& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     if (!seq.load_state(blob_of(kick))) fail("jam-goth kick blob was refused");
     const int kick_on[] = {0, 3, 4, 8, 11, 12};
@@ -828,10 +869,12 @@ int main() {
 
   // --- a truncated v2 dump does not throw -----------------------------------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.set_cell(0, 3, 40, 48, 90, true, 0.25f);
     const std::vector<uint8_t> blob = seq.save_state();
-    Seq damaged;
+    const auto damaged_owned = std::make_unique<Seq>();
+    Seq& damaged = *damaged_owned;
     const std::vector<uint8_t> half(blob.begin(),
                                     blob.begin() + blob.size() / 2);
     if (!damaged.load_state(half)) fail("truncated v2 blob was refused");
@@ -839,7 +882,8 @@ int main() {
 
   // --- inflated blobs give up without eating the constructor seed -----------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     std::vector<uint8_t> junk(2 * 1024 * 1024, static_cast<uint8_t>('x'));
     if (!seq.load_state(junk)) fail("2 MiB junk blob was refused");
     if (!seq.cell_active(0, 1, 4) || !seq.cell_active(0, 1, 12))
@@ -857,7 +901,8 @@ int main() {
                   std::to_string(s) + " 10 100 0 1.0000 0 0 0.0000 1 0 0\n";
     for (int i = 0; i < 2000; ++i)
       text += "pstep 0 0 0 99 100 1 1.0000 0 0 0.0000 1 0 0\n";
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     if (!seq.load_state(blob_of(text))) fail("10k pstep blob was refused");
     if (seq.cell_note(0, 0, 0) != 10)
       fail("pstep lines past 16*8*64 still wrote the first cell");
@@ -869,7 +914,8 @@ int main() {
     std::string text = "version 2\n";
     for (int i = 0; i < 9000; ++i) text += "junk 1\n";
     text += "pstep 0 0 0 77 100 1 1.0000 0 0 0.0000 1 0 0\n";
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     if (!seq.load_state(blob_of(text))) fail("line-capped blob was refused");
     if (seq.cell_note(0, 0, 0) == 77)
       fail("a pstep past the line cap still landed");
@@ -877,7 +923,8 @@ int main() {
 
   // --- shim IDs 16–191 always write pattern 0 / lane 0 / steps 0–15 ---------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     const std::string focused = "version 2\nfocus 3\n";
     if (!seq.load_state(blob_of(focused))) fail("focus blob was refused");
     seq.set_parameter(16, 64.0);
@@ -889,7 +936,8 @@ int main() {
 
   // --- polymeter: length 16 against length 12 --------------------------------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_lane_mute(1, false);
     for (int lane = 2; lane < Seq::kLanes; ++lane) seq.set_lane_mute(lane, true);
@@ -929,7 +977,8 @@ int main() {
 
   // --- poly across lanes; still monophonic per lane --------------------------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_lane_mute(1, false);
     for (int lane = 2; lane < Seq::kLanes; ++lane) seq.set_lane_mute(lane, true);
@@ -967,7 +1016,8 @@ int main() {
 
   // --- chase-off uses the channel the note went out on -----------------------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     for (int i = 0; i < Seq::kVisibleSteps; ++i) seq.set_parameter(80 + i, 1.0);
     seq.set_parameter(2, 1.0);
@@ -999,7 +1049,8 @@ int main() {
 
   // --- mute silences emit, not the light -------------------------------------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_lane_mute(1, false);
     for (int i = 0; i < Seq::kVisibleSteps; ++i)
@@ -1015,7 +1066,8 @@ int main() {
 
   // --- unmute of lane 1 sounds the factory snare -----------------------------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_lane_mute(1, false);
     const std::vector<Note> notes =
@@ -1029,7 +1081,8 @@ int main() {
 
   // --- typed setters: out of range is a no-op, euclid stays a bang -----------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.set_cell(0, 0, 0, 40, 80, true, 0.5f, true, true);
     expect(seq.cell_note(0, 0, 0) == 40, "set_cell did not store the note");
     expect(seq.cell_accent(0, 0, 0), "set_cell did not store accent");
@@ -1071,7 +1124,8 @@ int main() {
 
   // --- macros 192-200: round trip, and out of the shim's way -----------------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.set_parameter(192, 1.5);
     expect(std::fabs(seq.parameter_value(192) - 1.5) < 1e-4,
            "density did not round-trip");
@@ -1110,7 +1164,8 @@ int main() {
 
   // --- Density above 1 spends its excess on ghost notes at off steps --------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_parameter(13, 1.0);    // clear hits: every step off
     seq.set_parameter(192, 2.0);   // density maxed: ghost chance is certain
@@ -1129,7 +1184,8 @@ int main() {
 
   // --- master probability is a hard ceiling on top of per-step chance -------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_parameter(195, 0.0);  // master probability zero
 
@@ -1143,7 +1199,8 @@ int main() {
 
   // --- Record lands on the focused lane, and does not lock a kit row --------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_focus(1);
     seq.set_parameter(15, 1.0);  // arm
@@ -1181,7 +1238,8 @@ int main() {
 
   // --- a held note across steps keeps the lock decision it opened with ------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_focus(2);
     seq.set_parameter(15, 1.0);  // arm
@@ -1235,7 +1293,8 @@ int main() {
 
   // --- pattern bank: audio follows pattern_, isolation between banks --------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_parameter(13, 1.0);  // clear lane 0 pattern 0
     seq.set_cell(1, 0, 0, 72, 100, true, 1.0f);
@@ -1258,7 +1317,8 @@ int main() {
 
   // --- FILL / NotFill -------------------------------------------------------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_parameter(13, 1.0);
     seq.set_cell(0, 0, 0, 60, 100, true, 1.0f);
@@ -1269,7 +1329,8 @@ int main() {
     expect(ons == 0, "Fill condition sounded with FILL off");
   }
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_parameter(13, 1.0);
     seq.set_cell(0, 0, 0, 60, 100, true, 1.0f);
@@ -1284,7 +1345,8 @@ int main() {
 
   // --- NEI miss: neighbor silent at this index stays silent next cycle ------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_lane_mute(1, false);
     seq.set_parameter(13, 1.0);  // clear focused (0)
@@ -1304,7 +1366,8 @@ int main() {
 
   // --- A:B 1:2 fires every other cycle of the lane --------------------------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_parameter(13, 1.0);
     seq.set_cell(0, 0, 0, 64, 100, true, 1.0f);
@@ -1319,7 +1382,8 @@ int main() {
 
   // --- ratchet 4, gate=1, 256-frame blocks: ons on the step/N grid ----------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_parameter(13, 1.0);
     seq.set_parameter(2, 1.0);  // full gate
@@ -1354,7 +1418,8 @@ int main() {
   // default of 0.5. No lane in this file touches gate, so this is the
   // lane's own factory setting, not a contrived edge case.
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_parameter(13, 1.0);
     seq.set_parameter(194, 1.0);  // ratchet macro fully on; gate stays 0.5
@@ -1382,7 +1447,8 @@ int main() {
 
   // --- ratchet 8 in a 1024-frame block includes pulse 2 in the same block ---
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.activate(kRate, 1024);
     seq.set_parameter(13, 1.0);
     seq.set_parameter(2, 1.0);
@@ -1407,7 +1473,8 @@ int main() {
 
   // --- mute before pulse 2 silences the rest of the ratchet -----------------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_parameter(13, 1.0);
     seq.set_parameter(2, 1.0);
@@ -1437,7 +1504,8 @@ int main() {
 
   // --- extra head rate×2 doubles ons; muted extra is silent -----------------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_parameter(13, 1.0);
     for (int i = 0; i < Seq::kVisibleSteps; ++i)
@@ -1467,7 +1535,8 @@ int main() {
 
   // --- extra reverse window start=48 length=16 never indexes 64+ ------------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_parameter(1, 64.0);  // lane 0 length 64
     for (int i = 0; i < 64; ++i)
@@ -1486,7 +1555,8 @@ int main() {
 
   // --- next pattern queues on the host bar ----------------------------------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_parameter(13, 1.0);
     seq.set_cell(0, 0, 0, 60, 100, true, 1.0f);
@@ -1508,7 +1578,8 @@ int main() {
 
   // --- Rec routes a pad pitch onto that lane, unlocked stays unlocked -------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     seq.set_parameter(15, 1.0);
     nirbija::TransportInfo transport;
@@ -1534,7 +1605,8 @@ int main() {
 
   // --- stopping stores playhead -1, not step 0 ------------------------------
   {
-    Seq seq;
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
     seq.activate(kRate, kBlock);
     run(seq, 4);
     expect(seq.playhead() >= 0, "playing should have a playhead");
