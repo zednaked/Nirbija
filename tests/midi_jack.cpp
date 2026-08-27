@@ -97,19 +97,24 @@ float loudest_master(nirbija::Engine& engine, int milliseconds) {
 
 }  // namespace
 
+// CTest le 77 como "pulado", nao como "passou": sem servidor de audio ou sem
+// o sintetizador este teste nao exercita nada, e um verde ai cobre menos do
+// que parece.
+constexpr int kSkip = 77;
+
 int main(int argc, char* argv[]) {
   const std::string wanted = argc > 1 ? argv[1] : "Odin2";
 
   nirbija::Engine engine;
   if (!engine.start("nirbija-miditest")) {
     std::printf("no JACK server available, skipping\n");
-    return 0;
+    return kSkip;
   }
 
   auto synth = find_synth(wanted);
   if (synth == nullptr) {
     std::printf("%s not installed or has no MIDI input, skipping\n", wanted.c_str());
-    return 0;
+    return kSkip;
   }
 
   const size_t channel = engine.add_channel("synth", 2);
@@ -125,7 +130,7 @@ int main(int argc, char* argv[]) {
   NoteSender sender;
   if (!sender.start()) {
     std::printf("could not open a second JACK client, skipping\n");
-    return 0;
+    return kSkip;
   }
 
   // The server owns the final port names — it may rename a client to keep names

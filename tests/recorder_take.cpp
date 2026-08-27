@@ -66,17 +66,22 @@ FileSummary summarise(const fs::path& path) {
 
 }  // namespace
 
+// CTest le 77 como "pulado", nao como "passou": sem servidor de audio ou sem
+// o sintetizador este teste nao exercita nada, e um verde ai cobre menos do
+// que parece.
+constexpr int kSkip = 77;
+
 int main() {
   nirbija::Engine engine;
   if (!engine.start("nirbija-rec")) {
     std::printf("no JACK server available, skipping\n");
-    return 0;
+    return kSkip;
   }
 
   auto synth = find_synth("Odin2");
   if (synth == nullptr) {
     std::printf("Odin2 not installed, skipping\n");
-    return 0;
+    return kSkip;
   }
 
   const size_t channel = engine.add_channel("synth", 2);
