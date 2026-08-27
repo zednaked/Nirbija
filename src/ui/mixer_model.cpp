@@ -1648,12 +1648,15 @@ void MixerModel::pollLevels() {
     emit levelsChanged();
   }
 
-  engine_.graph().reclaim();
+  // Without a JACK client there is no audio thread, so nothing retired can
+  // still be in use and the generation gate would never open on its own.
+  const bool audio_running = engine_.running();
+  engine_.graph().reclaim(audio_running);
   bool plugin_state_moved = false;
   for (size_t row = 0; row < channels_.size(); ++row) {
     ChannelStrip* strip = stripFor(static_cast<int>(row));
     if (strip == nullptr) continue;
-    strip->reclaim();
+    strip->reclaim(audio_running);
     for (size_t slot = 0; slot < strip->insert_count(); ++slot) {
       PluginInstance* insert = strip->insert_at(slot);
       if (insert == nullptr) continue;

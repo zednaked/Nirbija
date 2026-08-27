@@ -262,7 +262,23 @@ void ChannelStrip::remove_insert(size_t index) {
   }
 }
 
-void ChannelStrip::reclaim() {
+void ChannelStrip::reclaim(bool audio_running) {
+  // With no audio thread at all there is nothing that could still be inside a
+  // retired insert, so the generation gate has nothing to wait for - and it
+  // would wait forever: the generation only advances at the end of a render,
+  // which the JACK callback drives. The app stays fully usable with no audio
+  // server (the status bar says "no audio server - start PipeWire or JACK and
+  // restart"), so without this every insert removed there is held until exit.
+  //
+  // The test cannot be "generation == 0": one created while audio is already
+  // running also sits at 0 until its first block, and the audio thread may be
+  // inside it by then. Only the absence of the JACK client settles it, which is
+  // what the caller passes in.
+  if (!audio_running) {
+    retired_.clear();
+    return;
+  }
+
   const uint64_t now = process_generation_.load(std::memory_order_acquire);
   std::erase_if(retired_, [now](const RetiredInsert& item) {
     return now >= item.generation + 2;

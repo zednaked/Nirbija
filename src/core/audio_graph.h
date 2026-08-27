@@ -55,7 +55,9 @@ class AudioGraph {
   [[nodiscard]] bool wait_renders(int blocks);
 
   // UI thread. Drops retired strips the audio thread has now left.
-  void reclaim();
+  // Frees strips and sources retired by removal, once the audio thread can no
+  // longer be inside them. Pass whether the audio thread exists at all.
+  void reclaim(bool audio_running = true);
 
   // Realtime thread. Handed to every insert before it processes.
   void set_transport(const TransportInfo& transport) { transport_ = transport; }

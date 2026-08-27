@@ -1,5 +1,4 @@
-build/
-build-release/
+build*/
 src/ui/build/
 compile_commands.json
 .cache/

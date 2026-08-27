@@ -6,6 +6,10 @@ add_executable(nirbija_graph_routing graph_routing.cpp)
 target_link_libraries(nirbija_graph_routing PRIVATE nirbija_core)
 add_test(NAME graph_routing COMMAND nirbija_graph_routing)
 
+add_executable(nirbija_insert_reclaim insert_reclaim.cpp)
+target_link_libraries(nirbija_insert_reclaim PRIVATE nirbija_core)
+add_test(NAME insert_reclaim COMMAND nirbija_insert_reclaim)
+
 add_executable(nirbija_engine_smoke engine_smoke.cpp)
 target_link_libraries(nirbija_engine_smoke PRIVATE nirbija_core)
 add_test(NAME engine_smoke COMMAND nirbija_engine_smoke)

@@ -2,6 +2,30 @@
 
 ## 0.4.0 — unreleased
 
+### A plugin removed with no audio server was never freed
+
+An insert pulled out of a strip is not freed on the spot — the audio thread may
+still be inside it, so it waits in a retired list until two renders have gone
+by. The generation that gate counts only advances at the end of a render, and
+renders come from the JACK callback. With no audio server there is no callback,
+so the gate never opened: everything removed was held until the process exited.
+
+Not a corner: the app comes up fully usable with no audio server, says so in the
+status bar, and invites you to restart once one is there. Auditioning plugins in
+the meantime — add, listen to nothing, remove, try the next — grew the process
+by a whole plugin instance each time. A step sequencer is 260 KB before counting
+whatever the plugin itself allocated.
+
+The gate now takes the one question that settles it: whether a JACK client
+exists at all. With none there is no audio thread, so nothing can be inside a
+retired insert and it goes immediately. `tests/insert_reclaim.cpp` holds all
+three states, including the one that makes the obvious fix wrong — a strip built
+while audio is already running also sits at generation 0 until its first block,
+and the audio thread may be inside one of its inserts by then, so "generation is
+0" must not be read as "safe to free".
+
+Found auditing under ASan and UBSan, which the whole headless suite now passes.
+
 ### Plugin editors float on their own under Hyprland
 
 Installing meant pasting a window rule into the compositor's config before the

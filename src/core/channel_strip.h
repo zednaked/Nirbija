@@ -99,7 +99,10 @@ class ChannelStrip {
   bool add_insert(std::unique_ptr<PluginInstance> plugin,
                   size_t* placed_at = nullptr);
   void remove_insert(size_t index);
-  void reclaim();
+  // Frees inserts retired by remove_insert(), once the audio thread can no
+  // longer be inside them. Pass whether the audio thread exists at all: with
+  // none, the generation gate never opens and nothing is ever freed.
+  void reclaim(bool audio_running = true);
 
   // Swaps two slots. The audio thread takes the whole chain as one snapshot
   // (see chain_seq_), so a block renders either the old order or the new one,
