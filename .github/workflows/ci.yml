@@ -1,0 +1,113 @@
+name: build e testes
+
+# Dois trabalhos, de propósito diferentes.
+#
+# `sanitizers` é o que tem de estar sempre verde: sem Qt, dependências mínimas,
+# ASan + UBSan por cima da suíte headless. É barato e é onde a classe de bug que
+# revisão não pega aparece — foi assim que se descobriu que o step sequencer
+# estourava a pilha sob ASan (e portanto o maior módulo do projeto estava fora
+# da cobertura), e que um insert removido sem servidor de áudio nunca era
+# liberado.
+#
+# `arch` é a máquina de verdade: mesmo Qt, mesmo pipewire-jack, com a UI ligada.
+# Roda em contêiner Arch porque o Ubuntu do runner ainda traz Qt 6.4 e o projeto
+# pede 6.5+. Sendo rolling release, este é o que pode quebrar por motivo alheio;
+# por isso ele não é o guardião, é o retrato.
+#
+# A suíte inteira já sabe funcionar sem servidor de áudio e sem plugin
+# instalado: engine_smoke e midi_clock_follow devolvem 77 (ctest marca como
+# Skipped), os testes de plugin desistem sozinhos, e os de UI forçam
+# QT_QPA_PLATFORM=offscreen por conta própria. Nada aqui precisa de Xvfb.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# Um push novo cancela a execução anterior do mesmo branch.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sanitizers:
+    name: core sob ASan + UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Sem Qt: com NIRBIJA_UI=OFF nada em src/ui entra no build, e é lá que
+      # moram Qt e X11.
+      - name: dependências
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build g++ pkg-config git \
+            libjack-jackd2-dev libsndfile1-dev liblilv-dev \
+            liblua5.4-dev libsystemd-dev
+
+      # vst3_pluginterfaces e clap vêm por FetchContent; sem cache é um clone a
+      # cada execução.
+      - name: cache dos SDKs buscados
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: configurar
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DNIRBIJA_UI=OFF -DNIRBIJA_TESTS=ON \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: compilar
+        run: cmake --build build -j"$(nproc)"
+
+      # detect_leaks=0 não é preguiça: o LeakSanitizer acusa vazamentos dentro
+      # de pw_context_load_module quando o libjack abre o cliente, e são do
+      # PipeWire, não daqui. Sem isso quatro testes parecem quebrados.
+      #
+      # halt_on_error=0 para que o UBSan relate tudo o que achar num só passe em
+      # vez de parar no primeiro.
+      - name: testes
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=0
+        run: ctest --test-dir build --output-on-failure
+
+  arch:
+    name: build completo (Arch, com UI)
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: dependências
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel cmake ninja git pkgconf \
+            qt6-base qt6-declarative \
+            pipewire-jack libsndfile lilv lua54 systemd-libs
+
+      # Depois do pacman: o checkout precisa do git, que vem de lá.
+      - uses: actions/checkout@v4
+
+      - name: cache dos SDKs buscados
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-arch-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: configurar
+        run: cmake -S . -B build -G Ninja -DNIRBIJA_UI=ON -DCMAKE_BUILD_TYPE=Release
+
+      - name: compilar
+        run: cmake --build build -j"$(nproc)"
+
+      - name: testes
+        run: ctest --test-dir build --output-on-failure
+
+      # A versão é fonte única em CMakeLists.txt e viaja em todo evento de
+      # telemetria; se o binário não souber dizer qual é, algo se soltou.
+      - name: o binário se identifica
+        run: ./build/src/ui/nirbija --version
