@@ -145,10 +145,20 @@ void ScriptInstance::publish(std::unique_ptr<Tables> tables) {
   collect();
 }
 
-void ScriptInstance::collect() {
+void ScriptInstance::collect() { reclaim_retired(/*audio_running=*/true); }
+
+void ScriptInstance::reclaim_retired(bool audio_running) {
   // A retired set is only safe to free once the audio thread has finished a
   // block that began after it was replaced. Nothing here ever waits: what is
   // not safe yet stays on the list until the next time round.
+  //
+  // Sem thread de audio nenhuma nao ha bloco que va terminar, e o portao nunca
+  // abriria: o app segue inteiro sem servidor de audio, e sem isto todo script
+  // trocado ali ficaria ate o fim.
+  if (!audio_running) {
+    retired_.clear();
+    return;
+  }
   const uint64_t seen = blocks_.load(std::memory_order_acquire);
   std::erase_if(retired_, [seen](const auto& entry) {
     return seen > entry.first + 1;

@@ -2,6 +2,34 @@
 
 ## 0.4.0 — unreleased
 
+### The same leak, in three more places
+
+The fix before this one closed a retire list that never drained with no audio
+server. It closed the two it found by reading, not the class of thing — and the
+class had six members. A sweep for the pattern turned up three more: the
+sampler, the file player and the Lua script plugin all swap a buffer under the
+audio thread and wait on a generation counter that only `process()` advances.
+
+The sampler is the one that hurt. Loading a sample into a pad retires the pad's
+previous buffer, and a pad holds up to eight seconds of stereo — about 3 MB.
+Measured with the audio server down: **thirty loads into one pad kept 58.7 MB**,
+none of it reachable, all of it held until the process exited. After the fix,
+3.0 MB — the one sample that is actually in the pad.
+
+Nobody inside a plugin can tell "there is no audio thread" from "there is one
+that has not reached its first block yet", and freeing in the second case is a
+use-after-free. So the question is answered by the only one who knows: the host
+says, through `PluginInstance::reclaim_retired(bool)`, on the idle poll that
+already calls `host_idle()`.
+
+`tests/sampler_test.cpp` holds both directions — nothing retired when there is
+no audio thread, everything retired when there is one that has not rendered.
+
+The test that guards it was itself wrong on the first try, and the sanitizer
+build is what said so: it measured RSS, and RSS does not fall under ASan, which
+keeps freed memory in quarantine. It counts retired buffers now — the contract
+itself rather than a proxy for it.
+
 ### A plugin removed with no audio server was never freed
 
 An insert pulled out of a strip is not freed on the spot — the audio thread may

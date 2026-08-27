@@ -168,13 +168,25 @@ void SamplerInstance::stash_undo(int pad) {
   p.has_undo = true;
 }
 
+void SamplerInstance::reclaim_retired(bool audio_running) {
+  // Sem thread de audio nenhuma nao ha o que esperar: o portao conta blocos de
+  // process(), e sem eles ele nunca abre. O app segue inteiro sem servidor de
+  // audio, entao sem isto tudo o que fosse trocado ali ficaria ate o fim.
+  if (!audio_running) {
+    retired_.clear();
+    return;
+  }
+  const uint64_t now = process_generation_.load(std::memory_order_acquire);
+  std::erase_if(retired_, [now](const auto& item) {
+    return now >= item.generation + 2;
+  });
+}
+
 void SamplerInstance::publish(int pad, std::shared_ptr<Buffer> buffer) {
   if (pad < 0 || pad >= kPads) return;
   stop_mask_.fetch_or(1u << pad, std::memory_order_relaxed);
+  reclaim_retired(/*audio_running=*/true);
   const uint64_t now = process_generation_.load(std::memory_order_acquire);
-  std::erase_if(retired_, [now](const RetiredBuffer& item) {
-    return now >= item.generation + 2;
-  });
   Pad& target = pads_[pad];
   if (target.owned != nullptr) retired_.push_back({target.owned, now});
   target.owned = std::move(buffer);

@@ -66,15 +66,27 @@ bool FilePlayerInstance::load(const std::string& path) {
   // The audio thread may be inside the old buffer right now, so it is retired
   // rather than freed. Position is reset before the pointer is published, or
   // one block of the new file plays at the old file's offset.
+  reclaim_retired(/*audio_running=*/true);
   const uint64_t now = process_generation_.load(std::memory_order_acquire);
-  std::erase_if(retired_, [now](const RetiredBuffer& item) {
-    return now >= item.generation + 2;
-  });
   if (owned_ != nullptr) retired_.push_back({owned_, now});
   owned_ = std::move(buffer);
   rewind_.store(true, std::memory_order_relaxed);
   live_.store(owned_.get(), std::memory_order_release);
   return true;
+}
+
+void FilePlayerInstance::reclaim_retired(bool audio_running) {
+  // Sem thread de audio nenhuma nao ha o que esperar: o portao conta blocos de
+  // process(), e sem eles ele nunca abre. O app segue inteiro sem servidor de
+  // audio, entao sem isto tudo o que fosse trocado ali ficaria ate o fim.
+  if (!audio_running) {
+    retired_.clear();
+    return;
+  }
+  const uint64_t now = process_generation_.load(std::memory_order_acquire);
+  std::erase_if(retired_, [now](const auto& item) {
+    return now >= item.generation + 2;
+  });
 }
 
 bool FilePlayerInstance::activate(double sample_rate, uint32_t) {

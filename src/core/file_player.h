@@ -39,6 +39,10 @@ class FilePlayerInstance : public PluginInstance {
   std::vector<uint8_t> save_state() const override;
   bool load_state(const std::vector<uint8_t>& blob) override;
 
+  // O host diz se existe thread de audio: sem ela o portao de geracao nunca
+  // abre e nada aposentado seria liberado. Ver PluginInstance.
+  void reclaim_retired(bool audio_running) override;
+
   const PluginDescriptor& descriptor() const override { return descriptor_; }
 
   static PluginDescriptor make_descriptor();

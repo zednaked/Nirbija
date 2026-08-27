@@ -151,6 +151,16 @@ class SamplerInstance : public PluginInstance {
   std::vector<uint8_t> save_state() const override;
   bool load_state(const std::vector<uint8_t>& blob) override;
 
+  // O host diz se existe thread de audio: sem ela o portao de geracao nunca
+  // abre e nada aposentado seria liberado. Ver PluginInstance.
+  void reclaim_retired(bool audio_running) override;
+
+  // Quantos buffers trocados ainda esperam para ser liberados. Existe para o
+  // teste poder afirmar o contrato em si - "nada ficou esperando" - em vez de
+  // um substituto como RSS, que nao cai sob o AddressSanitizer porque ele
+  // mantem em quarentena o que foi liberado.
+  size_t retired_count() const { return retired_.size(); }
+
   // Just the pads: names, tuning and audio, not the instrument's own gain,
   // quantize or count-in — what "swap the kit" means without also resetting
   // how Rec behaves. A different shape from save_state()/load_state(), which

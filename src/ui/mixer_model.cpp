@@ -1661,6 +1661,11 @@ void MixerModel::pollLevels() {
       PluginInstance* insert = strip->insert_at(slot);
       if (insert == nullptr) continue;
       insert->host_idle();
+      // Mesma razao do strip->reclaim(audio_running) acima: um plugin que troca
+      // buffer sob a thread de audio aposenta o antigo e espera a geracao
+      // andar. Sem thread de audio ela nao anda, e nada seria liberado - o
+      // sampler retinha 3 MB por sample trocado.
+      insert->reclaim_retired(audio_running);
       // A patch or a preset loaded from the plugin's own window goes through
       // none of this model's setters, so without asking, the session would
       // never learn it had anything new to write.

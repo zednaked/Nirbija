@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <memory>
 #include <cstring>
 #include <filesystem>
 #include <string>
@@ -694,6 +695,45 @@ int main() {
            "a loaded pad did not flash on its own note");
     expect((sampler.sounding_mask() & 0x1) != 0,
            "a loaded pad did not report sounding");
+  }
+
+  // Trocar o sample de um pad aposenta o buffer anterior em vez de libera-lo na
+  // hora: a thread de audio pode estar lendo dele. O portao dessa espera conta
+  // blocos de process(), que so o callback do JACK move - entao sem servidor de
+  // audio ele nunca abria, e cada troca ficava retida ate o processo sair. Sao
+  // ate 3 MB por sample.
+  //
+  // Ninguem de dentro do plugin distingue "nao ha thread de audio" de "ha uma
+  // que ainda nao chegou ao primeiro bloco", e liberar no segundo caso seria
+  // use-after-free. Por isso quem sabe e o host, e ele diz:
+  // PluginInstance::reclaim_retired(bool).
+  {
+    auto sampler = std::make_unique<nirbija::SamplerInstance>();
+    // De proposito sem activate() nem process(): e o estado "sem servidor".
+    expect(sampler->load(0, tone.string()), "could not load the tone");
+
+    for (int i = 0; i < 30; ++i) {
+      sampler->load(0, tone.string());
+      sampler->reclaim_retired(/*audio_running=*/false);
+    }
+    expect(sampler->retired_count() == 0,
+           "swapping a pad's sample with no audio server left " +
+               std::to_string(sampler->retired_count()) +
+               " buffer(s) retired");
+  }
+
+  // E o contrario, que e o que impede a correcao obvia e errada: dizendo que ha
+  // thread de audio, sem bloco nenhum ter rodado, nada pode ser liberado.
+  {
+    auto sampler = std::make_unique<nirbija::SamplerInstance>();
+    expect(sampler->load(0, tone.string()), "could not load the tone");
+    for (int i = 0; i < 5; ++i) {
+      sampler->load(0, tone.string());
+      sampler->reclaim_retired(/*audio_running=*/true);
+    }
+    expect(sampler->retired_count() == 5,
+           "a sampler that has not rendered yet must keep its retired buffers "
+           "(kept " + std::to_string(sampler->retired_count()) + " of 5)");
   }
 
   fs::remove(tone);

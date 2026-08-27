@@ -212,6 +212,16 @@ class PluginInstance {
   // open: CLAP timers, request_callback, POSIX fds. Default is nothing.
   virtual void host_idle() {}
 
+  // UI thread, on the host's idle poll. A plugin that swaps a buffer under the
+  // audio thread does not free the old one on the spot - it retires it and
+  // waits for the generation counter to move. That counter only advances at the
+  // end of process(), so with no audio thread at all it never moves and nothing
+  // retired is ever freed. Nobody inside a plugin can tell the difference
+  // between "no audio thread" and "one that has not reached its first block
+  // yet", and freeing in the second case would be a use-after-free - so the
+  // host, which knows, says. Default is nothing.
+  virtual void reclaim_retired(bool audio_running) { (void)audio_running; }
+
   // True once after the plugin has changed its own state behind the host's
   // back — a sampler given a new kit from its editor, a synth loading a patch.
   // Nothing the host did marks this; it exists because a session is only
