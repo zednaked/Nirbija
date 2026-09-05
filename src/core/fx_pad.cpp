@@ -502,7 +502,7 @@ void FxPadInstance::set_parameter(uint32_t id, double value) {
 std::vector<uint8_t> FxPadInstance::save_state() const {
   std::string text = hold() ? "1\n" : "0\n";
   for (int p = 0; p < kPads; ++p) {
-    text += std::to_string(pad_amount(p));
+    text += format_number(pad_amount(p), 6);
     text += '\n';
   }
   return {text.begin(), text.end()};

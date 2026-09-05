@@ -596,7 +596,8 @@ class Lv2Instance : public PluginInstance {
 
   void queue_midi(const MidiEvent& event) override {
     if (atom_in_.empty() || event.size == 0) return;
-    if (pending_midi_count_ >= pending_midi_.size()) return;  // block overrun
+    if (!midi_queue_admits(pending_midi_count_, pending_midi_.size(), event))
+      return;  // block overrun; note-offs get the last of the room
     pending_midi_[pending_midi_count_++] = event;
   }
 
@@ -830,7 +831,9 @@ class Lv2Instance : public PluginInstance {
     return processed_generation_.load(std::memory_order_acquire) >= seen + 2;
   }
 
-  static constexpr size_t kAtomBufferBytes = 4096;
+  // Room for a full pending_midi_ of three-byte events, each an atom of its
+  // own with a frame time: 24 bytes apiece, plus the transport.
+  static constexpr size_t kAtomBufferBytes = 32768;
 
   // State is kept in memory rather than in a bundle on disk, so the subject URI
   // only has to be stable, not resolvable.
@@ -1239,7 +1242,7 @@ class Lv2Instance : public PluginInstance {
 
   // Fixed so queueing never allocates on the audio thread. A block carrying
   // more than this is a chord nobody plays.
-  std::array<MidiEvent, 64> pending_midi_{};
+  std::array<MidiEvent, 1024> pending_midi_{};
   size_t pending_midi_count_ = 0;
   int32_t block_length_ = 0;
   LV2_Feature map_feature_{}, unmap_feature_{}, options_feature_{}, bounded_feature_{};

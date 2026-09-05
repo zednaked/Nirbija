@@ -173,8 +173,8 @@ void FilePlayerInstance::set_parameter(uint32_t id, double value) {
 // session file, and versionable by adding lines.
 std::vector<uint8_t> FilePlayerInstance::save_state() const {
   const std::string text = path_ + "\n" +
-                           std::to_string(parameter_value(kGain)) + "\n" +
-                           std::to_string(parameter_value(kLoop));
+                           format_number(parameter_value(kGain), 6) + "\n" +
+                           format_number(parameter_value(kLoop), 6);
   return std::vector<uint8_t>(text.begin(), text.end());
 }
 

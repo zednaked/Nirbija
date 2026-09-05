@@ -288,13 +288,34 @@ void SamplerInstance::resolve_paths(std::string_view base_dir) {
   for (int i = 0; i < kPads; ++i) {
     const std::string stored = pads_[i].path;
     if (stored.empty()) continue;
-    fs::path candidate{stored};
-    if (!fs::exists(candidate) && !base.empty() && candidate.is_relative()) {
-      const fs::path next = base / candidate;
-      if (fs::exists(next)) candidate = next;
+    const fs::path written{stored};
+
+    // Where the file might be, most specific first: as written; next to the
+    // file that named it; and, for a name that was absolute somewhere else,
+    // the last folder and name of it next to this file - which is how a kit
+    // that travelled as `samples/kick.wav` is found again after a move.
+    fs::path candidates[4];
+    size_t count = 0;
+    candidates[count++] = written;
+    if (!base.empty()) {
+      if (written.is_relative()) candidates[count++] = base / written;
+      const fs::path name = written.filename();
+      const fs::path folder = written.parent_path().filename();
+      if (!folder.empty() && !name.empty())
+        candidates[count++] = base / folder / name;
+      if (!name.empty()) candidates[count++] = base / name;
     }
-    if (!fs::exists(candidate)) continue;
-    auto buffer = decode_file(candidate.string());
+    fs::path found;
+    for (size_t c = 0; c < count; ++c) {
+      std::error_code ec;
+      if (fs::exists(candidates[c], ec)) {
+        found = candidates[c];
+        break;
+      }
+    }
+    if (found.empty()) continue;
+
+    auto buffer = decode_file(found.string());
     if (buffer == nullptr) continue;
     const uint64_t cap =
         rec_capacity_ > 0
@@ -305,8 +326,13 @@ void SamplerInstance::resolve_paths(std::string_view base_dir) {
       buffer->frames = cap;
       buffer->samples.resize(static_cast<size_t>(cap) * 2);
     }
-    // Keep the stored path as it was written, so a session that travelled
-    // with its samples/ folder still saves a relative name.
+    // The pad remembers where the file actually was, in full. A relative
+    // name kept as written only ever resolved against the folder of the
+    // file it came from - and the autosave lives in the user's data folder,
+    // next to no samples at all, so the next start found every pad empty.
+    std::error_code ec;
+    const fs::path absolute = fs::absolute(found, ec);
+    pads_[i].path = ec ? found.string() : absolute.lexically_normal().string();
     publish(i, std::move(buffer));
   }
 }
@@ -1142,7 +1168,8 @@ bool SamplerInstance::load_pads(const std::vector<uint8_t>& blob) {
 
 std::vector<uint8_t> SamplerInstance::save_state() const {
   // A take that Rec just closed is still in rec_buffer_ until commit_take
-  // runs. The caller is on the UI thread with the graph parked, so we can
+  // runs. The caller is on the UI thread and, whenever a take is waiting,
+  // has parked the graph first (save_needs_quiet() says so), so we can
   // publish it before walking the pads. const_cast is the same trick the
   // looper uses when an open pass has to become a closed loop on save.
   const_cast<SamplerInstance*>(this)->commit_take();

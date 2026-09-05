@@ -356,8 +356,9 @@ std::vector<uint8_t> ScriptInstance::save_state() const {
   std::string text;
   char line[64];
   for (int i = 0; i < kKnobs; ++i) {
-    std::snprintf(line, sizeof(line), "knob %d %.6f\n", i,
-                  knobs_[i].load(std::memory_order_relaxed));
+    std::snprintf(line, sizeof(line), "knob %d %s\n", i,
+                  format_number(knobs_[i].load(std::memory_order_relaxed), 6)
+                      .c_str());
     text += line;
   }
   // The script goes last and takes the rest of the blob, so it may contain

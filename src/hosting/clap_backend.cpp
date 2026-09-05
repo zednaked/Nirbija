@@ -365,7 +365,8 @@ class ClapInstance : public PluginInstance {
   }
 
   void queue_midi(const MidiEvent& event) override {
-    if (event.size == 0 || pending_midi_count_ >= kMaxBlockMidi) return;
+    if (event.size == 0) return;
+    if (!midi_queue_admits(pending_midi_count_, kMaxBlockMidi, event)) return;
     pending_midi_[pending_midi_count_++] = event;
   }
 
@@ -859,7 +860,7 @@ class ClapInstance : public PluginInstance {
 
   std::vector<std::vector<float>> input_channels_, output_channels_;
   std::vector<float*> input_ptrs_, output_ptrs_;
-  static constexpr size_t kMaxBlockMidi = 64;
+  static constexpr size_t kMaxBlockMidi = 1024;
   RtQueue<PendingParam, 64> param_queue_;
   std::array<MidiEvent, kMaxBlockMidi> pending_midi_{};
   size_t pending_midi_count_ = 0;

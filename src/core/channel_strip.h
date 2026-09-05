@@ -52,6 +52,10 @@ class ChannelStrip {
   void set_gain(float linear) { gain_.store(linear, std::memory_order_relaxed); }
   void set_pan(float pan) { pan_.store(pan, std::memory_order_relaxed); }
   float pan() const { return pan_.load(std::memory_order_relaxed); }
+  // Where the pan actually is this block, audio thread only: the graph pans
+  // a mono strip with this so the spread moves with the fader, not ahead
+  // of it.
+  float smoothed_pan() const { return smoothed_pan_; }
   void set_muted(bool muted) { muted_.store(muted, std::memory_order_relaxed); }
   void set_soloed(bool soloed) { soloed_.store(soloed, std::memory_order_relaxed); }
   bool soloed() const { return soloed_.load(std::memory_order_relaxed); }
@@ -145,6 +149,12 @@ class ChannelStrip {
   // the dry audio back and drops anything it emitted.
   void run_bypassed(PluginInstance* insert, float* const* buffers,
                     uint32_t frames, const TransportInfo* transport);
+  // The blocks between: the plugin runs, and what leaves the slot walks
+  // from wet to dry (or back) across the block. `mix` is how much dry was in
+  // it at the end of the last block and is left at where this one ends.
+  void run_crossfade(PluginInstance* insert, float* const* buffers,
+                     uint32_t frames, const TransportInfo* transport,
+                     float* mix, bool to_bypass);
   static bool midi_allowed(const MidiEvent& event, uint16_t mask);
 
   // One block's view of the insert chain, taken whole before anything runs.
@@ -194,6 +204,14 @@ class ChannelStrip {
   float smoothed_gain_ = 1.0f;
   float smoothed_pan_ = 0.0f;
   float smoothing_coeff_ = 0.0f;
+  // Mute is a straight line to zero and back over a few milliseconds,
+  // separate from the fader's own smoothing so it feels like a switch.
+  float mute_gain_ = 1.0f;
+  float mute_step_ = 1.0f;
+  // How much dry each slot is putting out, 0 wet to 1 bypassed. Owned by the
+  // audio thread except that add_insert() zeroes the slot it fills, so a new
+  // plugin starts wet like its flags say.
+  std::array<std::atomic<float>, kMaxInserts> bypass_mix_{};
 
   std::vector<std::atomic<float>> peaks_;
 
@@ -222,8 +240,9 @@ class ChannelStrip {
 
   // MIDI in flight down the insert chain: what came in from the channel port,
   // plus whatever the inserts upstream produced. Fixed size so nothing
-  // allocates mid-block.
-  std::array<MidiEvent, 256> midi_chain_{};
+  // allocates mid-block; deep enough for a sequencer rolling ratchets on
+  // every head in one period.
+  std::array<MidiEvent, 1024> midi_chain_{};
   size_t midi_chain_count_ = 0;
 
   std::vector<std::vector<float>> output_cache_;

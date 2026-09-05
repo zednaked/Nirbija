@@ -2,6 +2,99 @@
 
 ## 0.4.0 — unreleased
 
+### A kit loaded from a session file went silent on the next start
+
+The sampler kept a pad's path exactly as the file that named it spelled it,
+so a kit loaded from `sessions/jam-sampler.json` stored `samples/kick.wav`,
+relative. That resolved against the folder of the file being read - fine for
+the jam - and the autosave then carried the same relative name into the user's
+data folder, next to no samples at all. The next start found every pad empty,
+and the mixer played nothing.
+
+A pad remembers the full path of the file it actually found now. A kit that
+travels is still found: a name that points nowhere is looked for next to the
+file that names it, by its last folder and file name, so a moved
+`samples/kick.wav` comes back. `tests/sampler_test.cpp` holds both.
+
+### Numbers in state blobs no longer depend on the locale
+
+Qt sets the C library to the user's locale on startup, and under pt_BR every
+`%.4f` the built-in plugins printed became `0,5000`. Read back by a parser that
+stops at the comma, that is 0; a gate of 0 clamps to its floor, is written as
+`0,0500`, and stays there - every lane of every sequencer in a Brazilian
+session had a 5 % gate by the second save. The sequencer, the script plugin,
+the fx pad and the file player format numbers with `to_chars` now, the parser
+forgives the files already written with a comma, and the mixer pins
+`LC_NUMERIC` to C for whatever a hosted plugin prints for itself.
+`tests/state_locale.cpp` runs the writers under a comma locale when the
+machine has one.
+
+
+### Editing a sequence no longer pops the master
+
+Touch a step in the sequencer grid and, a second later, the master went quiet
+for a few blocks and came back. That was the autosave: reading every plugin's
+state parked the graph, and a parked graph wrote zeros — no fade, no ramp. On a
+pad, a reverb tail, a held note, a hard cut to nothing and a hard cut back is a
+pop, and it landed a second after the last edit, every time.
+
+The park was there because of a reading of the LV2 spec that turned out to be
+backwards. `save()` may be called concurrently with `run()`; it is `restore()`
+that wants the instance quiet. CLAP and VST3 save on the main thread with the
+plugin active, and the built-in plugins read atomics. So a save now runs with
+the mixer playing. A plugin that genuinely cannot be read that way at this
+moment — a looper with Rec down, a sampler with a take waiting to be published —
+says so through `PluginInstance::save_needs_quiet()`, and only then, and only
+for that save, is the graph parked. `tests/session_autosave_live.cpp` holds
+both halves against a real audio server.
+
+When the graph does park — a state load, a looper mid-take — the master fades
+out over 5 ms and back in the same way, and the strips' direct outs get the
+same curve. Those used to repeat their last block for the whole park, a buzz
+on the hardware outs while the master was silent.
+
+### Nothing in the mixer steps any more
+
+The same audit found every other switch that cut in one sample: a strip's mute,
+solo, an insert's bypass, a send level, the master fader (one gain per block —
+a zipper when moved), dim, mute and mono. Each is a slope now: mute and bypass a
+straight 10 ms line, bypass a real crossfade with the plugin running through
+it, everything summed into a destination walked across the block and limited
+to a full swing in no less than 10 ms. `tests/graph_smooth.cpp` watches the
+master sample by sample through each of them for a jump.
+
+### A brickwall on the master
+
+Eight lanes into a synth passes full scale without trying, and past full scale
+the converter clips. The master has a limiter now: 1.5 ms of lookahead, a
+ceiling of -0.3 dBFS, transparent below it and a hard stop at it. LIM in the
+top bar, on by default for a session that never said otherwise, lit hot while
+it is holding something back. It costs 1.5 ms on the master and nothing else.
+
+### The song position is a count
+
+Beats were derived from the frame counter times the tempo, so changing the
+tempo moved the song — two minutes in, 120 to 121 BPM jumped two beats
+forward; 120 to 119 jumped back and left the sequencer silent until the
+position caught up. The audio thread counts beats per block now, and the
+position display reads that count.
+
+### Room for note-offs
+
+A block's MIDI ran through queues of 128, 256 and 64 events. Eight lanes of
+ratchets can produce more, and whatever did not fit was dropped — note-offs
+included, and a note-off dropped is a note that never stops: on a synth, a
+wall of voices and then clipping. The queues are 1024 deep the whole way down,
+and the last eighth of every one is kept for note-offs.
+
+### Denormals off, xruns counted
+
+The audio callback now flushes denormals on every block — a reverb tail
+decaying to nothing used to cost a hundred times more per sample exactly where
+the music went quiet — and the server's dropouts are counted and shown in the
+status bar, so a click can be told apart from a missed period.
+
+
 ### The same leak, in three more places
 
 The fix before this one closed a retire list that never drained with no audio

@@ -826,10 +826,10 @@ std::vector<uint8_t> LooperInstance::save_state() const {
   }
 
   std::vector<uint8_t> out;
-  // Sized once. The caller collects these with the graph parked, so the master
-  // is silent for as long as this runs: a minute of stereo tape is 23 MB, and
-  // growing into it a doubling at a time would copy most of that several times
-  // over before the audio comes back.
+  // Sized once. This runs under a playing mixer between takes and under a
+  // parked one while Rec is down, and either way a minute of stereo tape is
+  // 23 MB: growing into it a doubling at a time would copy most of that
+  // several times over on the UI thread for nothing.
   static constexpr size_t kHeaderBytes =
       7 + sizeof(int) + 5 * sizeof(float) + 6 * sizeof(double) +
       3 * sizeof(int) + sizeof(uint64_t);

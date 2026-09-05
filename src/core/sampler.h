@@ -149,6 +149,13 @@ class SamplerInstance : public PluginInstance {
   std::vector<NoteName> note_names() const override;
 
   std::vector<uint8_t> save_state() const override;
+  // save_state() publishes a take Rec just closed, and that has to happen
+  // with the audio thread out of the pads; with nothing pending and nothing
+  // recording, it only reads what is already published.
+  bool save_needs_quiet() const override {
+    return recording_.load(std::memory_order_relaxed) ||
+           rec_ready_frames_.load(std::memory_order_acquire) > 0;
+  }
   bool load_state(const std::vector<uint8_t>& blob) override;
 
   // O host diz se existe thread de audio: sem ela o portao de geracao nunca

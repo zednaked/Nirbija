@@ -1620,6 +1620,35 @@ int main() {
            "stop left native head_steps at 0, lighting column 1");
   }
 
+  // --- a full block keeps room for note-offs ---------------------------------
+  // What passes through and what the grid makes share one queue. Once it is
+  // nearly full, a note-on is the thing to lose - a note-off lost is a note
+  // that never stops.
+  {
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
+    seq.activate(kRate, kBlock);
+    nirbija::MidiEvent on;
+    on.frame = 0;
+    on.size = 3;
+    on.data[0] = 0x90;
+    on.data[1] = 60;
+    on.data[2] = 100;
+    for (int i = 0; i < 2000; ++i) seq.queue_midi(on);
+    nirbija::MidiEvent off = on;
+    off.data[0] = 0x80;
+    off.data[2] = 0;
+    seq.queue_midi(off);
+    seq.queue_midi(on);
+    static nirbija::MidiEvent drained[2048];
+    const size_t count = seq.take_midi_output(drained, 2048);
+    expect(count < 2000, "the queue took more than it can hold");
+    bool saw_off = false;
+    for (size_t i = 0; i < count; ++i)
+      if ((drained[i].data[0] & 0xf0) == 0x80) saw_off = true;
+    expect(saw_off, "a note-off was dropped from a nearly full block");
+  }
+
   if (failures > 0) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return 1;

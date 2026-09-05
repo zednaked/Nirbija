@@ -266,6 +266,14 @@ Rectangle {
             active: Mixer.masterMono
             onClicked: Mixer.toggleMasterMono()
         }
+        StripButton {
+            Layout.preferredWidth: Px.px(40)
+            label: qsTr("LIM")
+            tip: qsTr("Brickwall limiter on the master: nothing leaves above -0.3 dBFS, nothing under it is touched. Lights hot while it is holding something back. Costs 1.5 ms on the master.")
+            active: Mixer.masterLimiter
+            activeColor: Mixer.limiterWorking ? Skin.arm : Skin.accent
+            onClicked: Mixer.toggleMasterLimiter()
+        }
 
         Item {
             Layout.fillWidth: true
@@ -284,8 +292,12 @@ Rectangle {
                 Layout.fillWidth: true
                 text: Mixer.learning
                       ? qsTr("MIDI learn: move a control… (Esc cancels)")
+                      : Mixer.xruns > 0
+                      ? root.status + qsTr(" · %n xrun(s)", "", Mixer.xruns)
                       : root.status
-                color: Mixer.learning ? Skin.solo : Skin.textDim
+                color: Mixer.learning ? Skin.solo
+                     : Mixer.xruns > 0 ? Skin.arm
+                     : Skin.textDim
                 font.pixelSize: Skin.fontXS
                 horizontalAlignment: Text.AlignHCenter
                 elide: Text.ElideRight

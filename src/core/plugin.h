@@ -82,6 +82,25 @@ struct MidiEvent {
   uint8_t data[3] = {0, 0, 0};
 };
 
+inline bool midi_is_note_off(const MidiEvent& event) {
+  if (event.size < 3) return false;
+  const uint8_t status = event.data[0] & 0xf0u;
+  return status == 0x80u || (status == 0x90u && event.data[2] == 0);
+}
+
+// Whether a fixed-size MIDI queue holding `count` of `capacity` events should
+// take one more. The last eighth of every queue is kept for note-offs: a
+// note-on that never arrives is a missed note, a note-off that never arrives
+// is a note stuck open until something else happens to close it - which on a
+// synth with eight voices piling up is a wall of sound, then clipping.
+inline bool midi_queue_admits(size_t count, size_t capacity,
+                              const MidiEvent& event) {
+  if (count >= capacity) return false;
+  const size_t reserve = capacity / 8;
+  if (count + reserve < capacity) return true;
+  return midi_is_note_off(event);
+}
+
 struct ParameterInfo {
   uint32_t id;
   std::string name;
@@ -103,6 +122,13 @@ struct NoteName {
 // of load_state and off the top of the call stack — which is what std::stod
 // does on the first character it does not like.
 bool parse_number(std::string_view text, double* out);
+
+// A number into a state blob: fixed notation, `decimals` places, always a
+// full stop. Never printf's "%f": Qt sets the C library to the user's locale
+// on startup, and under pt_BR "%f" writes "0,5000" - which parse_number then
+// read as 0, and which turned every gate in a sequencer into its floor on the
+// next save.
+std::string format_number(double value, int decimals);
 
 // A plugin's own editor window, embedded into one of ours. Every format that
 // ships a Linux editor draws it with X11, so the parent handle is an X11
@@ -173,6 +199,16 @@ class PluginInstance {
   // Opaque blob owned by the plugin, stored verbatim in the session file.
   virtual std::vector<uint8_t> save_state() const = 0;
   virtual bool load_state(const std::vector<uint8_t>& blob) = 0;
+
+  // True while save_state() cannot be called with process() running. The
+  // default is false and that is what every hosted format promises: LV2's
+  // save() is explicitly allowed alongside run() and the plugin locks for
+  // itself, CLAP and VST3 save on the main thread with the plugin active. A
+  // plugin that copies a tape the audio thread is writing, or publishes a
+  // take from inside its save, says so here for as long as that is the case,
+  // and only then does a save cost the master a hole. load_state() is the
+  // opposite: every format wants the instance quiet for it, always.
+  virtual bool save_needs_quiet() const { return false; }
 
   virtual const PluginDescriptor& descriptor() const = 0;
 

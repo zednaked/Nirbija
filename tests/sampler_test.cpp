@@ -331,7 +331,39 @@ int main() {
     expect(named.pad_has_audio(0), "resolve_paths did not find kick.wav");
     note_on(named, 36, 127);
     expect(run(named) > 0.1f, "resolved kick was silent");
+
+    // Once found, the pad remembers the whole path: the autosave that this
+    // state lands in sits in the user's data folder, next to no samples,
+    // and the next start must find the kit without any folder to resolve
+    // against.
+    expect(fs::path(named.pad_path(0)).is_absolute(),
+           "a resolved pad kept its relative name: " + named.pad_path(0));
+    nirbija::SamplerInstance restarted;
+    restarted.set_channel_layout(2);
+    restarted.activate(kRate, kBlock);
+    expect(restarted.load_state(named.save_state()),
+           "the resolved state was refused");
+    restarted.resolve_paths("/nonexistent/data/folder");
+    expect(restarted.pad_has_audio(0),
+           "an absolute pad path did not survive a restart elsewhere");
+
+    // And a kit that travelled - the folder moved, the absolute name now
+    // pointing nowhere - is found again next to the file that names it, by
+    // the last folder and the file name.
+    const fs::path moved = fs::temp_directory_path() / "nirbija-kit-moved";
+    fs::create_directories(moved / "nirbija-kit");
+    fs::copy_file(wav, moved / "nirbija-kit" / "kick.wav",
+                  fs::copy_options::overwrite_existing);
+    const auto travelled = named.save_state();
     fs::remove_all(dir);
+    nirbija::SamplerInstance arrived;
+    arrived.set_channel_layout(2);
+    arrived.activate(kRate, kBlock);
+    expect(arrived.load_state(travelled), "the travelled state was refused");
+    arrived.resolve_paths(moved.string());
+    expect(arrived.pad_has_audio(0),
+           "a moved kit was not found next to its new session");
+    fs::remove_all(moved);
     (void)blob;
   }
 

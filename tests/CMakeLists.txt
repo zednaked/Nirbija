@@ -6,6 +6,14 @@ add_executable(nirbija_graph_routing graph_routing.cpp)
 target_link_libraries(nirbija_graph_routing PRIVATE nirbija_core)
 add_test(NAME graph_routing COMMAND nirbija_graph_routing)
 
+add_executable(nirbija_state_locale state_locale.cpp)
+target_link_libraries(nirbija_state_locale PRIVATE nirbija_core)
+add_test(NAME state_locale COMMAND nirbija_state_locale)
+
+add_executable(nirbija_graph_smooth graph_smooth.cpp)
+target_link_libraries(nirbija_graph_smooth PRIVATE nirbija_core)
+add_test(NAME graph_smooth COMMAND nirbija_graph_smooth)
+
 add_executable(nirbija_insert_reclaim insert_reclaim.cpp)
 target_link_libraries(nirbija_insert_reclaim PRIVATE nirbija_core)
 add_test(NAME insert_reclaim COMMAND nirbija_insert_reclaim)
@@ -35,6 +43,10 @@ if(NIRBIJA_UI)
   add_executable(nirbija_session_dirty session_dirty.cpp)
   target_link_libraries(nirbija_session_dirty PRIVATE nirbija_ui)
   add_test(NAME session_dirty COMMAND nirbija_session_dirty)
+
+  add_executable(nirbija_session_autosave_live session_autosave_live.cpp)
+  target_link_libraries(nirbija_session_autosave_live PRIVATE nirbija_ui)
+  add_test(NAME session_autosave_live COMMAND nirbija_session_autosave_live)
 endif()
 
 if(NIRBIJA_UI)
@@ -112,4 +124,12 @@ if(NIRBIJA_VST3)
   add_executable(nirbija_vst3_process vst3_process.cpp)
   target_link_libraries(nirbija_vst3_process PRIVATE nirbija_core)
   add_test(NAME vst3_process COMMAND nirbija_vst3_process)
+endif()
+
+if(NIRBIJA_UI)
+  # Manual tool, not a ctest target: loads the session NIRBIJA_SESSION names,
+  # presses play and prints the master and strip peaks - the quickest way to
+  # tell "silent because of the code" from "silent because of the session".
+  add_executable(nirbija_probe_sound probe_sound.cpp)
+  target_link_libraries(nirbija_probe_sound PRIVATE nirbija_ui)
 endif()

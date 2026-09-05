@@ -40,19 +40,52 @@ class AudioGraph {
   // Realtime thread. Sums every audible strip into `master`, two pointers wide.
   void render(float* const* master, uint32_t frames);
 
-  // UI thread. Parks the graph so process() emits silence; wait_renders()
-  // then proves the audio thread is out of every plugin. Used around state
-  // save/load and recorder teardown.
+  // UI thread. Parks the graph: the master fades to silence over a few
+  // milliseconds, and from the first block rendered entirely at zero no
+  // plugin runs until unpark(), which fades it back in. wait_quiescent()
+  // proves such a block has passed, which is what a state load needs. Used
+  // around plugin state load, around saves that a plugin says need it, and
+  // around recorder teardown.
   void park();
   void unpark();
   bool parked() const { return parked_.load(std::memory_order_acquire); }
   uint64_t render_generation() const {
     return render_generation_.load(std::memory_order_acquire);
   }
+  // Blocks rendered with nothing running. A save that parks nothing leaves
+  // this where it was, which is what the session tests check.
+  uint64_t quiet_generation() const {
+    return quiet_generation_.load(std::memory_order_acquire);
+  }
   // False when the blocks never arrived — a stalled or absent audio thread.
   // The caller has then *not* been given the guarantee it asked for and must
   // not treat the graph as quiescent.
   [[nodiscard]] bool wait_renders(int blocks);
+  // Waits for one whole block rendered with the graph parked and the fade
+  // already at zero: no plugin was inside process() during it, and none will
+  // be until unpark(). Same false as wait_renders() when it never comes.
+  [[nodiscard]] bool wait_quiescent();
+  // Realtime thread, after render(). Applies to a buffer that copies a
+  // strip's output straight to a port the same fade the master got this
+  // block, and silence when the block was parked and the copy is stale.
+  void apply_park_ramp(float* buffer, uint32_t frames) const;
+
+  // A brickwall on the master, after the fader: a millisecond and a half of
+  // lookahead, so what leaves this box never passes the ceiling and never
+  // clips the converter. Transparent below the ceiling; costs that much
+  // latency on the master when on.
+  void set_master_limiter(bool on) {
+    master_limiter_.store(on, std::memory_order_relaxed);
+  }
+  bool master_limiter() const {
+    return master_limiter_.load(std::memory_order_relaxed);
+  }
+  // Deepest gain reduction since the last read, in linear gain (1 = none).
+  // Reading resets it.
+  float read_limiter_floor() {
+    return limiter_floor_.exchange(1.0f, std::memory_order_relaxed);
+  }
+  uint32_t master_latency_samples() const;
 
   // UI thread. Drops retired strips the audio thread has now left.
   // Frees strips and sources retired by removal, once the audio thread can no
@@ -123,9 +156,15 @@ class AudioGraph {
   size_t take_bus_slot();
 
   // Sums a strip's output into wherever it is pointed, widening a mono strip on
-  // the way.
+  // the way. `gain` is where this block wants to end up; `state` is where the
+  // last one left off, per output channel, and the block walks between the
+  // two - so a solo, a send level or a mono pan never steps. A block that
+  // starts and ends at zero costs nothing.
   void mix_into(float* const* target, const ChannelStrip& strip, int width,
-                uint32_t frames, float gain = 1.0f);
+                uint32_t frames, float gain, float* state);
+  // The most any smoothed amount may move in one block: a full swing takes at
+  // least kRampSeconds however short the block.
+  float slew(float from, float to, uint32_t frames) const;
 
   // Where a strip's output goes. `rendered_channels` and `rendered_buses` are
   // how far the pass has got, since a strip can only feed something still
@@ -137,8 +176,11 @@ class AudioGraph {
 
   // Sends run after the strip has been processed, so what they carry is what
   // the strip is actually putting out, fader included.
+  // `slot` picks the ramp state; a bus uses kMaxChannels + its index. With
+  // `audible` false every send ramps to nothing rather than dropping out.
   void apply_sends(const ChannelStrip& strip, int width, uint32_t frames,
-                   long long rendered_buses);
+                   long long rendered_buses, size_t slot, bool audible);
+  void run_limiter(float* const* master, uint32_t frames);
 
 
   std::array<std::unique_ptr<ChannelStrip>, kMaxChannels> channels_;
@@ -199,12 +241,55 @@ class AudioGraph {
   std::atomic<int> master_track_{-1};
   std::atomic<bool> parked_{false};
   std::atomic<uint64_t> render_generation_{0};
+  // Counts only blocks rendered with the graph parked and the fade already
+  // at zero - the blocks nothing was running in.
+  std::atomic<uint64_t> quiet_generation_{0};
+  // The park fade, audio thread only. park_ramp_ holds this block's curve so
+  // the engine can give a strip's direct out the same shape.
+  float park_gain_ = 1.0f;
+  std::vector<float> park_ramp_;
+  bool park_ramp_active_ = false;
+  bool last_render_quiet_ = false;
+
   std::atomic<float> master_gain_{1.0f};
   std::atomic<bool> master_dim_{false};
   std::atomic<bool> master_mute_{false};
   std::atomic<bool> master_mono_{false};
+  std::atomic<bool> master_limiter_{false};
   std::atomic<float> master_peaks_[2]{{0.0f}, {0.0f}};
   std::atomic<float> master_clip_{0.0f};
+  std::atomic<float> limiter_floor_{1.0f};
+
+  // Where every smoothed amount was at the end of the last block, audio
+  // thread only. Two per strip for its destination (left, right), two per
+  // send, and the master's own fader and mono blend.
+  std::array<std::array<float, 2>, kMaxChannels> channel_mix_{};
+  std::array<std::array<float, 2>, kMaxBuses> bus_mix_{};
+  std::array<std::array<std::array<float, 2>, kMaxSends>,
+             kMaxChannels + kMaxBuses>
+      send_mix_{};
+  // The destination each strip last mixed into, so a reroute fades in at the
+  // new place instead of arriving at full level.
+  std::array<int, kMaxChannels> channel_last_dest_{};
+  std::array<int, kMaxBuses> bus_last_dest_{};
+  float master_mix_ = 1.0f;
+  float master_mono_mix_ = 0.0f;
+
+  // The limiter's delay line and gain smoother, sized in prepare().
+  struct Limiter {
+    std::vector<float> delay[2];
+    std::vector<float> gains;  // the instant gain, one per delayed sample
+    size_t write = 0;
+    size_t lookahead = 0;
+    float envelope = 1.0f;     // instant attack, held, then released
+    uint32_t hold_left = 0;
+    double window_sum = 0.0;   // running sum over `gains` for the average
+    float release_coeff = 0.0f;
+    // A block with the limiter off still runs the delay so switching it on
+    // or off is a fade, not a jump in time.
+    float blend = 0.0f;
+  };
+  Limiter limiter_;
 
   static constexpr int kMaxTapPairs = 8;
   std::array<std::array<std::vector<float>, kMaxTapPairs>, kMaxChannels> tap_l_{};
@@ -214,9 +299,9 @@ class AudioGraph {
   // looping forever into any tap that is still listening.
   std::array<int, kMaxChannels> tap_written_{};
 
-  // One block's worth of MIDI, reused per channel. Deep enough for anything a
-  // sequencer sends in a single period.
-  std::array<MidiEvent, 128> midi_scratch_{};
+  // One block's worth of MIDI, reused per channel. Deep enough for a
+  // sequencer rolling ratchets on every head in one period.
+  std::array<MidiEvent, 1024> midi_scratch_{};
   std::array<std::array<MidiEvent, 32>, kMaxChannels> injected_midi_{};
   std::array<size_t, kMaxChannels> injected_midi_n_{};
 

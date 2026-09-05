@@ -9,6 +9,9 @@ namespace {
 // ~15 ms one-pole smoothing: fast enough to feel immediate, slow enough that a
 // full fader throw does not step.
 constexpr double kSmoothingSeconds = 0.015;
+// A mute, and a bypass, take this long from all to nothing: a switch to the
+// ear, a slope to the speaker.
+constexpr double kMuteSeconds = 0.010;
 }  // namespace
 
 ChannelStrip::ChannelStrip(std::string name, int channel_count)
@@ -28,6 +31,7 @@ void ChannelStrip::prepare(double sample_rate, uint32_t max_block_frames,
   if (max_block_frames > max_block_frames_) max_block_frames_ = max_block_frames;
   smoothing_coeff_ =
       static_cast<float>(std::exp(-1.0 / (kSmoothingSeconds * sample_rate)));
+  mute_step_ = static_cast<float>(1.0 / (kMuteSeconds * sample_rate));
   if (first) {
     smoothed_gain_ = gain_.load(std::memory_order_relaxed);
     smoothed_pan_ = pan_.load(std::memory_order_relaxed);
@@ -103,6 +107,58 @@ void ChannelStrip::run_bypassed(PluginInstance* insert, float* const* buffers,
   }
 }
 
+void ChannelStrip::run_crossfade(PluginInstance* insert, float* const* buffers,
+                                 uint32_t frames, const TransportInfo* transport,
+                                 float* mix, bool to_bypass) {
+  const bool can_stash =
+      !output_cache_.empty() &&
+      static_cast<int>(output_cache_.size()) >= channel_count_ &&
+      frames <= output_cache_[0].size();
+  if (!can_stash) {
+    // No room to keep the dry: land where the flag says and run it plainly.
+    *mix = to_bypass ? 1.0f : 0.0f;
+    if (to_bypass) run_bypassed(insert, buffers, frames, transport);
+    else run_insert(insert, buffers, frames, transport, false);
+    return;
+  }
+
+  if (transport != nullptr) insert->set_transport(*transport);
+  for (size_t e = 0; e < midi_chain_count_; ++e)
+    insert->queue_midi(midi_chain_[e]);
+
+  for (int ch = 0; ch < channel_count_; ++ch)
+    std::copy_n(buffers[ch], frames, output_cache_[ch].data());
+  insert->process(buffers, buffers, frames);
+
+  const float from = *mix;
+  const float target = to_bypass ? 1.0f : 0.0f;
+  const float most = mute_step_ * static_cast<float>(frames);
+  const float to = std::clamp(target, from - most, from + most);
+  *mix = to;
+  const float step = (to - from) / static_cast<float>(frames);
+  for (int ch = 0; ch < channel_count_; ++ch) {
+    const float* dry = output_cache_[ch].data();
+    float* wet = buffers[ch];
+    float amount = from;
+    for (uint32_t f = 0; f < frames; ++f) {
+      amount += step;
+      wet[f] += (dry[f] - wet[f]) * amount;
+    }
+  }
+
+  // The notes it made follow where it is going: kept while it comes back
+  // in, dropped while it goes out, the same as either settled state.
+  if (to_bypass) {
+    MidiEvent dump[32];
+    while (insert->take_midi_output(dump, 32) == 32) {
+    }
+  } else if (midi_chain_count_ < midi_chain_.size()) {
+    midi_chain_count_ += insert->take_midi_output(
+        midi_chain_.data() + midi_chain_count_,
+        midi_chain_.size() - midi_chain_count_);
+  }
+}
+
 bool ChannelStrip::snapshot_chain(ChainSnapshot* out) const {
   // Four attempts is generous: the writer's window is a handful of stores, and
   // failing every time means the UI thread was descheduled inside one of them.
@@ -145,46 +201,50 @@ void ChannelStrip::process(float* const* buffers, uint32_t frames,
 
   // Pre-fader inserts first, then the fader, then post-fader. Bypass still
   // delivers MIDI so a muted-style hang cannot happen on a bypassed synth.
-  for (size_t i = 0; i < insert_count; ++i) {
+  // A slot whose bypass just flipped spends the next few blocks walking
+  // between wet and dry rather than jumping.
+  auto run_slot = [&](size_t i) {
     PluginInstance* insert = chain.inserts[i];
-    if (insert == nullptr) continue;
-    if (flags_of(i) & kPostFader) continue;
-    if (flags_of(i) & kBypass) {
-      run_bypassed(insert, buffers, frames, transport);
-      continue;
+    if (insert == nullptr) return;
+    const bool bypass = (flags_of(i) & kBypass) != 0;
+    float mix = bypass_mix_[i].load(std::memory_order_relaxed);
+    const float settled = bypass ? 1.0f : 0.0f;
+    if (mix != settled) {
+      run_crossfade(insert, plugin_io_.data(), frames, transport, &mix, bypass);
+      bypass_mix_[i].store(mix, std::memory_order_relaxed);
+      return;
     }
-    run_insert(insert, plugin_io_.data(), frames, transport, false);
-  }
+    if (bypass) run_bypassed(insert, buffers, frames, transport);
+    else run_insert(insert, plugin_io_.data(), frames, transport, false);
+  };
 
-  if (!muted_.load(std::memory_order_relaxed)) {
+  for (size_t i = 0; i < insert_count; ++i)
+    if ((flags_of(i) & kPostFader) == 0) run_slot(i);
+
+  {
     const float target_gain = gain_.load(std::memory_order_relaxed);
     const float target_pan = pan_.load(std::memory_order_relaxed);
+    const float mute_target = muted_.load(std::memory_order_relaxed) ? 0.0f : 1.0f;
     const bool stereo = channel_count_ == 2;
     for (uint32_t i = 0; i < frames; ++i) {
       smoothed_gain_ += (1.0f - smoothing_coeff_) * (target_gain - smoothed_gain_);
       smoothed_pan_ += (1.0f - smoothing_coeff_) * (target_pan - smoothed_pan_);
+      if (mute_gain_ < mute_target)
+        mute_gain_ = std::min(mute_target, mute_gain_ + mute_step_);
+      else if (mute_gain_ > mute_target)
+        mute_gain_ = std::max(mute_target, mute_gain_ - mute_step_);
       const float left = stereo ? std::min(1.0f, 1.0f - smoothed_pan_) : 1.0f;
       const float right = stereo ? std::min(1.0f, 1.0f + smoothed_pan_) : 1.0f;
+      const float gain = smoothed_gain_ * mute_gain_;
       for (int ch = 0; ch < channel_count_; ++ch) {
         const float pan_gain = (ch == 0) ? left : right;
-        buffers[ch][i] *= smoothed_gain_ * pan_gain;
+        buffers[ch][i] *= gain * pan_gain;
       }
     }
-  } else {
-    for (int ch = 0; ch < channel_count_; ++ch)
-      std::fill_n(buffers[ch], frames, 0.0f);
   }
 
-  for (size_t i = 0; i < insert_count; ++i) {
-    PluginInstance* insert = chain.inserts[i];
-    if (insert == nullptr) continue;
-    if ((flags_of(i) & kPostFader) == 0) continue;
-    if (flags_of(i) & kBypass) {
-      run_bypassed(insert, buffers, frames, transport);
-      continue;
-    }
-    run_insert(insert, plugin_io_.data(), frames, transport, false);
-  }
+  for (size_t i = 0; i < insert_count; ++i)
+    if ((flags_of(i) & kPostFader) != 0) run_slot(i);
 
   apply_pdc(buffers, frames);
 
@@ -236,6 +296,7 @@ bool ChannelStrip::add_insert(std::unique_ptr<PluginInstance> plugin,
   // A removal leaves the previous occupant's bypass/post-fader bits. A
   // new plugin in that hole is not the old one and should start clean.
   insert_flags_[index].store(0, std::memory_order_release);
+  bypass_mix_[index].store(0.0f, std::memory_order_relaxed);
   insert_slots_[index].store(raw, std::memory_order_release);
   if (index == count) insert_count_.store(count + 1, std::memory_order_release);
   end_chain_edit();
@@ -297,12 +358,16 @@ void ChannelStrip::swap_inserts(size_t a, size_t b) {
   // plugin, or a reordered insert would keep the neighbour's bypass.
   const uint8_t first_flags = insert_flags_[a].load(std::memory_order_relaxed);
   const uint8_t second_flags = insert_flags_[b].load(std::memory_order_relaxed);
+  const float first_mix = bypass_mix_[a].load(std::memory_order_relaxed);
+  const float second_mix = bypass_mix_[b].load(std::memory_order_relaxed);
 
   begin_chain_edit();
   insert_slots_[a].store(second, std::memory_order_release);
   insert_slots_[b].store(first, std::memory_order_release);
   insert_flags_[a].store(second_flags, std::memory_order_release);
   insert_flags_[b].store(first_flags, std::memory_order_release);
+  bypass_mix_[a].store(second_mix, std::memory_order_relaxed);
+  bypass_mix_[b].store(first_mix, std::memory_order_relaxed);
   end_chain_edit();
 }
 

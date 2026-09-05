@@ -34,6 +34,16 @@ class RtQueue {
     return true;
   }
 
+  // How many are waiting, as either side sees it at this instant. One slot
+  // is always kept empty to tell full from empty, so capacity() is one less
+  // than the storage.
+  size_t size() const {
+    const size_t write = write_.load(std::memory_order_acquire);
+    const size_t read = read_.load(std::memory_order_acquire);
+    return (write - read) & kMask;
+  }
+  static constexpr size_t capacity() { return Capacity - 1; }
+
  private:
   static constexpr size_t kMask = Capacity - 1;
   std::array<T, Capacity> slots_{};

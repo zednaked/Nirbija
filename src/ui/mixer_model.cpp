@@ -25,6 +25,7 @@
 #include <QtMath>
 
 #include <algorithm>
+#include <clocale>
 #include <cmath>
 
 namespace nirbija {
@@ -43,6 +44,12 @@ constexpr qreal kMaxDb = 6.0;
 }  // namespace
 
 MixerModel::MixerModel(QObject* parent) : QAbstractListModel(parent) {
+  // Qt sets the C library to the user's locale on startup, and under pt_BR
+  // every "%f" the plugins and their hosts print becomes "0,5000". The
+  // built-in plugins format numbers for themselves now, but a hosted plugin
+  // serialising its own state with printf is not something this host can
+  // audit, and its session is on the line just the same.
+  std::setlocale(LC_NUMERIC, "C");
   plugins_ = std::make_unique<PluginListModel>(this);
 
   if (engine_.start("nirbija")) {
@@ -1329,6 +1336,7 @@ void MixerModel::newSession() {
   if (masterDim()) toggleMasterDim();
   if (masterMute()) toggleMasterMute();
   if (masterMono()) toggleMasterMono();
+  if (!masterLimiter()) toggleMasterLimiter();
   if (engine_.midi_clock()) toggleMidiClock();
   if (engine_.follow_midi_clock()) toggleFollowMidiClock();
   setTimeSignature(4, 4);
@@ -1637,6 +1645,17 @@ void MixerModel::pollLevels() {
                  master_hold_age_[ch]);
   }
   master_clip_ = engine_.graph().read_master_clip() > 0.0f;
+  // Held for a few polls: a single limited transient would otherwise light
+  // for one frame and be missed.
+  const float floor = engine_.graph().read_limiter_floor();
+  if (floor < 0.999f) limiter_hold_ = 6;
+  else if (limiter_hold_ > 0) --limiter_hold_;
+  limiter_working_ = limiter_hold_ > 0;
+  const int xruns = static_cast<int>(engine_.xrun_count());
+  if (xruns != xruns_) {
+    xruns_ = xruns;
+    emit levelsChanged();
+  }
 
   if (meters_active_) {
     if (!channels_.empty()) {
@@ -1716,9 +1735,7 @@ qreal MixerModel::gainToFader(qreal gain) {
 
 QString MixerModel::positionLabel() const {
   if (engine_.sample_rate() <= 0.0) return QStringLiteral("1.1");
-  const double beats =
-      static_cast<double>(engine_.transport_frame()) / engine_.sample_rate() *
-      engine_.tempo() / 60.0;
+  const double beats = engine_.transport_beats();
   const int num = std::max(1, engine_.time_numerator());
   const int bar = static_cast<int>(beats / num) + 1;
   const int beat = static_cast<int>(std::fmod(beats, num)) + 1;
@@ -1776,15 +1793,15 @@ void MixerModel::duplicateChannel(int row) {
   pushUndo();
   const ChannelUi src = channels_[row];
 
-  // Every plugin's state, taken with the graph parked - the LV2 spec is clear
-  // that save_state is not something to ask for while the instance is running,
-  // and the same rule is what makes a saved session reload correctly.
+  // Every plugin's state, read live unless one of them says it cannot be -
+  // see collectInsertStates() for why that is allowed.
   std::vector<std::vector<uint8_t>> blobs;
   std::vector<int> plugin_rows;
   std::vector<bool> bypassed;
   std::vector<bool> post_fader;
   if (ChannelStrip* strip = stripFor(row)) {
-    if (engine_.park_graph()) {
+    const bool park = anyInsertNeedsQuietSave();
+    if (!park || engine_.park_graph()) {
       for (size_t slot = 0; slot < strip->insert_count(); ++slot) {
         PluginInstance* insert = strip->insert_at(slot);
         if (insert == nullptr) continue;  // a hole left by a removal
@@ -1795,7 +1812,7 @@ void MixerModel::duplicateChannel(int row) {
         post_fader.push_back(strip->insert_post_fader(slot));
       }
     }
-    engine_.unpark_graph();
+    if (park) engine_.unpark_graph();
   }
 
   const int dest = src.is_bus
@@ -2014,8 +2031,8 @@ void MixerModel::setFxPad(int row, int slot, int pad, bool on) {
   if (fx == nullptr) return;
   fx->set_pad(pad, on);
   // Which pads are down still belongs to the session, but a pad is pressed
-  // mid-take: arming the autosave here would park the graph a second later
-  // and drop a hole in the very performance the pad was hit for.
+  // twenty times in a bar, and each press is not worth a session written a
+  // second later.
   markDirty(false);
 }
 
@@ -2293,6 +2310,12 @@ void MixerModel::toggleMasterMute() {
 void MixerModel::toggleMasterMono() {
   engine_.graph().set_master_mono(!engine_.graph().master_mono());
   emit masterGainChanged();
+}
+
+void MixerModel::toggleMasterLimiter() {
+  engine_.graph().set_master_limiter(!engine_.graph().master_limiter());
+  emit masterGainChanged();
+  markDirty();
 }
 
 void MixerModel::toggleMidiClock() {

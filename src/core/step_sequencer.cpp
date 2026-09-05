@@ -618,13 +618,14 @@ uint32_t StepSequencerInstance::next_ui_rng() {
 
 void StepSequencerInstance::emit(uint32_t frame, uint8_t status, uint8_t data1,
                                  uint8_t data2) {
-  if (event_count_ >= kMaxEvents) return;
-  MidiEvent& event = events_[event_count_++];
+  MidiEvent event;
   event.frame = frame;
   event.size = 3;
   event.data[0] = status;
   event.data[1] = data1;
   event.data[2] = data2;
+  if (!midi_queue_admits(event_count_, kMaxEvents, event)) return;
+  events_[event_count_++] = event;
 }
 
 void StepSequencerInstance::stop_sounding(int head, uint32_t frame) {
@@ -645,7 +646,7 @@ void StepSequencerInstance::cancel_scheduler(int head, uint32_t frame) {
 
 void StepSequencerInstance::queue_midi(const MidiEvent& event) {
   // Passed along untouched: the sequencer adds to the chain, it does not own it.
-  if (event_count_ >= kMaxEvents) return;
+  if (!midi_queue_admits(event_count_, kMaxEvents, event)) return;
   events_[event_count_++] = event;
 }
 
@@ -1446,8 +1447,8 @@ std::vector<uint8_t> StepSequencerInstance::save_state() const {
 
   std::snprintf(line, sizeof(line), "version 2\n");
   text += line;
-  std::snprintf(line, sizeof(line), "swing %.4f\ndirection %d\nscale %d\nroot %d\n",
-                swing_.load(std::memory_order_relaxed),
+  std::snprintf(line, sizeof(line), "swing %s\ndirection %d\nscale %d\nroot %d\n",
+                format_number(swing_.load(std::memory_order_relaxed), 4).c_str(),
                 lanes_[0].direction.load(std::memory_order_relaxed),
                 scale_.load(std::memory_order_relaxed),
                 root_.load(std::memory_order_relaxed));
@@ -1462,24 +1463,24 @@ std::vector<uint8_t> StepSequencerInstance::save_state() const {
                 view_.load(std::memory_order_relaxed),
                 focus_.load(std::memory_order_relaxed));
   text += line;
-  std::snprintf(line, sizeof(line), "macro %.4f %.4f %.4f %.4f\n",
-                macros_[0].load(std::memory_order_relaxed),
-                macros_[1].load(std::memory_order_relaxed),
-                macros_[2].load(std::memory_order_relaxed),
-                macros_[3].load(std::memory_order_relaxed));
+  std::snprintf(line, sizeof(line), "macro %s %s %s %s\n",
+                format_number(macros_[0].load(std::memory_order_relaxed), 4).c_str(),
+                format_number(macros_[1].load(std::memory_order_relaxed), 4).c_str(),
+                format_number(macros_[2].load(std::memory_order_relaxed), 4).c_str(),
+                format_number(macros_[3].load(std::memory_order_relaxed), 4).c_str());
   text += line;
 
   for (int l = 0; l < kLanes; ++l) {
     const LaneState& lane = lanes_[static_cast<size_t>(l)];
     // Channel is 0-based on disk, matching v1's `channel` key.
-    std::snprintf(line, sizeof(line), "lane %d %d %d %d %d %d %d %.4f %d\n", l,
+    std::snprintf(line, sizeof(line), "lane %d %d %d %d %d %d %d %s %d\n", l,
                   lane.note.load(std::memory_order_relaxed),
                   lane.length.load(std::memory_order_relaxed),
                   lane.division.load(std::memory_order_relaxed),
                   lane.direction.load(std::memory_order_relaxed),
                   lane.channel.load(std::memory_order_relaxed),
                   lane.mute.load(std::memory_order_relaxed) ? 1 : 0,
-                  lane.gate.load(std::memory_order_relaxed),
+                  format_number(lane.gate.load(std::memory_order_relaxed), 4).c_str(),
                   lane.euclid.load(std::memory_order_relaxed));
     text += line;
   }
@@ -1519,9 +1520,11 @@ std::vector<uint8_t> StepSequencerInstance::save_state() const {
             arg == 0)
           continue;
         std::snprintf(line, sizeof(line),
-                      "pstep %d %d %d %d %d %d %.4f %d %d %.4f %d %d %d\n", p,
-                      l, s, note, vel, on ? 1 : 0, prob, acc ? 1 : 0,
-                      tie ? 1 : 0, micro, ratchet, cond, arg);
+                      "pstep %d %d %d %d %d %d %s %d %d %s %d %d %d\n", p,
+                      l, s, note, vel, on ? 1 : 0,
+                      format_number(prob, 4).c_str(), acc ? 1 : 0,
+                      tie ? 1 : 0, format_number(micro, 4).c_str(), ratchet,
+                      cond, arg);
         text += line;
       }
     }

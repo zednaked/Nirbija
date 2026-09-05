@@ -68,6 +68,12 @@ class MixerModel : public QAbstractListModel {
   Q_PROPERTY(bool masterDim READ masterDim NOTIFY masterGainChanged)
   Q_PROPERTY(bool masterMute READ masterMute NOTIFY masterGainChanged)
   Q_PROPERTY(bool masterMono READ masterMono NOTIFY masterGainChanged)
+  Q_PROPERTY(bool masterLimiter READ masterLimiter NOTIFY masterGainChanged)
+  // True while the limiter is actually holding something back.
+  Q_PROPERTY(bool limiterWorking READ limiterWorking NOTIFY levelsChanged)
+  // Periods the audio server reported missing since it started. Every one of
+  // them is a dropout the listener heard.
+  Q_PROPERTY(int xruns READ xruns NOTIFY levelsChanged)
   Q_PROPERTY(bool midiClock READ midiClock NOTIFY transportChanged)
   Q_PROPERTY(bool followMidiClock READ followMidiClock NOTIFY transportChanged)
   Q_PROPERTY(bool masterClip READ masterClip NOTIFY levelsChanged)
@@ -296,11 +302,15 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE void toggleMasterDim();
   Q_INVOKABLE void toggleMasterMute();
   Q_INVOKABLE void toggleMasterMono();
+  Q_INVOKABLE void toggleMasterLimiter();
   Q_INVOKABLE void toggleMidiClock();
   Q_INVOKABLE void toggleFollowMidiClock();
   bool masterDim() const { return engine_.graph().master_dim(); }
   bool masterMute() const { return engine_.graph().master_mute(); }
   bool masterMono() const { return engine_.graph().master_mono(); }
+  bool masterLimiter() const { return engine_.graph().master_limiter(); }
+  bool limiterWorking() const { return limiter_working_; }
+  int xruns() const { return xruns_; }
   bool midiClock() const { return engine_.midi_clock(); }
   bool followMidiClock() const { return engine_.follow_midi_clock(); }
   bool masterClip() const { return master_clip_; }
@@ -444,10 +454,11 @@ class MixerModel : public QAbstractListModel {
   bool readSession(const QString& path);
   static QString sessionPath();
 
-  // Every insert's state blob, in the order writeSession emits them. Parks the
-  // graph for the asking and no longer, so the rest of a save runs with the
-  // mixer audible.
+  // Every insert's state blob, in the order writeSession emits them. Read
+  // with the mixer playing; the graph is parked only if a plugin says its
+  // state cannot be read that way right now, and only for the asking.
   QVector<QVector<QByteArray>> collectInsertStates() const;
+  bool anyInsertNeedsQuietSave() const;
 
   // False when another Nirbija already holds the session. That instance still
   // runs and still loads what is on disk, but never writes: two mixers taking
@@ -532,9 +543,9 @@ class MixerModel : public QAbstractListModel {
   // Coalesces the writes: a fader drag would otherwise save on every frame.
   // `schedule_save` false marks the session modified without arming the
   // autosave - for changes that have to survive the session but are not worth
-  // a write of their own, because collecting the plugin states parks the graph
-  // and the master goes quiet for the two blocks that takes. The destructor
-  // saves unconditionally, so nothing marked this way is lost.
+  // a write of their own: a pad pressed twenty times in a bar is twenty
+  // sessions built and written. The destructor saves unconditionally, so
+  // nothing marked this way is lost.
   void markDirty(bool schedule_save = true);
   void claimSession();
   void post(EngineCommand::Kind kind, int row, float value);
@@ -625,6 +636,9 @@ class MixerModel : public QAbstractListModel {
   bool seed_empty_session_ = true;
   bool dirty_flag_ = false;
   bool master_clip_ = false;
+  bool limiter_working_ = false;
+  int limiter_hold_ = 0;
+  int xruns_ = 0;
   QVector<QByteArray> undo_stack_;
   QVector<QByteArray> redo_stack_;
   void pushUndo();

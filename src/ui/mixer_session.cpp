@@ -91,16 +91,33 @@ void MixerModel::saveSession() const {
   emit self->dirtyChanged();
 }
 
-// Asking a plugin for its state is the one part of a save that cannot happen
-// under a running process(), so it is the only part the graph is parked for.
-// Parking for the whole save meant the master went silent for as long as a
-// JSON build and a disk write took — once a second, while a fader was moving.
+// Every plugin's state, read with process() running. Every hosted format
+// allows that - LV2's save() may run alongside run() and the plugin locks for
+// itself, CLAP and VST3 save on the main thread with the plugin active - and
+// the built-in plugins read atomics. Only a plugin that says it needs quiet
+// right now (a looper mid-take, a sampler with a take waiting) parks the
+// graph, and then only for this save. Anything else would put a hole in the
+// master a second after every edit to a sequencer grid, which is how the
+// autosave used to sound.
+bool MixerModel::anyInsertNeedsQuietSave() const {
+  for (size_t row = 0; row < channels_.size(); ++row) {
+    ChannelStrip* strip = stripFor(static_cast<int>(row));
+    if (strip == nullptr) continue;
+    for (size_t slot = 0; slot < strip->insert_count(); ++slot) {
+      PluginInstance* insert = strip->insert_at(slot);
+      if (insert != nullptr && insert->save_needs_quiet()) return true;
+    }
+  }
+  return false;
+}
+
 QVector<QVector<QByteArray>> MixerModel::collectInsertStates() const {
   QVector<QVector<QByteArray>> states;
   states.resize(static_cast<qsizetype>(channels_.size()));
 
   auto* self = const_cast<MixerModel*>(this);
-  if (self->engine_.park_graph()) {
+  const bool park = anyInsertNeedsQuietSave();
+  if (!park || self->engine_.park_graph()) {
     for (size_t row = 0; row < channels_.size(); ++row) {
       ChannelStrip* strip = stripFor(static_cast<int>(row));
       if (strip == nullptr) continue;
@@ -114,7 +131,7 @@ QVector<QVector<QByteArray>> MixerModel::collectInsertStates() const {
       }
     }
   }
-  self->engine_.unpark_graph();
+  if (park) self->engine_.unpark_graph();
   return states;
 }
 
@@ -278,6 +295,7 @@ void MixerModel::writeSession(const QString& target) const {
   master[QStringLiteral("dim")] = masterDim();
   master[QStringLiteral("mute")] = masterMute();
   master[QStringLiteral("mono")] = masterMono();
+  master[QStringLiteral("limiter")] = masterLimiter();
 
   QJsonObject root;
   root[QStringLiteral("version")] = kSessionVersion;
@@ -344,7 +362,7 @@ void MixerModel::loadSession() { readSession(sessionPath()); }
 bool MixerModel::saveSessionAs(const QUrl& file) {
   const QString path = file.isLocalFile() ? file.toLocalFile() : file.toString();
   if (path.isEmpty()) return false;
-  // writeSession parks for the plugin state and nothing else.
+  // writeSession runs with the mixer playing; see collectInsertStates().
   writeSession(path);
   return QFile::exists(path);
 }
@@ -633,10 +651,10 @@ bool MixerModel::saveSamplerPackTo(int row, int slot, const QUrl& file) {
   auto* sampler = dynamic_cast<SamplerInstance*>(insertFor(row, slot));
   if (sampler == nullptr) return false;
 
-  // Same reason any other save_state() call is parked: whatever the plugin
-  // does to gather its own state is not guaranteed safe under a concurrent
-  // process(), even though this particular one happens to be.
-  if (!engine_.park_graph()) {
+  // A pack save publishes a take the same way save_state() does, and a take
+  // waiting to be published wants the audio thread out of the pads. Parked
+  // only when the sampler says so, like any other save.
+  if (sampler->save_needs_quiet() && !engine_.park_graph()) {
     engine_.unpark_graph();
     emit errorOccurred(tr("The audio graph would not settle; try again"));
     return false;
@@ -808,6 +826,8 @@ bool MixerModel::readSession(const QString& target) {
   if (master[QStringLiteral("dim")].toBool() != masterDim()) toggleMasterDim();
   if (master[QStringLiteral("mute")].toBool() != masterMute()) toggleMasterMute();
   if (master[QStringLiteral("mono")].toBool() != masterMono()) toggleMasterMono();
+  if (master[QStringLiteral("limiter")].toBool(true) != masterLimiter())
+    toggleMasterLimiter();
 
   restoring_ = false;
   engine_.unpark_graph();

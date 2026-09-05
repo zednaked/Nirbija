@@ -151,7 +151,7 @@ class StepSequencerInstance : public PluginInstance {
   float macro(int index) const;
 
  private:
-  static constexpr size_t kMaxEvents = 128;
+  static constexpr size_t kMaxEvents = 1024;
   static constexpr int kVoiceSlots = kLanes + kExtraHeads;
 
   struct StepCell {

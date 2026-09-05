@@ -140,6 +140,13 @@ class Engine {
   double tempo() const { return tempo_.load(std::memory_order_relaxed); }
   bool metronome() const { return metronome_.load(std::memory_order_relaxed); }
   uint64_t transport_frame() const { return transport_frame_.load(std::memory_order_relaxed); }
+  // Song position in quarter notes, as the audio thread last counted it.
+  double transport_beats() const {
+    return published_beats_.load(std::memory_order_relaxed);
+  }
+  // Times the server reported it missed a period since the client started.
+  // A click that lands on one of these is a dropout, not a bug in the DSP.
+  uint32_t xrun_count() const { return xruns_.load(std::memory_order_relaxed); }
   int time_numerator() const { return time_num_.load(std::memory_order_relaxed); }
   int time_denominator() const { return time_den_.load(std::memory_order_relaxed); }
 
@@ -157,10 +164,11 @@ class Engine {
   size_t add_bus(const std::string& name) { return graph_->add_bus(name); }
   void remove_bus(size_t bus) { graph_->remove_bus(bus); }
 
-  // Park the graph (silence + two observed blocks) so state I/O and recorder
-  // teardown cannot race process(). False when those blocks never came, which
-  // means the guarantee was not obtained — with no client there is nothing to
-  // wait for and it is trivially true.
+  // Park the graph - a short fade to silence, then one observed block with no
+  // plugin running - so a state load and recorder teardown cannot race
+  // process(). False when that block never came, which means the guarantee
+  // was not obtained — with no client there is nothing to wait for and it is
+  // trivially true.
   bool park_graph();
   void unpark_graph();
 
@@ -170,6 +178,7 @@ class Engine {
 
  private:
   static int jack_process_trampoline(jack_nframes_t frames, void* arg);
+  static int jack_xrun_trampoline(void* arg);
   static int jack_buffer_size_trampoline(jack_nframes_t frames, void* arg);
   static int jack_sample_rate_trampoline(jack_nframes_t rate, void* arg);
   int process(jack_nframes_t frames);
@@ -221,6 +230,11 @@ class Engine {
   std::atomic<int> time_num_{4};
   std::atomic<int> time_den_{4};
   std::atomic<uint64_t> transport_frame_{0};
+  // The beat count the audio thread keeps (its own), and the copy it
+  // publishes once a block for the UI.
+  double transport_beats_ = 0.0;
+  std::atomic<double> published_beats_{0.0};
+  std::atomic<uint32_t> xruns_{0};
 
   // Click synthesis state, audio thread only.
   uint32_t click_remaining_ = 0;

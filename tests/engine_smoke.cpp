@@ -33,6 +33,39 @@ int main() {
   }
 
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+  // The song position is a count, not frames times tempo: halving the tempo
+  // a second in must not throw the position back half a bar, and the beat
+  // must keep moving at the new rate.
+  {
+    nirbija::EngineCommand play;
+    play.kind = nirbija::EngineCommand::Kind::SetPlaying;
+    play.value = 1.0f;
+    engine.post(play);
+    nirbija::EngineCommand tempo;
+    tempo.kind = nirbija::EngineCommand::Kind::SetTempo;
+    tempo.value = 120.0f;
+    engine.post(tempo);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    const double before = engine.transport_beats();
+    tempo.value = 60.0f;
+    engine.post(tempo);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    const double after = engine.transport_beats();
+    // 50 ms at 60 BPM is 0.05 beats, plus whatever scheduling adds; a jump
+    // from re-deriving the position would be a whole beat either way.
+    if (after < before || after - before > 0.5) {
+      std::fprintf(stderr, "position jumped on a tempo change: %.3f -> %.3f\n",
+                   before, after);
+      return 1;
+    }
+    if (before < 1.0) {
+      std::fprintf(stderr, "position did not advance while playing: %.3f\n",
+                   before);
+      return 1;
+    }
+  }
+
   engine.stop();
   std::printf("ok\n");
   return 0;

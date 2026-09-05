@@ -8,6 +8,11 @@
 #include <cstdio>
 #include <ctime>
 
+#if defined(__SSE__)
+#include <pmmintrin.h>
+#include <xmmintrin.h>
+#endif
+
 namespace nirbija {
 namespace {
 
@@ -210,6 +215,7 @@ bool Engine::start(const std::string& client_name) {
                                  JackPortIsInput, 0);
 
   jack_set_process_callback(client_, jack_process_trampoline, this);
+  jack_set_xrun_callback(client_, jack_xrun_trampoline, this);
   jack_set_buffer_size_callback(client_, jack_buffer_size_trampoline, this);
   jack_set_sample_rate_callback(client_, jack_sample_rate_trampoline, this);
   if (jack_activate(client_) != 0) {
@@ -393,10 +399,10 @@ bool Engine::park_graph() {
   // With no client there is no audio thread to wait for, and waiting anyway
   // cost 200 ms of nothing on every save and every plugin restore.
   if (client_ == nullptr) return true;
-  if (graph_->wait_renders(2)) return true;
+  if (graph_->wait_quiescent()) return true;
   std::fprintf(stderr,
-               "nirbija: the audio thread did not report two blocks; the graph "
-               "may not be quiescent\n");
+               "nirbija: the audio thread did not report a parked block; the "
+               "graph may not be quiescent\n");
   return false;
 }
 
@@ -676,6 +682,7 @@ void Engine::drain_commands() {
     }
     if (command.kind == EngineCommand::Kind::Rewind) {
       transport_frame_.store(0, std::memory_order_relaxed);
+      transport_beats_ = 0.0;
       clock_phase_ = 0.0;
       transport_changed_ = true;
       continue;
@@ -739,7 +746,31 @@ void Engine::connect_all_midi_to_channel(size_t channel) {
     jack_connect(client_, source.c_str(), jack_port_name(midi));
 }
 
+int Engine::jack_xrun_trampoline(void* arg) {
+  static_cast<Engine*>(arg)->xruns_.fetch_add(1, std::memory_order_relaxed);
+  return 0;
+}
+
+// Denormals off for this thread. A reverb tail or a filter decaying towards
+// nothing spends its last seconds in numbers so small the FPU takes a
+// hundred times longer on each of them, which is a dropout timed exactly
+// where the music went quiet. PipeWire leaves the flags as it found them, and
+// not every plugin sets them for itself, so the host does, every block: the
+// cost is a register write.
+static void disable_denormals() {
+#if defined(__SSE__)
+  _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+  _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+#elif defined(__aarch64__)
+  uint64_t fpcr;
+  asm volatile("mrs %0, fpcr" : "=r"(fpcr));
+  fpcr |= 1u << 24;  // FZ
+  asm volatile("msr fpcr, %0" : : "r"(fpcr));
+#endif
+}
+
 int Engine::process(jack_nframes_t frames) {
+  disable_denormals();
   drain_commands();
 
   // Controller traffic is handed to the UI thread whole; the mappings live
@@ -787,7 +818,9 @@ int Engine::process(jack_nframes_t frames) {
   transport.seconds = sample_rate_ > 0.0
                           ? static_cast<double>(frame) / sample_rate_
                           : 0.0;
-  transport.beats = transport.seconds * tempo / 60.0;
+  // Beats are counted, not derived from the frame: seconds times tempo would
+  // move the song every time the tempo moved, by more the further in it was.
+  transport.beats = transport_beats_;
   transport.changed = transport_changed_;
   transport_changed_ = false;
 
@@ -812,6 +845,10 @@ int Engine::process(jack_nframes_t frames) {
       if (dest == nullptr) continue;
       if (src != nullptr) std::copy_n(src, frames, dest);
       else std::fill_n(dest, frames, 0.0f);
+      // The same fade the master got. Without it a parked block copied the
+      // strip's last block out again, every block, for as long as the park
+      // lasted: a buzz on the direct outs while the master was silent.
+      graph_->apply_park_ramp(dest, frames);
     }
   }
 
@@ -837,8 +874,12 @@ int Engine::process(jack_nframes_t frames) {
     }
   }
 
-  if (rolling && !follow_clock_.load(std::memory_order_relaxed))
+  if (rolling && !follow_clock_.load(std::memory_order_relaxed)) {
     transport_frame_.store(frame + frames, std::memory_order_relaxed);
+    if (sample_rate_ > 0.0)
+      transport_beats_ += static_cast<double>(frames) / sample_rate_ * tempo / 60.0;
+  }
+  published_beats_.store(transport_beats_, std::memory_order_relaxed);
   return 0;
 }
 
@@ -930,6 +971,7 @@ void Engine::read_external_clock(uint32_t frames) {
         static_cast<uint64_t>(beats * 60.0 / tempo * sample_rate_),
         std::memory_order_relaxed);
   }
+  transport_beats_ = beats;
 }
 
 // A short sine tick on every beat, a fifth higher on the downbeat. Added after

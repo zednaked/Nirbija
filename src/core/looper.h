@@ -35,6 +35,12 @@ class LooperInstance : public PluginInstance {
   // open is written as a closed loop so closing the app mid-take does not
   // throw the recording away.
   std::vector<uint8_t> save_state() const override;
+  // The tape is being written while Rec is down, and a save copies the
+  // whole tape; between takes the audio thread only reads it, and the copy
+  // can happen underneath.
+  bool save_needs_quiet() const override {
+    return record_request_.load(std::memory_order_relaxed);
+  }
   bool load_state(const std::vector<uint8_t>& blob) override;
 
   const PluginDescriptor& descriptor() const override { return descriptor_; }

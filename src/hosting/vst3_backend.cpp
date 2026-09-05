@@ -382,7 +382,7 @@ struct ParamChanges : Vst::IParameterChanges {
 // whole output arrives here, and dropping it would leave the instrument below
 // it silent.
 struct OutEventList : Vst::IEventList {
-  static constexpr int32 kMaxEvents = 64;
+  static constexpr int32 kMaxEvents = 1024;
   Vst::Event events[kMaxEvents];
   int32 count = 0;
 
@@ -451,7 +451,7 @@ struct OutParamChanges : Vst::IParameterChanges, Vst::IParamValueQueue {
 
 // Note events for the block, filled from the strip's MIDI chain.
 struct EventList : Vst::IEventList {
-  static constexpr int32 kMaxEvents = 64;
+  static constexpr int32 kMaxEvents = 1024;
   Vst::Event events[kMaxEvents];
   int32 count = 0;
 
@@ -807,6 +807,8 @@ class Vst3Instance : public PluginInstance {
   }
 
   void queue_midi(const MidiEvent& event) override {
+    if (!midi_queue_admits(pending_midi_.size(), pending_midi_.capacity(), event))
+      return;
     pending_midi_.push(event);
   }
 
@@ -1190,7 +1192,7 @@ class Vst3Instance : public PluginInstance {
   Vst::IMidiMapping* midi_mapping_ = nullptr;
   std::array<std::array<Vst::ParamID, Vst::kCountCtrlNumber>, 16> midi_map_cache_{};
   RtQueue<ParamEdit, 256> param_edits_;
-  RtQueue<MidiEvent, 64> pending_midi_;
+  RtQueue<MidiEvent, 1024> pending_midi_;
   TransportInfo transport_;
 
   friend struct Handler;
