@@ -239,6 +239,8 @@ Rectangle {
                            && root.inserts[index].postFader === true
                 looperRecording: index < root.inserts.length
                                  && root.inserts[index].looperRecording === true
+                looperWriting: index < root.inserts.length
+                               && root.inserts[index].looperWriting === true
                 looperPlaying: index < root.inserts.length
                                && root.inserts[index].looperPlaying === true
                 looperHasAudio: index < root.inserts.length

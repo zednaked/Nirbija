@@ -3,6 +3,7 @@ add_library(nirbija_core
   core/channel_strip.cpp
   core/engine.cpp
   core/plugin.cpp
+  core/state_text.cpp
   core/recorder.cpp
   core/file_player.cpp
   core/looper.cpp
@@ -13,6 +14,7 @@ add_library(nirbija_core
   core/keyboard_instrument.cpp
   core/sampler.cpp
   core/chord.cpp
+  core/drone.cpp
   core/ble_midi.cpp
 )
 target_include_directories(nirbija_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -33,6 +35,24 @@ if(NIRBIJA_CLAP)
   # imported target to link against.
   target_include_directories(nirbija_core PRIVATE ${clap_SOURCE_DIR}/include)
   target_compile_definitions(nirbija_core PUBLIC NIRBIJA_HAVE_CLAP=1)
+
+  # The Drone, extracted: the same drone.cpp the host runs, wrapped as a CLAP
+  # so it plays in Ardour, Reaper, Bitwig. Built into build/clap/; copy the
+  # file into ~/.clap to use it. Not installed with the host on purpose -
+  # the install lays down the app and nothing else, and a plugin in the
+  # system CLAP path is a separate decision.
+  add_library(nirbija_drone_clap MODULE
+    clap/drone_clap.cpp
+    core/drone.cpp
+    core/state_text.cpp)
+  target_include_directories(nirbija_drone_clap PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${clap_SOURCE_DIR}/include)
+  set_target_properties(nirbija_drone_clap PROPERTIES
+    PREFIX ""
+    OUTPUT_NAME "Nirbija Drone"
+    SUFFIX ".clap"
+    CXX_VISIBILITY_PRESET hidden
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/clap)
 endif()
 
 if(NIRBIJA_VST3)

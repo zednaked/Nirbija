@@ -53,6 +53,14 @@ if(NIRBIJA_UI)
   # Manual tool, not a ctest target: it needs a real X11 display.
   add_executable(nirbija_gui_probe gui_probe.cpp)
   target_link_libraries(nirbija_gui_probe PRIVATE nirbija_ui)
+
+  # Manual tool: the whole mixer, one built-in plugin's editor open, one PNG.
+  # Linked like the app itself, since it loads the same QML module; the Qt
+  # targets are found again here because src/ui found them in its own scope.
+  find_package(Qt6 6.5 REQUIRED COMPONENTS Quick QuickControls2 Widgets)
+  add_executable(nirbija_editor_probe editor_probe.cpp)
+  target_link_libraries(nirbija_editor_probe
+    PRIVATE nirbija_ui nirbija_uiplugin Qt6::Quick Qt6::QuickControls2 Qt6::Widgets)
 endif()
 
 add_executable(nirbija_midi_synth midi_synth.cpp)
@@ -119,6 +127,22 @@ add_test(NAME sampler COMMAND nirbija_sampler)
 add_executable(nirbija_chord chord_test.cpp)
 target_link_libraries(nirbija_chord PRIVATE nirbija_core)
 add_test(NAME chord COMMAND nirbija_chord)
+
+add_executable(nirbija_drone drone_test.cpp)
+target_link_libraries(nirbija_drone PRIVATE nirbija_core)
+add_test(NAME drone COMMAND nirbija_drone)
+
+if(NIRBIJA_CLAP)
+  # The extracted Drone, loaded back through the host's own CLAP backend:
+  # the one place the wrapper's ports, params, events and state are checked
+  # against a host that did not write them.
+  add_executable(nirbija_drone_clap_test drone_clap.cpp)
+  target_link_libraries(nirbija_drone_clap_test PRIVATE nirbija_core)
+  target_compile_definitions(nirbija_drone_clap_test PRIVATE
+    NIRBIJA_DRONE_CLAP_DIR="${CMAKE_BINARY_DIR}/clap")
+  add_dependencies(nirbija_drone_clap_test nirbija_drone_clap)
+  add_test(NAME drone_clap COMMAND nirbija_drone_clap_test)
+endif()
 
 if(NIRBIJA_VST3)
   add_executable(nirbija_vst3_process vst3_process.cpp)

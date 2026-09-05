@@ -12,7 +12,7 @@ case $name in
 esac
 if [ ! -f "$session" ]; then
   echo "no such session: $session" >&2
-  echo "try: jam-pad-hall jam-modular-fog jam-tape-drone jam-shimmer-grain jam-kick-cloud jam-black-pearl jam-goth-pearl jam-lucretia jam-more jam-emissaries jam-sampler jam-breakbeat jam-chord-demo" >&2
+  echo "try: jam-pad-hall jam-modular-fog jam-tape-drone jam-shimmer-grain jam-kick-cloud jam-black-pearl jam-goth-pearl jam-lucretia jam-more jam-emissaries jam-sampler jam-breakbeat jam-chord-demo jam-drone jam-drone-seq" >&2
   exit 1
 fi
 

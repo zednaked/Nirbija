@@ -1,0 +1,46 @@
+{
+    "channels": [
+        {
+            "armed": false,
+            "audioSource": "",
+            "channelSink": "",
+            "destination": -1,
+            "destinationKind": "master",
+            "gain": 0.8,
+            "inserts": [
+                {
+                    "bypassed": false,
+                    "format": "Internal",
+                    "postFader": false,
+                    "uid": "nirbija.drone"
+                }
+            ],
+            "isBus": false,
+            "midiMaps": [],
+            "midiMask": 65535,
+            "midiSources": [],
+            "muted": false,
+            "name": "Drone",
+            "pan": 0,
+            "sends": [],
+            "soloed": false,
+            "width": 2
+        }
+    ],
+    "followMidiClock": false,
+    "master": {
+        "dim": false,
+        "gain": 0.8,
+        "limiter": true,
+        "mono": false,
+        "mute": false,
+        "sink": "Ryzen HD Audio Controller Estéreo analógico:playback_FL"
+    },
+    "metronome": false,
+    "midiClock": false,
+    "midiMaps": [],
+    "tempo": 60,
+    "timeDenominator": 4,
+    "timeNumerator": 4,
+    "version": 1
+}

@@ -2,6 +2,65 @@
 
 ## 0.4.0 — unreleased
 
+### A drone instrument, with an editor made of strings
+
+`nirbija.drone` is a built-in instrument for drone music: six strings that
+never stop sounding, each an interval from one root and a few cents off so the
+set beats against itself, tuned just by default so a fifth is exactly 3:2.
+There is no note-on and no note-off - the performer rides a swell that brings
+the whole set up and down over seconds, and a MIDI note re-roots the drone and
+lets the strings glide there. Drift and Tide make the set wander slowly on its
+own; a filter breathes with the same tide; the room sits after the swell so
+pulling the drone down leaves the tail hanging.
+
+Every gain and every pitch is smoothed per sample, so a string can be dragged
+while it sounds without a click - `tests/drone_test.cpp` measures the largest
+sample step across the swell and fails above what six low tones make on their
+own. The editor draws the strings vibrating in their harmonic mode, touched
+where they should sound and slid sideways to bend; `design/drone.md` has the
+rest. `tests/editor_probe.cpp` is the manual tool that brought the mixer up,
+opened the editor and took the pictures the layout was checked against.
+
+The editor's **STRINGS** button holds seven sets of strings - tanpura, sub and
+octaves, the harmonic series among them - that swap the strings and the tuning
+under a sounding drone and leave root, swell and weather alone. A step
+sequencer above the drone in the same strip re-roots it step by step with no
+new code; `sessions/jam-drone-seq.json` shows it. And the drone is the first
+built-in plugin to take ECOSYSTEM.md's route out: `build/clap/Nirbija
+Drone.clap` is the same DSP as a CLAP, checked by loading it back through the
+host's own CLAP backend (`tests/drone_clap.cpp`). That check also found the
+CLAP backend never said whether a plugin takes notes; it does now.
+
+### The looper's editor, redrawn, and a sign that says when to play
+
+`LooperEditor.qml` gets the same treatment the drone's editor got: a window
+that glows in the colour of what the tape is doing, a chip in the header with
+the state, the loop's own bar.beat and its level, the tape in an inset panel,
+and the rides - Feedback and Gain - as tall bars on the right with pitch,
+speed and tone as smaller ones below. The bar itself moved out of
+`DroneEditor.qml` into `ParamBar.qml` so both editors draw the same control;
+it learned to fill from the middle for a value that rests at its centre, and
+to drag relative rather than jump, for a feedback that must not be slammed
+mid-take.
+
+The part that matters on stage: a quantised Rec press does not write until
+the bar comes round, and a release keeps writing until the next one, and the
+old editor said "recording" through both gaps. `LooperInstance` now mirrors
+`writing()` - whether the head is actually on the tape - and
+`beats_to_boundary()` - how long until a pending press lands - and the editor
+counts those down in a sign over the tape: REC IN 3, LOOP CLOSES IN 2,
+OVERDUB ENDS IN 1, and ONE IN 4 while it plays, next to a row of beat lamps
+that light as the head passes and a flare on the one and on every punch.
+Yellow is always "about to", red is "being written", green is the cycle
+going round. `tests/looper_test.cpp` walks a press and a release across the
+bar and checks the mirrors tell the two moments apart. `editor_probe` takes
+`play=1` and `at=<ms>` so an armed looper can be photographed mid-bar, and
+`editor=0` to photograph the strip behind it.
+
+The dot on a Looper's insert slot in the strip follows the same rule: yellow
+while a press waits for the bar, red only while the head is on the tape,
+green while the loop plays. It used to go red on the press, a bar early.
+
 ### A kit loaded from a session file went silent on the next start
 
 The sampler kept a pad's path exactly as the file that named it spelled it,

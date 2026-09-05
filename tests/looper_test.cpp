@@ -808,6 +808,69 @@ int main() {
       fail("sync target did not survive save/load");
   }
 
+  // The gap between the press and the tape. With Length on the bar and the
+  // grid moving, Rec pressed mid-bar arms but does not write until the next
+  // downbeat, and Rec released mid-bar keeps writing until the one after.
+  // writing() and beats_to_boundary() are what the editor counts down from
+  // for the player, so they have to tell the two apart.
+  {
+    nirbija::LooperInstance gap;
+    gap.set_channel_layout(2);
+    gap.activate(kRate, kBlock);
+    gap.set_parameter(3, 2.0);  // 1 bar
+
+    double beats = 0.0;
+    const double block_beats = 120.0 / 60.0 * (kBlock / kRate);
+    auto step = [&](float level) {
+      std::vector<float> in_l(kBlock, level), in_r(kBlock, level);
+      std::vector<float> out_l(kBlock), out_r(kBlock);
+      const float* ins[2] = {in_l.data(), in_r.data()};
+      float* outs[2] = {out_l.data(), out_r.data()};
+      nirbija::TransportInfo transport;
+      transport.playing = true;
+      transport.rolling = true;
+      transport.tempo_bpm = 120.0;
+      transport.numerator = 4;
+      transport.beats = beats;
+      gap.set_transport(transport);
+      gap.process(ins, outs, kBlock);
+      beats += block_beats;
+    };
+
+    // Walk to the middle of the first bar, then press.
+    while (beats < 2.0) step(0.0f);
+    gap.set_parameter(0, 1.0);
+    step(0.5f);
+    if (!gap.recording()) fail("rec mid-bar did not arm");
+    if (gap.writing()) fail("rec mid-bar wrote before the downbeat");
+    if (gap.has_audio()) fail("rec mid-bar put audio on the tape early");
+    const double to_go = gap.beats_to_boundary();
+    if (to_go <= 1.5 || to_go > 2.0)
+      fail("beats_to_boundary mid-bar was " + std::to_string(to_go) +
+           ", wanted just under 2");
+
+    // Across the downbeat: now it writes.
+    while (beats < 4.5) step(0.5f);
+    if (!gap.writing()) fail("rec did not start writing on the downbeat");
+    if (!gap.has_audio()) fail("the tape stayed empty past the downbeat");
+
+    // Release mid-bar: still writing until the bar closes.
+    gap.set_parameter(0, 0.0);
+    step(0.5f);
+    if (gap.recording()) fail("rec off did not clear the request");
+    if (!gap.writing()) fail("rec off mid-bar stopped the head before the bar");
+    if (gap.loop_closed()) fail("the loop closed mid-bar");
+    while (beats < 8.5) step(0.5f);
+    if (gap.writing()) fail("the head kept writing past the bar after rec off");
+    if (!gap.loop_closed()) fail("the loop did not close on the bar");
+
+    // Free Length: no grid to wait for, and the mirror says so.
+    gap.set_parameter(3, 0.0);
+    step(0.0f);
+    if (gap.beats_to_boundary() >= 0.0)
+      fail("free Length still reported a boundary to wait for");
+  }
+
   if (failures > 0) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);
     return 1;

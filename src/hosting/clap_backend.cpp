@@ -186,6 +186,12 @@ class ClapInstance : public PluginInstance {
         plugin_->get_extension(plugin_, CLAP_EXT_POSIX_FD_SUPPORT));
 
     read_port_counts();
+    // Whether it takes notes comes from its note ports, once there is an
+    // instance to ask. The scan guessed from the feature list; this is the
+    // plugin's own word.
+    if (const auto* note_ports = static_cast<const clap_plugin_note_ports_t*>(
+            plugin_->get_extension(plugin_, CLAP_EXT_NOTE_PORTS)))
+      desc_.has_midi_input = note_ports->count(plugin_, true) > 0;
     return true;
   }
 
@@ -928,11 +934,14 @@ class ClapBackend : public PluginBackend {
     std::string words;
     for (const char* const* f = d->features; *f != nullptr; ++f) {
       const std::string_view feature(*f);
-      if (feature == CLAP_PLUGIN_FEATURE_INSTRUMENT)
+      if (feature == CLAP_PLUGIN_FEATURE_INSTRUMENT) {
         desc.kind = PluginKind::Instrument;
-      else if (feature == CLAP_PLUGIN_FEATURE_NOTE_EFFECT ||
-               feature == CLAP_PLUGIN_FEATURE_NOTE_DETECTOR)
+        desc.has_midi_input = true;
+      } else if (feature == CLAP_PLUGIN_FEATURE_NOTE_EFFECT ||
+                 feature == CLAP_PLUGIN_FEATURE_NOTE_DETECTOR) {
         desc.kind = PluginKind::MidiEffect;
+        desc.has_midi_input = true;
+      }
       else if (feature == CLAP_PLUGIN_FEATURE_ANALYZER)
         desc.kind = PluginKind::Analyzer;
       else if (feature == CLAP_PLUGIN_FEATURE_AUDIO_EFFECT &&

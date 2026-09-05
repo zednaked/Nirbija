@@ -8,6 +8,7 @@
 #include "core/file_player.h"
 #include "core/looper.h"
 #include "core/fx_pad.h"
+#include "core/drone.h"
 #include "core/keyboard_instrument.h"
 #include "core/sampler.h"
 
@@ -173,6 +174,11 @@ QVariant MixerModel::data(const QModelIndex& index, int role) const {
         if (insertIsLooper(index.row(), slot)) {
           entry.insert(QStringLiteral("looperRecording"),
                        looperRecording(index.row(), slot));
+          // Whether the head is actually on the tape, apart from Rec being
+          // down: the strip shows the wait in a different colour, the same
+          // as the editor's sign does.
+          entry.insert(QStringLiteral("looperWriting"),
+                       looperWriting(index.row(), slot));
           entry.insert(QStringLiteral("looperPlaying"),
                        looperPlaying(index.row(), slot));
           entry.insert(QStringLiteral("looperHasAudio"),
@@ -2069,6 +2075,57 @@ bool MixerModel::fxPadHold(int row, int slot) const {
   return fx != nullptr && fx->hold();
 }
 
+bool MixerModel::insertIsDrone(int row, int slot) const {
+  PluginInstance* insert = insertFor(row, slot);
+  return insert != nullptr && insert->descriptor().uid == "nirbija.drone";
+}
+
+QVariantMap MixerModel::insertDroneSnapshot(int row, int slot) const {
+  QVariantMap out;
+  auto* drone = dynamic_cast<DroneInstance*>(insertFor(row, slot));
+  if (drone == nullptr) return out;
+  QVariantList params, mapped, gains;
+  params.reserve(DroneInstance::kParamCount);
+  mapped.reserve(DroneInstance::kParamCount);
+  for (uint32_t id = 0; id < DroneInstance::kParamCount; ++id) {
+    params.append(drone->parameter_value(id));
+    mapped.append(insertParamMapped(row, slot, static_cast<int>(id)));
+  }
+  for (int v = 0; v < DroneInstance::kVoices; ++v)
+    gains.append(static_cast<qreal>(drone->voice_gain(v)));
+  out[QStringLiteral("params")] = params;
+  out[QStringLiteral("mapped")] = mapped;
+  out[QStringLiteral("gains")] = gains;
+  out[QStringLiteral("swell")] = static_cast<qreal>(drone->swell_position());
+  out[QStringLiteral("breath")] = static_cast<qreal>(drone->filter_breath());
+  out[QStringLiteral("peak")] = static_cast<qreal>(drone->peak());
+  out[QStringLiteral("rootNow")] = drone->root_now();
+  return out;
+}
+
+void MixerModel::setDroneParam(int row, int slot, int id, qreal value) {
+  auto* drone = dynamic_cast<DroneInstance*>(insertFor(row, slot));
+  if (drone == nullptr || id < 0) return;
+  drone->set_parameter(static_cast<uint32_t>(id), value);
+  // The swell is ridden all night; the session does not need writing on
+  // every inch of it. A new string or a new root is the piece, and is.
+  markDirty(static_cast<uint32_t>(id) != DroneInstance::Swell);
+}
+
+QStringList MixerModel::dronePresetNames() const {
+  QStringList names;
+  for (int i = 0; i < DroneInstance::preset_count(); ++i)
+    names.append(QString::fromUtf8(DroneInstance::preset(i).name));
+  return names;
+}
+
+void MixerModel::applyDronePreset(int row, int slot, int index) {
+  auto* drone = dynamic_cast<DroneInstance*>(insertFor(row, slot));
+  if (drone == nullptr) return;
+  drone->apply_preset(index);
+  markDirty();
+}
+
 void MixerModel::setLooperRecord(int row, int slot, bool on) {
   auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
   if (looper == nullptr) return;
@@ -2207,6 +2264,16 @@ void MixerModel::setLooperCountIn(int row, int slot, bool on) {
   if (looper == nullptr) return;
   looper->set_count_in(on);
   markDirty(false);
+}
+
+bool MixerModel::looperWriting(int row, int slot) const {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  return looper != nullptr && looper->writing();
+}
+
+qreal MixerModel::looperBeatsToBoundary(int row, int slot) const {
+  auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
+  return looper == nullptr ? -1.0 : looper->beats_to_boundary();
 }
 
 int MixerModel::looperCountBeats(int row, int slot) const {

@@ -248,6 +248,16 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE bool fxPadBipolar(int pad) const;
   Q_INVOKABLE void setFxPadHold(int row, int slot, bool on);
   Q_INVOKABLE bool fxPadHold(int row, int slot) const;
+  // Drone: six strings and a swell. The snapshot is the editor's whole view
+  // in one call - every parameter, which are mapped, and what the audio
+  // thread is putting out - polled at the frame rate rather than forty
+  // separate reads. Writes go by parameter id; the swell is performance and
+  // does not schedule a save, everything else is the drone and does.
+  Q_INVOKABLE bool insertIsDrone(int row, int slot) const;
+  Q_INVOKABLE QVariantMap insertDroneSnapshot(int row, int slot) const;
+  Q_INVOKABLE void setDroneParam(int row, int slot, int id, qreal value);
+  Q_INVOKABLE QStringList dronePresetNames() const;
+  Q_INVOKABLE void applyDronePreset(int row, int slot, int index);
   Q_INVOKABLE void setLooperRecord(int row, int slot, bool on);
   Q_INVOKABLE void setLooperPlay(int row, int slot, bool on);
   Q_INVOKABLE void clearLooper(int row, int slot);
@@ -275,6 +285,10 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE bool looperCountIn(int row, int slot) const;
   Q_INVOKABLE void setLooperCountIn(int row, int slot, bool on);
   Q_INVOKABLE int looperCountBeats(int row, int slot) const;
+  // LooperInstance::writing() and beats_to_boundary(): whether the head is
+  // actually on the tape, and how many beats until a pending press lands.
+  Q_INVOKABLE bool looperWriting(int row, int slot) const;
+  Q_INVOKABLE qreal looperBeatsToBoundary(int row, int slot) const;
   Q_INVOKABLE bool looperHasAudio(int row, int slot) const;
   Q_INVOKABLE bool looperLoopClosed(int row, int slot) const;
   Q_INVOKABLE qreal looperBeats(int row, int slot) const;

@@ -97,7 +97,8 @@ junto.
 | Sampler de performance | Koala Sampler | ✅ **Sampler** (`nirbija.sampler`) — 16 pads, Rec do strip, WAV |
 | Arpejador | Rozeta Arpeggio | ✅ **Arpeggiator** (`nirbija.arp`) |
 | Looper como plugin | Loopy Pro | ✅ **Looper** (`nirbija.looper`) |
-| Acorde e escala | Scaler 2, Chordjam | x42 força escala; nada composicional |
+| Acorde e escala | Scaler 2, Chordjam | ✅ **Chord** (`nirbija.chord`) |
+| Drone como instrumento | apps de tanpura e shruti box; Moodscaper | ✅ **Drone** (`nirbija.drone`) — seis cordas, swell, entonação justa |
 
 ### Tier 3 — não vale
 

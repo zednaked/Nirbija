@@ -14,6 +14,7 @@
 
 #include <QSettings>
 
+#include "core/drone.h"
 #include "mixer_model.h"
 #include "skin.h"
 
@@ -351,6 +352,42 @@ int main(int argc, char* argv[]) {
       mixer.injectControl(40, 0, 127);
       if (mixer.fxPadHold(0, 0))
         fail("a second press did not release Hold");
+      mixer.removeInsert(0, 0);
+    }
+  }
+
+  // The drone: the picker lists it, its snapshot carries every parameter, a
+  // write by id lands, and a knob learned onto the swell moves the swell.
+  {
+    using nirbija::DroneInstance;
+    const int drone = mixer.plugins()->rowFor(nirbija::PluginFormat::Internal,
+                                              "nirbija.drone");
+    if (drone < 0) {
+      fail("the drone is not in the picker");
+    } else if (!mixer.addInsert(0, drone)) {
+      fail("could not add the drone to a strip");
+    } else {
+      if (!mixer.insertIsDrone(0, 0)) fail("insertIsDrone does not see the drone");
+      QVariantMap snap = mixer.insertDroneSnapshot(0, 0);
+      if (snap[QStringLiteral("params")].toList().size() !=
+          static_cast<int>(DroneInstance::kParamCount))
+        fail("the drone snapshot does not carry every parameter");
+      if (snap[QStringLiteral("gains")].toList().size() != DroneInstance::kVoices)
+        fail("the drone snapshot does not carry every string");
+      mixer.setDroneParam(0, 0, DroneInstance::Root, 45);
+      snap = mixer.insertDroneSnapshot(0, 0);
+      if (snap[QStringLiteral("params")].toList()[DroneInstance::Root].toDouble() != 45.0)
+        fail("setDroneParam did not land on the root");
+      mixer.learnInsertParam(0, 0, DroneInstance::Swell, 0.0, 1.0);
+      // The first message is the learn itself, and one off the rail so the
+      // binding is a knob, not a toggle; the second one is the sweep.
+      mixer.injectControl(41, 0, 64);
+      mixer.injectControl(41, 0, 127);
+      snap = mixer.insertDroneSnapshot(0, 0);
+      if (snap[QStringLiteral("params")].toList()[DroneInstance::Swell].toDouble() < 0.99)
+        fail("a knob learned onto the swell did not push it up");
+      if (!snap[QStringLiteral("mapped")].toList()[DroneInstance::Swell].toBool())
+        fail("the snapshot does not report the swell as mapped");
       mixer.removeInsert(0, 0);
     }
   }

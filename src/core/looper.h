@@ -59,8 +59,23 @@ class LooperInstance : public PluginInstance {
   void set_trim(double start, double end);
   void set_fades(double fade_in, double fade_out);
 
+  // What the UI asked for: Rec is down. The head may not be writing yet -
+  // a quantised punch-in waits for the grid - see writing() for that.
   bool recording() const {
     return record_request_.load(std::memory_order_relaxed);
+  }
+  // The head is actually writing the tape this block. Differs from
+  // recording() for up to a Length unit either side of a press: armed and
+  // waiting for the bar before, still writing up to the bar after. The
+  // editor counts those beats down for the player - that gap is exactly
+  // when they need to know whether to play.
+  bool writing() const { return writing_.load(std::memory_order_relaxed); }
+  // Beats to the next quantise boundary - the moment a pending Rec press
+  // lands - from the transport at the last block. -1 when there is no
+  // grid to wait for (Length free, or the beat grid not moving), in which
+  // case a press lands on the next block.
+  double beats_to_boundary() const {
+    return beats_to_boundary_.load(std::memory_order_relaxed);
   }
   bool playing() const { return play_request_.load(std::memory_order_relaxed); }
   bool count_in() const { return count_in_.load(std::memory_order_relaxed); }
@@ -171,6 +186,7 @@ class LooperInstance : public PluginInstance {
   static constexpr int kQuantizeMax = kQuantizeSync;
 
   bool at_boundary(uint32_t frames) const;
+  double beats_to_boundary(const TransportInfo& transport) const;
   void apply_requests(uint32_t frames);
   double unit_beats() const;
   uint64_t snap_length(uint64_t written) const;
@@ -274,8 +290,11 @@ class LooperInstance : public PluginInstance {
   std::atomic<double> fade_in_{0.0};
   std::atomic<double> fade_out_{0.0};
 
-  // Updated once a block, for the UI to read - see position_fraction().
+  // Updated once a block, for the UI to read - see position_fraction(),
+  // writing() and beats_to_boundary().
   std::atomic<double> position_fraction_{-1.0};
+  std::atomic<bool> writing_{false};
+  std::atomic<double> beats_to_boundary_{-1.0};
 
   // Frame bounds of the current trim window, clamped to the loop length
   // passed in - always length_'s current value, but process() only wants to

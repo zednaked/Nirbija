@@ -31,6 +31,10 @@ the rule by hand — `packaging/README.md` has it.
 `nirbija --version` reports the version and which backends the binary carries;
 `nirbija --help` lists the environment variables it reads.
 
+The build also leaves `build/clap/Nirbija Drone.clap`: the built-in Drone
+instrument as a CLAP for other hosts. Copy it into `~/.clap` to use it; it is
+not part of the install.
+
 ## Checagem antes do push
 
 O guardião do projeto é um hook, não CI. Uma vez por clone:

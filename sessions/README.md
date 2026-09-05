@@ -33,6 +33,8 @@ NIRBIJA_SESSION="$PWD/sessions/jam-pad-hall.json" \
 | `jam-tape-drone.json` | 60 | Surge XT CLAP + Odin2 + Airwindows/looper → Plate + CHOW Tape |
 | `jam-shimmer-grain.json` | 88 | padthv1/wolf-shaper + Odin/phaser + reverse delay → Hall + ZamVerb |
 | `jam-kick-cloud.json` | 84 | ChowKick + padthv1/tape + stepseq/Odin2 → Hall + Airwindows |
+| `jam-drone.json` | 60 | one strip, `nirbija.drone` at factory defaults - nothing else installed needed; it comes up on its own in four seconds |
+| `jam-drone-seq.json` | 60 | `nirbija.stepseq` re-rooting `nirbija.drone` every four seconds - D2 A1 G1 C2 - with a second of glide; host plugins only |
 
 Sends use `busName` so they rebind after load. Some channels use
 `destinationKind: bus` (serial into the FX) instead of a send (parallel).
@@ -287,6 +289,22 @@ the sequencer's output and the chord plugin's own trigger logic share the
 strip without either one knowing about the other.
 
 Rebuild after editing the patterns: `python3 sessions/build-chord.py`.
+
+## jam-drone-seq.json
+
+The Drone (`design/drone.md`) under a step sequencer, in one strip. The
+sequencer's lane 0 holds four roots - D2, A1, G1, C2 - sixteen 1/16 steps
+each at 60 BPM, tied so each root is one note-on. The drone has no note-on of
+its own: a note that reaches it becomes the new root and the six strings
+glide there, here over about a second (`Glide` 0.6), with the room up
+(`Space` 0.8) so the old root hangs in the air while the new one arrives. A
+sixteen-second cycle; press Play.
+
+Nothing in the host was written for this. The strip hands one insert's MIDI
+to the next, the way it does for the sequencer above a synth, and the drone
+reads a note as a root. `tests/drone_test.cpp` keeps it true.
+
+Rebuild after editing: `python3 sessions/build-drone-seq.py`.
 
 ## Cardinal data
 

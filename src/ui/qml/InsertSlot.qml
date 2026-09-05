@@ -12,8 +12,11 @@ AbstractButton {
     property bool bypassed: false
     property bool postFader: false
     // A Looper insert's own state, so a live set reads at a glance whether
-    // something is armed without opening its editor to find out.
+    // something is armed without opening its editor to find out. Recording
+    // is Rec being down; writing is the head actually on the tape - they
+    // differ for up to a bar either side of a quantised press.
     property bool looperRecording: false
+    property bool looperWriting: false
     property bool looperPlaying: false
     property bool looperHasAudio: false
     property bool samplerRecording: false
@@ -69,13 +72,18 @@ AbstractButton {
             color: Skin.mute
         }
 
-        // A Looper's or Sampler's own Rec, at a glance: red while armed
-        // (the thing you must not miss walking into a room full of
-        // channels), green while a looper is audibly looping. Quiet when
-        // there is nothing to say.
+        // A Looper's or Sampler's own Rec, at a glance: yellow while a
+        // press waits for the bar, red while the head is writing (the thing
+        // you must not miss walking into a room full of channels), green
+        // while a looper is audibly looping. Quiet when there is nothing
+        // to say.
         Rectangle {
             id: stateDot
-            visible: root.looperRecording || root.samplerRecording ||
+            // Rec down or the head still writing after a release: both are
+            // moments the player has to watch.
+            readonly property bool waiting: root.looperRecording !== root.looperWriting
+            readonly property bool hot: root.looperWriting || root.samplerRecording
+            visible: stateDot.waiting || stateDot.hot ||
                      (root.looperPlaying && root.looperHasAudio)
             anchors.right: parent.right
             anchors.top: parent.top
@@ -83,8 +91,8 @@ AbstractButton {
             width: Px.px(7)
             height: Px.px(7)
             radius: width / 2
-            color: (root.looperRecording || root.samplerRecording)
-                   ? Skin.arm : Skin.meterLow
+            color: stateDot.waiting ? Skin.solo
+                 : stateDot.hot ? Skin.arm : Skin.meterLow
             z: 2
 
             // Pulses while armed - the one state worth catching out of the
@@ -92,10 +100,9 @@ AbstractButton {
             // this; only `pulse` is a value source, so the dot settles
             // back to a steady 0.85 the moment recording stops.
             property real pulse: 1.0
-            opacity: (root.looperRecording || root.samplerRecording)
-                     ? stateDot.pulse : 0.85
+            opacity: stateDot.waiting || stateDot.hot ? stateDot.pulse : 0.85
             SequentialAnimation on pulse {
-                running: root.looperRecording || root.samplerRecording
+                running: stateDot.waiting || stateDot.hot
                 loops: Animation.Infinite
                 NumberAnimation { from: 1.0; to: 0.35; duration: Skin.fast * 3 }
                 NumberAnimation { from: 0.35; to: 1.0; duration: Skin.fast * 3 }

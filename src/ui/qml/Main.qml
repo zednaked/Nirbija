@@ -284,6 +284,10 @@ ApplicationWindow {
             window.openOrToggle(fxPadLoader, row, slot)
             return
         }
+        if (Mixer.insertIsDrone(row, slot)) {
+            window.openOrToggle(droneLoader, row, slot)
+            return
+        }
         if (Mixer.insertIsKeyboardInstrument(row, slot)) {
             window.openOrToggle(keyboardLoader, row, slot)
             return
@@ -596,6 +600,12 @@ ApplicationWindow {
         id: fxPadLoader
         active: false
         sourceComponent: FxPad {}
+    }
+
+    Loader {
+        id: droneLoader
+        active: false
+        sourceComponent: DroneEditor {}
     }
 
     Loader {

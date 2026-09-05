@@ -279,6 +279,19 @@ float LooperInstance::tone_sample(int channel, float sample) {
 // The grid is live while Play is on *or* the metronome is rolling the same
 // clock with Play off. With neither, or with quantise off, every block is
 // a boundary.
+double LooperInstance::beats_to_boundary(const TransportInfo& transport) const {
+  const int quantize = std::clamp(quantize_.load(std::memory_order_relaxed),
+                                  0, kQuantizeMax);
+  const bool grid = transport.rolling || transport.playing;
+  if (quantize == 0 || !grid) return -1.0;
+  // The same unit at_boundary() waits on: a beat, or a bar - never the
+  // 2/4/8-bar Length.
+  const double beats_per_unit =
+      quantize == 1 ? 1.0 : std::max(1, transport.numerator);
+  const double into = std::fmod(transport.beats, beats_per_unit);
+  return beats_per_unit - into;
+}
+
 bool LooperInstance::at_boundary(uint32_t frames) const {
   const int quantize = std::clamp(quantize_.load(std::memory_order_relaxed),
                                   0, kQuantizeMax);
@@ -571,6 +584,12 @@ void LooperInstance::process(const float* const* inputs, float* const* outputs,
                    : 1.0;
   }
   position_fraction_.store(fraction, std::memory_order_relaxed);
+
+  writing_.store(record_active_ && (stage_ == Stage::Defining ||
+                                    stage_ == Stage::Overdubbing),
+                 std::memory_order_relaxed);
+  beats_to_boundary_.store(beats_to_boundary(transport_),
+                           std::memory_order_relaxed);
 }
 
 uint64_t LooperInstance::trim_start_frames(uint64_t length) const {
