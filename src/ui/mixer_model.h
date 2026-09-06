@@ -372,6 +372,9 @@ class MixerModel : public QAbstractListModel {
   // File player extras: only meaningful when the insert is one.
   Q_INVOKABLE bool insertIsFilePlayer(int row, int slot) const;
   Q_INVOKABLE bool insertIsStepSequencer(int row, int slot) const;
+  // Rec is down on a Step Sequencer: the strip's slot shows it red, the
+  // same as a looper writing or a sampler taking.
+  Q_INVOKABLE bool sequencerRecording(int row, int slot) const;
   Q_INVOKABLE bool insertIsScript(int row, int slot) const;
   Q_INVOKABLE bool insertIsKeyboardInstrument(int row, int slot) const;
   Q_INVOKABLE bool insertIsSampler(int row, int slot) const;
@@ -424,6 +427,9 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE void setSamplerPad(int row, int slot, int pad, int note,
                                  bool oneShot, qreal volume, qreal pan,
                                  qreal pitch);
+  // Give a pad a MIDI note; a pad that already had it takes this pad's old
+  // one, so sixteen pads never share a key.
+  Q_INVOKABLE void assignSamplerPadNote(int row, int slot, int pad, int note);
   Q_INVOKABLE void setSamplerPadName(int row, int slot, int pad,
                                      const QString& name);
   Q_INVOKABLE void setSamplerTrim(int row, int slot, int pad, qreal start,

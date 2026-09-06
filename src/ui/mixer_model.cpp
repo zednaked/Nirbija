@@ -190,6 +190,10 @@ QVariant MixerModel::data(const QModelIndex& index, int role) const {
           entry.insert(QStringLiteral("samplerHasAudio"),
                        samplerHasAudio(index.row(), slot));
         }
+        if (insertIsStepSequencer(index.row(), slot)) {
+          entry.insert(QStringLiteral("sequencerRecording"),
+                       sequencerRecording(index.row(), slot));
+        }
         details.append(entry);
       }
       return details;
@@ -913,6 +917,11 @@ bool MixerModel::insertIsFilePlayer(int row, int slot) const {
   return insert != nullptr && insert->descriptor().uid == "nirbija.fileplayer";
 }
 
+bool MixerModel::sequencerRecording(int row, int slot) const {
+  auto* seq = dynamic_cast<StepSequencerInstance*>(insertFor(row, slot));
+  return seq != nullptr && seq->recording();
+}
+
 bool MixerModel::insertIsStepSequencer(int row, int slot) const {
   PluginInstance* insert = insertFor(row, slot);
   return insert != nullptr && insert->descriptor().uid == "nirbija.stepseq";
@@ -1194,6 +1203,9 @@ QVariantMap MixerModel::insertSamplerSnapshot(int row, int slot) const {
   out[QStringLiteral("countIn")] = sampler->parameter_value(10) >= 0.5;
   out[QStringLiteral("countingIn")] = sampler->counting_in();
   out[QStringLiteral("countInLeft")] = sampler->count_in_beats_left();
+  out[QStringLiteral("armed")] = sampler->armed();
+  out[QStringLiteral("recFill")] = sampler->rec_fill();
+  out[QStringLiteral("level")] = sampler->level();
   QVariantList pads;
   pads.reserve(SamplerInstance::kPads);
   for (int i = 0; i < SamplerInstance::kPads; ++i) {
@@ -1210,6 +1222,8 @@ QVariantMap MixerModel::insertSamplerSnapshot(int row, int slot) const {
     pad[QStringLiteral("fadeOut")] = sampler->pad_fade_out(i);
     pad[QStringLiteral("hasAudio")] = sampler->pad_has_audio(i);
     pad[QStringLiteral("canUndo")] = sampler->pad_can_undo(i);
+    pad[QStringLiteral("pos")] = sampler->pad_position(i);
+    pad[QStringLiteral("version")] = sampler->pad_version(i);
     pads.append(pad);
   }
   out[QStringLiteral("pads")] = pads;
@@ -1257,6 +1271,13 @@ void MixerModel::setSamplerPad(int row, int slot, int pad, int note,
   if (sampler == nullptr) return;
   sampler->set_pad(pad, note, oneShot, static_cast<float>(volume),
                    static_cast<float>(pan), static_cast<float>(pitch));
+  markDirty();
+}
+
+void MixerModel::assignSamplerPadNote(int row, int slot, int pad, int note) {
+  auto* sampler = dynamic_cast<SamplerInstance*>(insertFor(row, slot));
+  if (sampler == nullptr) return;
+  sampler->assign_note(pad, note);
   markDirty();
 }
 

@@ -247,6 +247,8 @@ Rectangle {
                                 && root.inserts[index].looperHasAudio === true
                 samplerRecording: index < root.inserts.length
                                   && root.inserts[index].samplerRecording === true
+                sequencerRecording: index < root.inserts.length
+                                    && root.inserts[index].sequencerRecording === true
                 onClicked: root.insertSlotClicked(slot.index, slot)
                 onMenuRequested: {
                     if (slot.index < root.inserts.length)

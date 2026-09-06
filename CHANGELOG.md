@@ -61,6 +61,80 @@ The dot on a Looper's insert slot in the strip follows the same rule: yellow
 while a press waits for the bar, red only while the head is on the tape,
 green while the loop plays. It used to go red on the press, a bar early.
 
+### The step sequencer's editor, redrawn the same way
+
+`StepGrid.qml` gets what the looper's and the drone's editors got. The window
+glows in the colour of what the sequencer is doing - red while it records,
+yellow under Fill, green while it runs - and a chip in the header says so in a
+word, next to the focused lane's own bar.beat (a lane in 7 reads 2.3 where the
+song reads 4.1: the polymeter, made visible), which pattern plays and which is
+queued, and the name of the instrument the notes reach. A sequencer with
+nothing below it on the strip says `→ nothing below` in yellow and the status
+line explains, because that was the one way to end up with a grid that plays
+and nothing heard.
+
+The grid sits in an inset panel with a row of step lamps under it: one per
+step of the focused lane, all of them, so a 64-step lane is seen entire while
+the grid shows sixteen; bars are the tall lamps, beats the medium ones, the
+page on screen the bright stretch, and a tap on the lamps turns to that page.
+The panel flares on the lane's one and on a Rec press. The four macros a
+performer rides - Density, Chaos, Probability, Ratchet - are the same bars the
+drone's swell and the looper's feedback are, on the right, Density filling
+from the middle so ×1 reads as nothing added; Swing and Transpose sit below as
+smaller ones. A pattern is switched with a click and queued for the top of
+the bar with a right-click, ringed yellow until it lands. The rows under the
+grid are named - PATTERN, RUN, SCALE, LANE, STEP - with the lane's division
+as buttons instead of a slider, and MAP binds any bar, Rec, Fill, the
+pattern number or a lane setting to a knob on the strip's MIDI input, the
+way the other two editors do.
+
+The dot on a Step Sequencer's insert slot in the strip goes red while Rec is
+down, the same as a looper writing or a sampler taking; it used to say
+nothing. `editor_probe` took the pictures: `nirbija.stepseq` with `play=1`,
+`200=0 15=1` for the skyline recording, `editor=0 15=1` for the strip.
+
+The header chip also follows the strip now. It read who sat below the
+sequencer once, when the window opened, and again only after a click in the
+grid, so removing the instrument from the strip with the editor open left the
+chip saying its name and the lanes carrying its pads. The 50 ms poll asks each
+tick and repaints only when the answer differs, so the chip goes to
+`→ nothing below` the moment the slot empties, and a kit loaded into a sampler
+below names the lanes without reopening the window. `editor_probe` gained
+`below=<uid>` and `remove_below=<ms>` to stage exactly that.
+
+### The sampler's editor, redrawn the same way
+
+`SamplerEditor.qml` gets what the drone's, the looper's and the step
+sequencer's editors got. The window glows in the colour of what the sampler
+is doing - red while it takes, yellow while it counts in or waits for the
+bar, green while a pad sounds - as bright as the kit is loud, and a chip in
+the header says so in a word, next to the pad in hand and its key, the last
+note or CC the controller sent, and the kit's own level apart from the strip's.
+
+The pads sit in an inset panel and each draws its own sound as a small
+waveform, so a kit is read at a glance instead of by name; a pad that sounds
+draws it green with a head crossing it, a pad being taken fills red as the
+buffer fills, and the pad Rec is waiting for breathes yellow. The pad in
+hand is drawn wide underneath as a tape with the looper's handles - tall
+tabs to trim, rings to fade - a playhead while it sounds, and a sign over it
+while a take is coming: the count, REC ON THE BAR, TAKING ONTO KICK. The
+tape flares when Rec punches in or out. The rows under it are named - PAD
+with the name, the key on a chip that drags or rolls a semitone at a time
+(a pad that already had the key takes this one's, so no two share one),
+ONE-SHOT or HOLD; REC ON with now, beat, bar; KIT with the packs - and the
+rides on the right are the same bars the other editors use: the pad's
+Volume and the kit's Gain tall, Pitch and Pan below filling from the middle.
+
+`SamplerInstance` mirrors what the editor needed to draw: `level()`, the
+chip's own block peak; `armed()`, Rec down and waiting for the grid, which
+the old editor called "recording" a bar early; `rec_fill()`, how much of the
+take buffer is written; `pad_position()`, where each voice is in its pad;
+and `pad_version()`, bumped whenever a pad's audio changes hands, so the
+sixteen thumbnails are refetched only when one of them must be.
+`Mixer.assignSamplerPadNote()` exposes the note swap the MIDI-learn path
+already used. `editor_probe` takes `pack=<file>` and `hit=<pad>`, so a
+sampler can be photographed with a kit on its pads and one of them sounding.
+
 ### A kit loaded from a session file went silent on the next start
 
 The sampler kept a pad's path exactly as the file that named it spelled it,

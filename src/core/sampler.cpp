@@ -191,6 +191,17 @@ void SamplerInstance::publish(int pad, std::shared_ptr<Buffer> buffer) {
   if (target.owned != nullptr) retired_.push_back({target.owned, now});
   target.owned = std::move(buffer);
   target.live.store(target.owned.get(), std::memory_order_release);
+  target.version.fetch_add(1, std::memory_order_relaxed);
+}
+
+float SamplerInstance::pad_position(int pad) const {
+  if (pad < 0 || pad >= kPads) return -1.0f;
+  return pads_[pad].position.load(std::memory_order_relaxed);
+}
+
+int SamplerInstance::pad_version(int pad) const {
+  if (pad < 0 || pad >= kPads) return 0;
+  return pads_[pad].version.load(std::memory_order_relaxed);
 }
 
 bool SamplerInstance::load(int pad, const std::string& path) {
@@ -772,6 +783,7 @@ void SamplerInstance::process(const float* const* inputs, float* const* outputs,
 
   size_t midi_i = 0;
   uint32_t sounding = 0;
+  float block_peak = 0.0f;
 
   for (uint32_t i = 0; i < frames; ++i) {
     while (midi_i < incoming_count_ && incoming_[midi_i].frame <= i)
@@ -893,6 +905,8 @@ void SamplerInstance::process(const float* const* inputs, float* const* outputs,
       out_r += click;
     }
 
+    block_peak = std::max(block_peak, std::max(std::fabs(out_l), std::fabs(out_r)));
+
     if (outputs != nullptr) {
       if (channels_ <= 1) {
         if (outputs[0] != nullptr) outputs[0][i] = 0.5f * (out_l + out_r);
@@ -906,6 +920,27 @@ void SamplerInstance::process(const float* const* inputs, float* const* outputs,
   while (midi_i < incoming_count_) handle_midi(incoming_[midi_i++]);
   incoming_count_ = 0;
   sounding_mask_.store(sounding, std::memory_order_relaxed);
+  level_.store(block_peak, std::memory_order_relaxed);
+
+  // Mirrors for the editor, once a block: where each voice is in its pad,
+  // whether Rec is still waiting for the grid, how full the take is.
+  for (int p = 0; p < kPads; ++p) {
+    const Voice& voice = voices_[static_cast<size_t>(p)];
+    float at = -1.0f;
+    if (voice.pad >= 0 && voice.buffer != nullptr && voice.buffer->frames > 0)
+      at = static_cast<float>(std::clamp(
+          voice.position / static_cast<double>(voice.buffer->frames), 0.0, 1.0));
+    pads_[static_cast<size_t>(p)].position.store(at, std::memory_order_relaxed);
+  }
+  armed_.store(want_rec && rec_waiting_ &&
+                   !recording_.load(std::memory_order_relaxed) && !counting_,
+               std::memory_order_relaxed);
+  rec_fill_.store(
+      recording_.load(std::memory_order_relaxed) && rec_capacity_ > 0
+          ? static_cast<float>(static_cast<double>(rec_written_) /
+                               static_cast<double>(rec_capacity_))
+          : 0.0f,
+      std::memory_order_relaxed);
 
   uint32_t hit_flash = 0;
   for (int p = 0; p < kPads; ++p) {

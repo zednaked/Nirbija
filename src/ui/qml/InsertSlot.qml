@@ -20,6 +20,9 @@ AbstractButton {
     property bool looperPlaying: false
     property bool looperHasAudio: false
     property bool samplerRecording: false
+    // A Step Sequencer's Rec: MIDI played into the strip is being written
+    // onto its steps, and the pattern is quiet meanwhile.
+    property bool sequencerRecording: false
     readonly property bool empty: pluginName.length === 0
 
     signal menuRequested
@@ -72,7 +75,7 @@ AbstractButton {
             color: Skin.mute
         }
 
-        // A Looper's or Sampler's own Rec, at a glance: yellow while a
+        // A Looper's, Sampler's or Sequencer's own Rec, at a glance: yellow while a
         // press waits for the bar, red while the head is writing (the thing
         // you must not miss walking into a room full of channels), green
         // while a looper is audibly looping. Quiet when there is nothing
@@ -83,6 +86,7 @@ AbstractButton {
             // moments the player has to watch.
             readonly property bool waiting: root.looperRecording !== root.looperWriting
             readonly property bool hot: root.looperWriting || root.samplerRecording
+                                        || root.sequencerRecording
             visible: stateDot.waiting || stateDot.hot ||
                      (root.looperPlaying && root.looperHasAudio)
             anchors.right: parent.right

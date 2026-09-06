@@ -15,7 +15,13 @@
 // the beat grid: a looper armed for the next bar, say. `at=800` delays the
 // pairs after it by that many milliseconds, so a press can land mid-bar
 // instead of on the transport's own first beat. `editor=0` leaves the
-// editor closed, for a picture of the strip behind it.
+// editor closed, for a picture of the strip behind it. `below=<uid>` stands
+// a second built-in plugin in the slot under the first, and `remove_below=800`
+// takes it out again that many milliseconds in - the way to see whether an
+// editor open over the strip notices the chain under it changing.
+// `pack=<file.pack.json>` loads a sampler pack onto the insert, and
+// `hit=<pad>` taps that pad shortly before the picture, so a sampler can be
+// photographed with a kit on its pads and one of them sounding.
 
 #include <QApplication>
 #include <QImage>
@@ -26,7 +32,9 @@
 #include <QQuickWindow>
 #include <QSettings>
 #include <QTimer>
+#include <QUrl>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -115,6 +123,39 @@ int main(int argc, char* argv[]) {
     }
     if (pair[0] == QStringLiteral("editor")) {
       openEditor = pair[1].toInt() != 0;
+      continue;
+    }
+    if (pair[0] == QStringLiteral("below")) {
+      const int other = mixer->plugins()->rowFor(nirbija::PluginFormat::Internal,
+                                                 pair[1].toStdString());
+      if (other < 0 || !mixer->addInsertAt(row, other, slot + 1)) {
+        std::fprintf(stderr, "could not add %s below\n", qUtf8Printable(pair[1]));
+        return 1;
+      }
+      continue;
+    }
+    if (pair[0] == QStringLiteral("pack")) {
+      if (!mixer->loadSamplerPackFrom(row, slot, QUrl::fromLocalFile(pair[1]))) {
+        std::fprintf(stderr, "could not load pack %s\n", qUtf8Printable(pair[1]));
+        return 1;
+      }
+      continue;
+    }
+    if (pair[0] == QStringLiteral("hit")) {
+      const int pad = pair[1].toInt();
+      // Late enough that a short one-shot is still sounding when the
+      // picture is taken, unless `at=` asked for a moment of its own.
+      const int when = delay > 0 ? delay : std::max(0, seconds * 1000 - 150);
+      QTimer::singleShot(when, [=] {
+        mixer->previewSamplerPad(row, slot, pad, 110);
+      });
+      continue;
+    }
+    if (pair[0] == QStringLiteral("remove_below")) {
+      QTimer::singleShot(pair[1].toInt(), [=] {
+        mixer->removeInsert(row, slot + 1);
+        std::printf("removed slot %d\n", slot + 1);
+      });
       continue;
     }
     const int id = pair[0].toInt();

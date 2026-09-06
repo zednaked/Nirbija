@@ -94,6 +94,22 @@ class SamplerInstance : public PluginInstance {
   bool recording() const {
     return recording_.load(std::memory_order_relaxed);
   }
+  // Rec is down and the head is waiting for the quantize grid: armed, not
+  // yet writing. The editor paints that yellow, the way the looper's does.
+  bool armed() const { return armed_.load(std::memory_order_relaxed); }
+  // How much of the take buffer Rec has filled so far, 0..1, 0 when it is
+  // not writing - the editor draws the take growing across the pad.
+  float rec_fill() const { return rec_fill_.load(std::memory_order_relaxed); }
+  // The chip's own output, block peak: the pads and the click, plus the
+  // strip's input while Rec passes it through. Apart from the channel meter
+  // beside it, which is the whole strip. For the editor's glow and meter.
+  float level() const { return level_.load(std::memory_order_relaxed); }
+  // Where the pad's voice is in its audio, 0..1 of the whole buffer, or -1
+  // while the pad is silent. For a playhead over the waveform.
+  float pad_position(int pad) const;
+  // Bumped every time the pad's audio changes hands - Load, Rec, Clear,
+  // Undo, a pack - so an editor refetches a thumbnail only when it must.
+  int pad_version(int pad) const;
   int rec_pad() const { return rec_pad_.load(std::memory_order_relaxed); }
   int focused() const { return focused_.load(std::memory_order_relaxed); }
   uint32_t sounding_mask() const {
@@ -207,6 +223,8 @@ class SamplerInstance : public PluginInstance {
     std::atomic<double> end{1.0};
     std::atomic<double> fade_in{0.0};
     std::atomic<double> fade_out{0.0};
+    std::atomic<float> position{-1.0f};  // audio thread writes, per block
+    std::atomic<int> version{0};         // UI thread bumps in publish()
     std::string name;
     std::string path;  // UI thread; empty when the pad is a Rec take
 
@@ -276,6 +294,9 @@ class SamplerInstance : public PluginInstance {
   std::atomic<int> rec_pad_{0};
   std::atomic<uint32_t> stop_mask_{0};
   std::atomic<uint32_t> sounding_mask_{0};
+  std::atomic<bool> armed_{false};
+  std::atomic<float> rec_fill_{0.0f};
+  std::atomic<float> level_{0.0f};
 
   // Hit-flash: audio thread only except the published mask. One countdown
   // per pad, set to a fixed duration on any matching note-on and ticked
