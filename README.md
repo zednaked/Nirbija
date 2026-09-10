@@ -156,4 +156,10 @@ cmake --build build --target nirbija_ui_qmllint
 
 ## Licence
 
-GPLv3. See `LICENSE`.
+GPLv3. The full text is in [`LICENSE`](LICENSE).
+
+Copyright (C) 2026 Nirbija contributors.
+
+The choice is not ideological, it is forced: Nirbija hosts VST3 through
+Steinberg's `pluginterfaces`, which ships under a GPLv3 / proprietary dual
+licence. Hosting it in a project that is not proprietary means GPLv3.
