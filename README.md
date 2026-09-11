@@ -1,9 +1,73 @@
 # Nirbija
 
-A Linux plugin host and mixer in the spirit of AUM. JACK/PipeWire audio,
-Qt6 QML UI, LV2 + CLAP + VST3.
+A Linux mixer that is also an instrument. A drone synth, a sixteen-pad sampler,
+a looper, a step sequencer and an arpeggiator live inside it and need nothing
+installed — and LV2, CLAP and VST3 go in the same slot, over JACK or PipeWire,
+with the plugins' own editors embedded in the window.
+
+![Nirbija](docs/nirbija.png)
 
 <https://zednaked.github.io/nirbija-site/>
+
+## What it is
+
+A rack of channel strips, in the spirit of AUM on iOS, which Linux does not
+have. Each strip is a chain: an instrument, then effects, then a fader with
+sends. MIDI made by one plugin joins what the next one in the chain receives,
+so a step sequencer above a synth plays it.
+
+The difference from the other hosts is that a session does not start empty. The
+instruments below ship with the binary.
+
+## Built in
+
+| | |
+|---|---|
+| **Drone** | six strings that never stop, just intonation, per-string cents, swell, drift |
+| **Sampler** | sixteen pads; record from the strip or load a file; the sequencer reads the names |
+| **Looper** | quantised launch, reverse, half/double, multiply, replace, once |
+| **Step Sequencer** | sixteen steps, swing, scales, reverse/pendulum, chance, ties |
+| **Arpeggiator** | up, down, up-down, as played, random, chord; octaves and latch |
+| **Chord** | split keyboard; below the split, one key fires a whole chord |
+| **FX Pad** | sixteen graduated effects; pitch, filter, comb and ring go both ways |
+| **Script** | a MIDI plugin you write in Lua, in the mixer |
+| **File Player** | a file into a strip |
+| **Computer Keyboard** | GarageBand-style typing keyboard; no MIDI hardware needed |
+
+They sit in the picker with everything else you have installed.
+
+The **Drone** also builds as a standalone CLAP (`build/clap/Nirbija Drone.clap`)
+for other hosts. Copy it into `~/.clap`; it is not part of the install.
+
+## Also in the box
+
+**Bluetooth LE MIDI.** PipeWire advertises a BLE keyboard as a JACK port and
+then never delivers its events; Nirbija talks to the device itself.
+
+**Strips as files.** A chain worth keeping goes in a file of its own — click a
+strip's name for **Save strip…**, right-click `+ add strip` for **Load strip…**.
+Every plugin's state travels with it, so a sequencer arrives with its pattern. A
+plugin the file wants and this machine does not have is named on screen, and the
+rest of the strip still loads.
+
+**A recorder**, on the master or any strip.
+
+## Install
+
+The AppImage carries its own Qt and runs anywhere:
+
+```sh
+packaging/dist.sh appimage    # lands in dist/
+```
+
+From a build tree:
+
+```sh
+cmake --install build --prefix ~/.local
+```
+
+Four files: the binary, the launcher, the icon. `packaging/README.md` has the
+desktop and Hyprland side of it.
 
 ## Build
 
@@ -13,103 +77,19 @@ Lua 5.4, Qt6 Quick and Widgets, and X11.
 ```sh
 cmake -S . -B build -DNIRBIJA_UI=ON
 cmake --build build -j
-```
-
-The UI is on by default. The app must run on X11/XWayland so plugin editors
-can embed (`QT_QPA_PLATFORM=xcb` is forced). OpenGL editors on this machine
-often need `__GLX_VENDOR_LIBRARY_NAME=mesa`.
-
-```sh
 __GLX_VENDOR_LIBRARY_NAME=mesa ./build/src/ui/nirbija
 ```
 
+The app runs on X11/XWayland so plugin editors can embed (`QT_QPA_PLATFORM=xcb`
+is forced). OpenGL editors often want that `__GLX_VENDOR_LIBRARY_NAME=mesa`.
+
 Plugin editors are X11 windows of their own and want to float rather than tile.
 Under Hyprland the app arranges that itself at startup, over the compositor's
-IPC socket; `NIRBIJA_NO_WM_RULES=1` turns it off. Other compositors still want
-the rule by hand — `packaging/README.md` has it.
+IPC socket; `NIRBIJA_NO_WM_RULES=1` turns it off. Other compositors want the
+rule by hand.
 
-`nirbija --version` reports the version and which backends the binary carries;
-`nirbija --help` lists the environment variables it reads.
-
-The build also leaves `build/clap/Nirbija Drone.clap`: the built-in Drone
-instrument as a CLAP for other hosts. Copy it into `~/.clap` to use it; it is
-not part of the install.
-
-## Checagem antes do push
-
-O guardião do projeto é um hook, não CI. Uma vez por clone:
-
-```sh
-git config core.hooksPath .githooks
-cmake -S . -B build-asan -G Ninja \
-  -DNIRBIJA_UI=OFF -DNIRBIJA_TESTS=ON -DCMAKE_BUILD_TYPE=Debug \
-  -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
-  -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
-```
-
-A partir daí todo `git push` compila e roda a suíte headless sob ASan e UBSan —
-25 segundos, incremental. `NIRBIJA_SKIP_CHECK=1 git push` pula.
-
-Vale a pena porque essa passada acha o que revisão não acha: foi assim que se
-viu que o step sequencer estourava a pilha sob ASan (e portanto o maior módulo
-do projeto estava fora da cobertura) e que um insert removido sem servidor de
-áudio nunca era liberado.
-
-Sem a árvore `build-asan/` o hook avisa e deixa passar, em vez de barrar quem
-acabou de clonar.
-
-`.github/workflows/ci.yml` roda a mesma passada numa árvore limpa, mas só sob
-demanda (`gh workflow run "build e testes"`): em repositório privado o Actions
-consome cota da conta, e o hook já cobre o caso do dia a dia.
-
-## Install
-
-```sh
-cmake --install build --prefix ~/.local
-```
-
-Lays down the binary, the launcher and the icon — four files, nothing else.
-See `packaging/README.md` for the desktop and Hyprland side of it.
-
-## Strips
-
-A chain worth keeping goes in a file of its own — click a strip's name for
-**Save strip…**, and right-click the `+ add strip` square for **Load strip…**.
-Every plugin's state travels with it, so a sequencer arrives with its pattern.
-A plugin the file wants and this machine does not have is named on screen, and
-the rest of the strip still loads.
-
-## Packaging
-
-```sh
-packaging/dist.sh src        # source tarball, from what git has committed
-packaging/dist.sh bin        # binary tree, for a machine with the same Qt
-packaging/dist.sh appimage   # self-contained, Qt bundled in
-```
-
-Everything lands in `dist/`. The binary tree links against the Qt and JACK of
-the machine that built it, so it travels only to an identical distro; anything
-else wants the AppImage or the source.
-
-## Built in
-
-Besides whatever LV2, CLAP and VST3 you have installed, a few plugins live in
-the host and need nothing installed at all:
-
-| | |
-|---|---|
-| **Step Sequencer** | sixteen steps, swing, scales, reverse/pendulum, chance, ties |
-| **Arpeggiator** | up, down, up-down, as played, random, chord; octaves and latch |
-| **Script** | a MIDI plugin you write in Lua, in the mixer |
-| **Looper** | quantised launch, reverse, half/double, multiply, replace, once |
-| **FX Pad** | sixteen graduated effects; pitch, filter, comb and ring go both ways |
-| **File Player** | a file into a strip |
-| **Computer Keyboard** | GarageBand-style typing keyboard; no MIDI hardware needed |
-| **Sampler** | sixteen pads; Rec from the strip, or a file; names the step sequencer reads |
-
-They sit in the picker with everything else. A sequencer above a synth — or
-the sampler — in the same strip plays it: the MIDI a plugin makes joins what
-the next one in the chain receives.
+`nirbija --version` reports which backends the binary carries; `nirbija --help`
+lists the environment variables it reads.
 
 ## Using it
 
@@ -120,30 +100,23 @@ faders, pans, sends and slots in turn. `F1` lists the lot.
 The whole interface is sized off one number. **Ctrl+=** and **Ctrl+-** move it
 while the mixer is open, **Ctrl+0** goes back, and the size is remembered for
 that machine — a 4K panel and a laptop want different answers and neither is a
-property of the session.
-
-`NIRBIJA_UI_SCALE` still sets it at startup, and wins over the remembered one
-when it is given:
-
-```sh
-NIRBIJA_UI_SCALE=1.25 ./build/src/ui/nirbija
-```
+property of the session. `NIRBIJA_UI_SCALE=1.25` sets it at startup and wins
+over the remembered one.
 
 ## Tests
 
 ```sh
 ctest --test-dir build --output-on-failure
+cmake --build build --target nirbija_ui_qmllint   # expected to stay silent
 ```
 
-Tests that need a JACK server or a named plugin **skip** (CTest 77) instead
-of passing. Offline DSP tests (`graph_routing`, `file_player`, `looper`) run
+Tests that need a JACK server or a named plugin **skip** (CTest 77) instead of
+passing. Offline DSP tests (`graph_routing`, `file_player`, `looper`) run
 anywhere.
 
-The QML is checked separately, and is expected to stay silent:
-
-```sh
-cmake --build build --target nirbija_ui_qmllint
-```
+Every `git push` compiles and runs the headless suite under AddressSanitizer and
+UndefinedBehaviorSanitizer first — 25 seconds, incremental. See
+[`CONTRIBUTING.md`](CONTRIBUTING.md) to set that up.
 
 ## Notes
 
