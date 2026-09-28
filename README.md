@@ -24,9 +24,9 @@ instruments below ship with the binary.
 | | |
 |---|---|
 | **Drone** | six strings that never stop, just intonation, per-string cents, swell, drift |
-| **Sampler** | sixteen pads; record from the strip or load a file; the sequencer reads the names |
-| **Looper** | quantised launch, reverse, half/double, multiply, replace, once |
-| **Step Sequencer** | sixteen steps, swing, scales, reverse/pendulum, chance, ties |
+| **Sampler** | sixteen pads; record from the strip or load a file; the sequencer reads the names; packs |
+| **Looper** | punch on the exact frame of the bar, reverse, half/double, multiply, replace, once; undo per phrase |
+| **Step Sequencer** | sixteen steps, eight lanes, swing, scales, reverse/pendulum, chance, ratchets, ties |
 | **Arpeggiator** | up, down, up-down, as played, random, chord; octaves and latch |
 | **Chord** | split keyboard; below the split, one key fires a whole chord |
 | **FX Pad** | sixteen graduated effects; pitch, filter, comb and ring go both ways |
@@ -39,7 +39,32 @@ They sit in the picker with everything else you have installed.
 The **Drone** also builds as a standalone CLAP (`build/clap/Nirbija Drone.clap`)
 for other hosts. Copy it into `~/.clap`; it is not part of the install.
 
+## Made to be played
+
+The bar for the audio path is a live set: you edit while it plays and nothing
+may click, step or drop out.
+
+- **Nothing parks the master.** Looper Rec, Undo and Clear, the autosave,
+  undoing a strip, loading a kit — none of them pause the audio. The looper
+  keeps its undo by copying each frame just before it is overwritten, on the
+  audio thread, so an undo is one pointer swap.
+- **Every change is a slope.** Faders, pans, sends, mutes, solos, bypasses,
+  plugin delay compensation, the looper's wrap and punch edges, a sampler pad
+  retriggered — each walks or crossfades instead of jumping, and a test in
+  `tests/` measures the largest sample-to-sample step and fails above it.
+- **Sample-accurate time.** Pattern changes land on the downbeat, gates and
+  ratchets on their frame, the looper's punch on the bar line rather than the
+  start of the block.
+- **A cheap callback.** Sixteen strips with inserts and sends render a
+  256-frame block in about 0.1 ms, 2% of its time
+  (`tests/render_bench.cpp`). No allocation, no lock, no log on the audio
+  thread; memory is locked and the graph's own latency is reported to JACK.
+
 ## Also in the box
+
+**Sampler packs.** `sessions/packs/` holds three kits for the Sampler editor's
+**Open Pack**: *808 Trap*, *Techno Clang* and *Long Chops*, sixteen recorded
+phrases to trim and chop.
 
 **Bluetooth LE MIDI.** PipeWire advertises a BLE keyboard as a JACK port and
 then never delivers its events; Nirbija talks to the device itself.
@@ -54,20 +79,29 @@ rest of the strip still loads.
 
 ## Install
 
-The AppImage carries its own Qt and runs anywhere:
+The [releases page](https://github.com/zednaked/Nirbija/releases) has an
+AppImage that carries its own Qt and runs anywhere:
 
 ```sh
-packaging/dist.sh appimage    # lands in dist/
+chmod +x nirbija-0.4.0-x86_64.AppImage && ./nirbija-0.4.0-x86_64.AppImage
 ```
 
-From a build tree:
+On Arch, `makepkg -si` in `packaging/` builds a package from git.
+
+`packaging/dist.sh all` makes the same AppImage and tarballs locally, in
+`dist/`. From a build tree:
 
 ```sh
 cmake --install build --prefix ~/.local
 ```
 
-Four files: the binary, the launcher, the icon. `packaging/README.md` has the
-desktop and Hyprland side of it.
+The binary, the launcher, the icons and the AppStream metadata.
+`packaging/README.md` has the desktop and Hyprland side of it.
+
+For the audio thread to lock its memory the user needs a memlock limit: on
+Arch, the `realtime-privileges` package and the `realtime` group; elsewhere,
+the `audio` group or a line in `/etc/security/limits.d/`. Without it Nirbija
+still runs and says so once at startup.
 
 ## Build
 
@@ -81,7 +115,8 @@ cmake --build --preset dev
 __GLX_VENDOR_LIBRARY_NAME=mesa ./build/src/ui/nirbija
 ```
 
-An Arch package is `makepkg -si` in `packaging/`.
+`CMakePresets.json` names every tree: `dev`, `debug`, `release` (what the
+AppImage ships), and `asan`, `asan-ui` and `tsan` for the sanitizers.
 
 The app runs on X11/XWayland so plugin editors can embed (`QT_QPA_PLATFORM=xcb`
 is forced). OpenGL editors often want that `__GLX_VENDOR_LIBRARY_NAME=mesa`.
@@ -113,12 +148,19 @@ ctest --test-dir build --output-on-failure
 cmake --build build --target nirbija_ui_qmllint   # expected to stay silent
 ```
 
-Tests that need a JACK server or an installed plugin **skip** (CTest 77)
-instead of passing; `ctest -L quick` is the offline set that runs anywhere. Offline DSP tests (`graph_routing`, `file_player`, `looper`) run
-anywhere.
+Every test carries a label: `quick` (offline DSP, graph and instruments — runs
+anywhere), `jack` (needs a running server), `ui` (Qt, offscreen) and `plugins`
+(opens what is installed on this machine). A test whose server or plugin is
+missing **skips** (CTest 77) instead of passing, and every test has a timeout.
 
-Every `git push` compiles and runs the headless suite under AddressSanitizer and
-UndefinedBehaviorSanitizer first — some twenty seconds, incremental. See
+```sh
+ctest --test-dir build -L quick               # what the pre-push hook runs
+NIRBIJA_BENCH_STRICT=1 ./build/tests/nirbija_render_bench
+```
+
+Every `git push` compiles and runs the quick suite under AddressSanitizer and
+UndefinedBehaviorSanitizer first — some twenty seconds, incremental — and CI
+runs everything on each push, plus ThreadSanitizer and the Qt interface. See
 [`CONTRIBUTING.md`](CONTRIBUTING.md) to set that up.
 
 ## Notes
@@ -129,6 +171,7 @@ UndefinedBehaviorSanitizer first — some twenty seconds, incremental. See
 | `PORTING.md` | what a Mac or Windows port would cost, measured |
 | `ECOSYSTEM.md` | what the free plugin world is missing, counted |
 | `design/` | designs for things not built yet |
+| `CHANGELOG.md` | what changed in each release, and why |
 
 ## Licence
 
