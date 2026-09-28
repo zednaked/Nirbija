@@ -71,14 +71,17 @@ desktop and Hyprland side of it.
 
 ## Build
 
-Needs C++20, CMake ≥ 3.28, JACK (`pipewire-jack` is fine), libsndfile, lilv,
-Lua 5.4, Qt6 Quick and Widgets, and X11.
+Needs C++20, CMake ≥ 3.28, Ninja, JACK (`pipewire-jack` is fine), libsndfile,
+lilv, Lua 5.4, Qt6 Quick and Widgets, and X11. libsystemd is only for
+Bluetooth LE MIDI and `-DNIRBIJA_BLE_MIDI=OFF` drops it.
 
 ```sh
-cmake -S . -B build -DNIRBIJA_UI=ON
-cmake --build build -j
+cmake --preset dev          # Release, LTO, the UI; see CMakePresets.json
+cmake --build --preset dev
 __GLX_VENDOR_LIBRARY_NAME=mesa ./build/src/ui/nirbija
 ```
+
+An Arch package is `makepkg -si` in `packaging/`.
 
 The app runs on X11/XWayland so plugin editors can embed (`QT_QPA_PLATFORM=xcb`
 is forced). OpenGL editors often want that `__GLX_VENDOR_LIBRARY_NAME=mesa`.
@@ -110,12 +113,12 @@ ctest --test-dir build --output-on-failure
 cmake --build build --target nirbija_ui_qmllint   # expected to stay silent
 ```
 
-Tests that need a JACK server or a named plugin **skip** (CTest 77) instead of
-passing. Offline DSP tests (`graph_routing`, `file_player`, `looper`) run
+Tests that need a JACK server or an installed plugin **skip** (CTest 77)
+instead of passing; `ctest -L quick` is the offline set that runs anywhere. Offline DSP tests (`graph_routing`, `file_player`, `looper`) run
 anywhere.
 
 Every `git push` compiles and runs the headless suite under AddressSanitizer and
-UndefinedBehaviorSanitizer first — 25 seconds, incremental. See
+UndefinedBehaviorSanitizer first — some twenty seconds, incremental. See
 [`CONTRIBUTING.md`](CONTRIBUTING.md) to set that up.
 
 ## Notes

@@ -1,11 +1,16 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #pragma once
 
 #include <jack/jack.h>
 
+#include <array>
 #include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
+
+#include "core/dsp.h"
 
 #include "core/audio_graph.h"
 #include "core/recorder.h"
@@ -164,6 +169,11 @@ class Engine {
   size_t add_bus(const std::string& name) { return graph_->add_bus(name); }
   void remove_bus(size_t bus) { graph_->remove_bus(bus); }
 
+  // UI thread. Tells JACK the graph's own latency changed - an insert with
+  // latency added, removed or bypassed - so it asks the latency callback
+  // again and downstream clients see the new number.
+  void latency_changed();
+
   // Park the graph - a short fade to silence, then one observed block with no
   // plugin running - so a state load and recorder teardown cannot race
   // process(). False when that block never came, which means the guarantee
@@ -181,20 +191,34 @@ class Engine {
   static int jack_xrun_trampoline(void* arg);
   static int jack_buffer_size_trampoline(jack_nframes_t frames, void* arg);
   static int jack_sample_rate_trampoline(jack_nframes_t rate, void* arg);
+  static void jack_latency_trampoline(jack_latency_callback_mode_t mode,
+                                      void* arg);
   int process(jack_nframes_t frames);
   void drain_commands();
+  void report_latency(jack_latency_callback_mode_t mode);
+  // Rereads from JACK whether either direct out of `channel` has a
+  // connection, and publishes it for process(). UI thread: on our own
+  // connect calls and on every poll_control().
+  void refresh_out_connected(size_t channel);
 
   // Ports are kept per channel so routing can be changed later; the sources
-  // inside the graph only ever read from them.
+  // inside the graph only ever read from them. Fixed at kMaxChannels and
+  // every field atomic: the UI thread fills a record while process() walks
+  // the array, so the record has to be readable whole at any instant. A
+  // resizable vector here was the UI reallocating under the audio thread.
   struct ChannelPorts {
-    jack_port_t* audio[2] = {nullptr, nullptr};
-    jack_port_t* audio_out[2] = {nullptr, nullptr};
-    jack_port_t* midi = nullptr;
+    std::atomic<jack_port_t*> audio[2] = {nullptr, nullptr};
+    std::atomic<jack_port_t*> audio_out[2] = {nullptr, nullptr};
+    std::atomic<jack_port_t*> midi{nullptr};
     // A tap reads another strip's extra outs and has no JACK ports of its
     // own. The slot may still hold leftovers from a previous occupant; the
     // flag is what stops process() writing into those and connect_source
     // calling jack_port_name on null.
-    bool tap = false;
+    std::atomic<bool> tap{false};
+    // Whether anything listens on the direct outs, refreshed from the UI
+    // thread (see refresh_out_connected); process() skips the copy to an
+    // out nobody hears.
+    std::atomic<bool> out_connected{false};
   };
 
   struct InjectedMidi {
@@ -212,7 +236,11 @@ class Engine {
   jack_port_t* clock_in_ = nullptr;
   RtQueue<MidiEvent, 256> control_events_;
   RtQueue<InjectedMidi, 256> injected_midi_;
-  std::vector<ChannelPorts> channel_ports_;
+  std::array<ChannelPorts, kMaxChannels> channel_ports_{};
+  // Audio thread only: whether the direct out was written last block. A
+  // channel whose outs lost their listener gets one block of silence written
+  // so a later listener does not hear the stale block that was left there.
+  std::array<bool, kMaxChannels> out_written_{};
   uint8_t midi_running_status_{0};
 
   double sample_rate_ = 0.0;
@@ -236,14 +264,9 @@ class Engine {
   std::atomic<double> published_beats_{0.0};
   std::atomic<uint32_t> xruns_{0};
 
-  // Click synthesis state, audio thread only.
-  uint32_t click_remaining_ = 0;
-  uint32_t click_length_ = 0;
-  double click_phase_ = 0.0;
-  double click_step_ = 0.0;
-
-  void render_metronome(float* const* master, uint32_t frames, double tempo,
-                        double start_beats);
+  // Finds the beat in the coming block, if any, and schedules the click on
+  // the graph, which renders it. Audio thread only.
+  void schedule_metronome(uint32_t frames, double tempo, double start_beats);
   double clock_phase_ = 0.0;
 
   // --- following an external clock, audio thread only ------------------------

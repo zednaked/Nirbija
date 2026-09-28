@@ -1,29 +1,28 @@
 name: build e testes
 
-# Um passe de sanitizer numa arvore limpa: sem Qt, dependencias minimas,
-# NIRBIJA_UI=OFF, a suite headless inteira sob ASan + UBSan. E onde aparece a
-# classe de bug que revisao nao pega - foi assim que se viu que o step sequencer
-# estourava a pilha sob ASan (e portanto o maior modulo do projeto estava fora
-# da cobertura), e que um insert removido sem servidor de audio nunca era
-# liberado.
+# O repositorio e publico, e em repositorio publico o Actions nao consome cota:
+# entao roda a cada push e a cada pull request, alem de sob demanda. O hook
+# de pre-push em .githooks/ continua sendo o guardiao rapido na maquina; o que
+# este workflow da e uma arvore limpa, num runner que nao e o seu, e um
+# AppImage anexado ao release quando uma tag v* e empurrada.
 #
-# O job que compilava com a UI num contentor Arch saiu: a maquina de
-# desenvolvimento e Arch e compila a cada build, entao ele confirmava o que ja
-# se via - e custava mais do que este, 4,5 dos 6,5 minutos da execucao.
+# Dois trabalhos:
+#   - sanitizers: sem Qt, NIRBIJA_UI=OFF, a suite headless inteira sob
+#     ASan + UBSan. E onde aparece a classe de bug que revisao nao pega.
+#   - tsan: a suite rapida sob ThreadSanitizer.
+#   - ui: com Qt 6, num conteiner Arch, compila a interface, roda o qmllint e
+#     os testes de UI offscreen. Ate aqui nada da UI era verificado fora da
+#     maquina do autor.
 #
-# Nada aqui precisa de Xvfb nem de servidor de audio: engine_smoke e
-# midi_clock_follow devolvem 77 e o ctest marca Skipped, os testes de plugin
-# desistem sozinhos quando nao ha plugin, e os de UI ja forcam
+# Nada aqui precisa de Xvfb nem de servidor de audio: os testes que precisam
+# de JACK devolvem 77 e o ctest marca Skipped, os testes de plugin usam o
+# Drone CLAP gerado no proprio build, e os de UI forcam
 # QT_QPA_PLATFORM=offscreen por conta propria.
 
-# So sob demanda. Este repo e privado, e em repo privado o Actions consome a
-# cota mensal da conta - diferente de repo publico, onde e ilimitado. Medido na
-# primeira execucao: 2 min o passe de sanitizer, e o mesmo passe roda de graca
-# na maquina, pelo hook de pre-push em .githooks/. O que sobra aqui e o valor
-# que a maquina nao da: uma arvore limpa, num runner que nao e o seu.
-#
-# Rodar: gh workflow run "build e testes"  (ou pelo botao na aba Actions)
 on:
+  push:
+    branches: [master]
+  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -33,8 +32,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Sem Qt: com NIRBIJA_UI=OFF nada em src/ui entra no build, e é lá que
-      # moram Qt e X11.
       - name: dependências
         run: |
           sudo apt-get update
@@ -43,33 +40,77 @@ jobs:
             libjack-jackd2-dev libsndfile1-dev liblilv-dev \
             liblua5.4-dev libsystemd-dev
 
-      # vst3_pluginterfaces e clap vêm por FetchContent; sem cache é um clone a
-      # cada execução.
       - name: cache dos SDKs buscados
         uses: actions/cache@v4
         with:
-          path: build/_deps
+          path: build-asan/_deps
           key: deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
 
       - name: configurar
-        run: |
-          cmake -S . -B build -G Ninja \
-            -DNIRBIJA_UI=OFF -DNIRBIJA_TESTS=ON \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
-            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+        run: cmake --preset asan
 
       - name: compilar
-        run: cmake --build build -j"$(nproc)"
+        run: cmake --build --preset asan -j"$(nproc)"
 
       # detect_leaks=0 não é preguiça: o LeakSanitizer acusa vazamentos dentro
       # de pw_context_load_module quando o libjack abre o cliente, e são do
-      # PipeWire, não daqui. Sem isso quatro testes parecem quebrados.
-      #
-      # halt_on_error=0 para que o UBSan relate tudo o que achar num só passe em
-      # vez de parar no primeiro.
+      # PipeWire, não daqui. halt_on_error=0 para que o UBSan relate tudo o que
+      # achar num só passe em vez de parar no primeiro.
       - name: testes
+        run: ctest --preset all
+
+  tsan:
+    name: core sob ThreadSanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: dependências
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build g++ pkg-config git \
+            libjack-jackd2-dev libsndfile1-dev liblilv-dev \
+            liblua5.4-dev libsystemd-dev
+      - name: cache dos SDKs buscados
+        uses: actions/cache@v4
+        with:
+          path: build-tsan/_deps
+          key: deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+      - name: configurar
+        run: cmake --preset tsan
+      - name: compilar
+        run: cmake --build --preset tsan -j"$(nproc)"
+      - name: testes rápidos
+        run: ctest --preset tsan
+
+  # Qt 6.5 is the floor (src/ui/CMakeLists.txt) and Ubuntu's runners ship
+  # 6.4, so the interface builds in an Arch container, which is also what the
+  # project is developed on.
+  ui:
+    name: interface com Qt 6
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: dependências
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel cmake ninja git pkgconf \
+            jack2 jack-example-tools libsndfile lilv lua systemd-libs libx11 \
+            qt6-base qt6-declarative
+      - uses: actions/checkout@v4
+      - name: configurar
+        run: cmake --preset dev -DNIRBIJA_WERROR=ON
+      - name: compilar
+        run: cmake --build --preset dev -j"$(nproc)"
+      - name: qmllint
+        run: cmake --build build --target nirbija_ui_qmllint
+      # Os testes de UI dirigem o mixer inteiro e precisam de um servidor de
+      # áudio; sem um, devolvem 77 e aparecem como Skipped. Um jackd com o
+      # driver dummy basta: relógio de verdade, nenhuma placa de som.
+      - name: testes de UI (offscreen, JACK dummy)
         env:
-          ASAN_OPTIONS: detect_leaks=0
-          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=0
-        run: ctest --test-dir build --output-on-failure
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          jackd --no-realtime -d dummy -r 48000 -p 256 &
+          for i in $(seq 50); do jack_lsp > /dev/null 2>&1 && break; sleep 0.2; done
+          ctest --test-dir build -L '^ui$' --output-on-failure

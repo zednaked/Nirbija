@@ -1,4 +1,5 @@
 pragma ComponentBehavior: Bound
+// SPDX-License-Identifier: GPL-3.0-only
 
 import QtQuick
 import QtQuick.Controls.Basic
@@ -21,7 +22,7 @@ import Nirbija
 // while it counts in or waits for the bar, green while a pad sounds - as
 // bright as the kit is loud, and a chip in the header says so in a word.
 // Not modal: the mixer stays live, same as the looper.
-Popup {
+EditorPopup {
     id: root
 
     property int targetRow: -1
@@ -50,7 +51,6 @@ Popup {
     // so a thumbnail is refetched only when the pad's audio changes hands.
     property var thumbs: []
     property var thumbVersions: []
-    property bool positioned: false
     property int heldPad: -1
     property bool mapping: false
     property int waitingPad: -1
@@ -141,75 +141,14 @@ Popup {
     // A row that outgrows this width should look cramped, not spill buttons
     // out past the panel and over the mixer behind it.
     clip: true
-    modal: false
-    padding: Skin.spacingL
-    closePolicy: (root.mapping || Mixer.learning)
-                 ? Popup.NoAutoClose
-                 : Popup.CloseOnEscape
-
-    background: Rectangle {
-        gradient: Gradient {
-            GradientStop { position: 0.0; color: Qt.lighter(Skin.popup, 1.08) }
-            GradientStop { position: 1.0; color: Skin.popup }
-        }
-        border.width: 1
-        border.color: Skin.border
-        radius: Skin.radiusL
-        clip: true
-
-        // The glow: light under a door, in the state's colour, as bright as
-        // the kit is loud. A take keeps a floor so a quiet one still shows
-        // the head is writing; counting in and waiting for the bar hold
-        // steady in yellow.
-        Rectangle {
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.bottom: parent.bottom
-            height: parent.height * 0.4
-            radius: parent.radius
-            gradient: Gradient {
-                GradientStop { position: 0.0; color: "transparent" }
-                GradientStop { position: 1.0; color: root.stateHue }
-            }
-            opacity: root.countingIn || root.armed ? 0.22
-                   : root.recording ? Math.max(0.14, Math.min(0.32, root.level * 0.5))
-                   : root.sounding !== 0 ? Math.min(0.32, 0.06 + root.level * 0.5)
-                   : 0
-            Behavior on opacity { NumberAnimation { duration: 120 } }
-        }
-
-        // Empty chrome is not a handler on its own, so without this a press
-        // on the padding falls through onto the strip behind - and doubles
-        // as how the popup moves.
-        HoverHandler {}
-        TapHandler {}
-        DragHandler {
-            target: null
-            grabPermissions: PointerHandler.TakeOverForbidden
-            onCentroidChanged: if (active) {
-                const nx = root.x + centroid.position.x - centroid.pressPosition.x
-                const ny = root.y + centroid.position.y - centroid.pressPosition.y
-                const maxX = Overlay.overlay
-                    ? Math.max(0, Overlay.overlay.width - root.width) : nx
-                const maxY = Overlay.overlay
-                    ? Math.max(0, Overlay.overlay.height - root.height) : ny
-                root.x = Math.max(0, Math.min(nx, maxX))
-                root.y = Math.max(0, Math.min(ny, maxY))
-            }
-        }
-        WheelHandler {
-            acceptedModifiers: Qt.NoModifier
-            onWheel: event => event.accepted = true
-        }
-        WheelHandler {
-            acceptedModifiers: Qt.ShiftModifier
-            onWheel: event => event.accepted = true
-        }
-    }
-
-    enter: Transition {
-        NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Skin.fast }
-    }
+    // The chrome, the glow and the drag are EditorPopup's; what the glow
+    // says is this editor's.
+    holdOpen: root.mapping || Mixer.learning
+    glowHue: root.stateHue
+    glowOpacity: root.countingIn || root.armed ? 0.22
+                 : root.recording ? Math.max(0.14, Math.min(0.32, root.level * 0.5))
+                 : root.sounding !== 0 ? Math.min(0.32, 0.06 + root.level * 0.5)
+                 : 0
 
     function openFor(row, slot) {
         root.targetRow = row
@@ -220,24 +159,12 @@ Popup {
         root.refreshWave()
         root.refreshMapped()
         Mixer.listenSamplerMidi(row, slot, true)
-        if (!root.positioned) {
-            // Clamped: opened before the window has its size, the centre of
-            // a zero-sized overlay is off the top-left corner.
-            root.x = Math.max(0, Math.round((Overlay.overlay.width - root.width) / 2))
-            root.y = Math.max(0, Math.round((Overlay.overlay.height - root.height) / 2))
-            root.positioned = true
-        }
+        root.place()
         root.open()
     }
 
-    onOpened: {
-        Mixer.listenSamplerMidi(root.targetRow, root.targetSlot, true)
-        poll.start()
-        wavePoll.start()
-    }
+    onOpened: Mixer.listenSamplerMidi(root.targetRow, root.targetSlot, true)
     onClosed: {
-        poll.stop()
-        wavePoll.stop()
         Mixer.listenSamplerMidi(root.targetRow, root.targetSlot, false)
         root.stopMapping()
         if (root.heldPad >= 0) {
@@ -306,21 +233,10 @@ Popup {
         onActivated: root.stopMapping()
     }
 
-    // A ring in the corner of anything bound to a knob - the same ring the
-    // bars draw for themselves.
-    component MapDot: Rectangle {
+    component MapDot: MapRing {
         required property int param
-        anchors.right: parent.right
-        anchors.top: parent.top
-        anchors.margins: Skin.spacingXS
-        width: Px.px(8)
-        height: Px.px(8)
-        radius: width / 2
-        z: 2
-        visible: root.isMapped(param)
-        color: "transparent"
-        border.width: Px.px(2)
-        border.color: root.waitingParam === param ? Skin.solo : Skin.focus
+        mapped: root.isMapped(param)
+        waiting: root.waitingParam === param
     }
 
     // The header's buttons: a little taller than the mixer's, the way the
@@ -355,7 +271,9 @@ Popup {
         root.hitFlash = snap.hitFlash
         root.lastNote = snap.lastNote === undefined ? -1 : snap.lastNote
         root.lastCc = snap.lastCc === undefined ? -1 : snap.lastCc
-        root.pads = snap.pads
+        // Sixteen pads' worth of bindings hang off `pads`; written thirty
+        // times a second it rebuilt them all to change nothing.
+        if (!root.samePads(snap.pads, root.pads)) root.pads = snap.pads
         const level = Mixer.gainToFader(snap.level === undefined ? 0 : snap.level)
         root.level = level
         // Instant rise, steady fall - the same ballistic every other meter
@@ -382,9 +300,33 @@ Popup {
     // is rescanned on its own slower clock - peaks change only on a take, a
     // load or a clear - and while a take is still being written, so the pad
     // can be watched filling.
+    // Two lists of the same length, element by element.
+    function sameList(a, b) {
+        if (a.length !== b.length) return false
+        for (let i = 0; i < a.length; ++i)
+            if (a[i] !== b[i]) return false
+        return true
+    }
+
+    // Two pad lists, field by field: the maps come fresh from C++ each poll,
+    // so identity says nothing and only the values can.
+    function samePads(a, b) {
+        if (!a || !b || a.length !== b.length) return false
+        for (let i = 0; i < a.length; ++i) {
+            const p = a[i], q = b[i]
+            for (const key in p)
+                if (p[key] !== q[key]) return false
+        }
+        return true
+    }
+
+    function takePeaks(next) {
+        if (!root.sameList(next, root.peaks)) root.peaks = next
+    }
+
     function refreshWave() {
-        root.peaks = Mixer.samplerWaveform(root.targetRow, root.targetSlot,
-                                           root.focused, 160)
+        root.takePeaks(Mixer.samplerWaveform(root.targetRow, root.targetSlot,
+                                             root.focused, 160))
         const thumbs = root.thumbs.slice()
         const versions = root.thumbVersions.slice()
         let changed = false
@@ -425,22 +367,21 @@ Popup {
         easing.type: Easing.OutQuad
     }
 
-    Timer {
-        id: poll
-        interval: 40
-        repeat: true
-        onTriggered: root.refresh()
-    }
-    Timer {
-        id: wavePoll
-        interval: 250
-        repeat: true
-        onTriggered: {
+    // On the mixer's 30 Hz beat rather than two timers of this popup's own:
+    // the pads and the meter every tick, the tapes every eighth (about
+    // 250 ms).
+    property int ticks: 0
+    Connections {
+        target: Mixer
+        enabled: root.visible
+        function onTick() {
+            root.refresh()
+            if (++root.ticks % 8 !== 0) return
             // Only the growing take needs the tape rescanned on a clock;
             // everything else is caught by the pad's version.
             if (root.recording && root.recPad === root.focused)
-                root.peaks = Mixer.samplerWaveform(root.targetRow, root.targetSlot,
-                                                   root.focused, 160)
+                root.takePeaks(Mixer.samplerWaveform(root.targetRow, root.targetSlot,
+                                                     root.focused, 160))
             root.refreshWave()
         }
     }
@@ -500,90 +441,51 @@ Popup {
             // for it, the pad in hand, the last thing the controller sent,
             // and the kit's own level - separate from the channel meter in
             // the mixer, which is the kit plus whatever passes through live.
-            Rectangle {
+            StageChip {
                 id: stageChip
                 Layout.preferredWidth: Px.px(320)
                 Layout.preferredHeight: Skin.buttonHeight + Px.px(6)
-                radius: Skin.radius
-                color: Skin.slotEmpty
-                border.width: 1
-                border.color: Qt.rgba(root.stateHue.r, root.stateHue.g, root.stateHue.b, 0.6)
-                property real pulse: 1
+                hue: root.stateHue
+                busy: root.busy
+                lit: root.sounding !== 0
+                label: root.countingIn ? String(root.countInLeft) : root.stateLabel
+                labelSize: root.countingIn ? Skin.fontXL : Skin.fontL
 
-                SequentialAnimation on pulse {
-                    running: root.busy
-                    loops: Animation.Infinite
-                    NumberAnimation { from: 1; to: 0.35; duration: 420; easing.type: Easing.InOutSine }
-                    NumberAnimation { from: 0.35; to: 1; duration: 420; easing.type: Easing.InOutSine }
+                Text {
+                    text: root.focusedName
+                    color: Skin.text
+                    font.pixelSize: Skin.fontS
+                    font.bold: true
+                    elide: Text.ElideRight
+                    Layout.maximumWidth: Px.px(90)
                 }
 
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: Skin.spacing
-                    anchors.rightMargin: Skin.spacing
-                    spacing: Skin.spacingS
-
-                    Rectangle {
-                        Layout.preferredWidth: Px.px(10)
-                        Layout.preferredHeight: Px.px(10)
-                        radius: width / 2
-                        color: root.stateHue
-                        opacity: root.busy ? stageChip.pulse
-                               : root.sounding !== 0 ? 1 : 0.5
-                    }
-
-                    Text {
-                        text: root.countingIn ? root.countInLeft : root.stateLabel
-                        color: root.stateHue
-                        font.pixelSize: root.countingIn ? Skin.fontXL : Skin.fontL
-                        font.bold: true
-                        font.letterSpacing: Px.px(1)
-                    }
-
-                    // The pad in hand, by name and by key.
-                    Text {
-                        text: root.focusedName
-                        color: Skin.text
-                        font.pixelSize: Skin.fontS
-                        font.bold: true
-                        elide: Text.ElideRight
-                        Layout.maximumWidth: Px.px(90)
-                    }
-                    Text {
-                        text: root.noteName(root.focusedPad.note)
-                        color: Skin.textDim
-                        font.pixelSize: Skin.fontS
-                        font.family: Skin.monoFamily
-                    }
-
-                    // The last note or CC that reached this chip, whether
-                    // or not a pad owns it: for wiring a controller by eye.
-                    Text {
-                        Layout.fillWidth: true
-                        text: root.lastNote >= 0 ? qsTr("note %1").arg(root.lastNote)
-                            : root.lastCc >= 0 ? qsTr("CC %1").arg(root.lastCc)
-                            : ""
-                        color: Skin.focus
-                        font.pixelSize: Skin.fontXS
-                        font.family: Skin.monoFamily
-                        elide: Text.ElideRight
-                    }
-
-                    Meter {
-                        visible: root.anyAudio || root.recording
-                        vertical: false
-                        showHold: true
-                        Layout.preferredWidth: Px.px(56)
-                        Layout.alignment: Qt.AlignVCenter
-                        position: root.level
-                        hold: root.levelHold
-                    }
+                Text {
+                    text: root.noteName(root.focusedPad.note)
+                    color: Skin.textDim
+                    font.pixelSize: Skin.fontS
+                    font.family: Skin.monoFamily
                 }
 
-                HoverHandler { id: stageHover }
-                Tip {
-                    text: qsTr("What the sampler is doing, which pad is in hand and on which key, the last note or CC the controller sent, and how hot the kit itself runs - apart from whatever is passing through live.")
-                    visible: stageHover.hovered
+                Text {
+                    Layout.fillWidth: true
+                    text: root.lastNote >= 0 ? qsTr("note %1").arg(root.lastNote)
+                        : root.lastCc >= 0 ? qsTr("CC %1").arg(root.lastCc)
+                        : ""
+                    color: Skin.focus
+                    font.pixelSize: Skin.fontXS
+                    font.family: Skin.monoFamily
+                    elide: Text.ElideRight
+                }
+
+                Meter {
+                    visible: root.anyAudio || root.recording
+                    vertical: false
+                    showHold: true
+                    Layout.preferredWidth: Px.px(56)
+                    Layout.alignment: Qt.AlignVCenter
+                    position: root.level
+                    hold: root.levelHold
                 }
             }
 
@@ -1035,13 +937,17 @@ Popup {
                                 height: parent.height - 2 * Skin.spacingL
 
                                 Repeater {
-                                    model: root.peaks
+                                    // The count, not the list: the bars are
+                                    // built once and read their own bucket.
+                                    model: root.peaks.length
 
                                     Rectangle {
-                                        required property real modelData
+                                        id: bar
+                                        required property int index
                                         width: Math.max(1, bars.width / Math.max(1, root.peaks.length))
                                         height: Math.max(Px.px(2),
-                                                         Math.min(1, modelData) * bars.height)
+                                                         Math.min(1, bar.index < root.peaks.length
+                                                                     ? root.peaks[bar.index] : 0) * bars.height)
                                         anchors.verticalCenter: bars.verticalCenter
                                         color: Skin.accent
                                         opacity: 0.85
@@ -1184,157 +1090,70 @@ Popup {
                         // Trim handles: full-height, dragged to wherever the
                         // pad should start and stop, with a tab at each end
                         // that is easier to find than a hairline.
-                        component TrimHandle: Item {
-                            id: handle
-                            required property bool isStart
-                            property int atX: 0
-                            readonly property bool lit: dragHover.hovered || drag.active
-
-                            x: handle.atX - width / 2
-                            width: Px.px(14)
-                            height: wave.height
-
-                            Rectangle {
-                                anchors.horizontalCenter: parent.horizontalCenter
-                                anchors.top: parent.top
-                                anchors.bottom: parent.bottom
-                                width: Px.px(4)
-                                radius: Skin.radiusS
-                                color: handle.lit ? Skin.focus : Skin.accent
-                            }
-                            Rectangle {
-                                anchors.horizontalCenter: parent.horizontalCenter
-                                anchors.top: parent.top
-                                width: parent.width
-                                height: Px.px(10)
-                                radius: Skin.radiusS
-                                color: handle.lit ? Skin.focus : Skin.accent
-                            }
-                            Rectangle {
-                                anchors.horizontalCenter: parent.horizontalCenter
-                                anchors.bottom: parent.bottom
-                                width: parent.width
-                                height: Px.px(10)
-                                radius: Skin.radiusS
-                                color: handle.lit ? Skin.focus : Skin.accent
-                            }
-
-                            HoverHandler { id: dragHover; cursorShape: Qt.SizeHorCursor }
-                            Tip {
-                                text: handle.isStart
-                                      ? qsTr("Where the pad starts. Drag it in to trim the head.")
-                                      : qsTr("Where the pad ends. Drag it in to trim the tail.")
-                                visible: dragHover.hovered && !drag.active
-                            }
-
-                            DragHandler {
-                                id: drag
-                                target: null
-                                // Both axes, or a slightly vertical drag is a
-                                // better match for the fader sitting under
-                                // this popup and steals the grab mid-trim.
-                                xAxis.enabled: true
-                                yAxis.enabled: true
-                                grabPermissions: PointerHandler.CanTakeOverFromAnything
-                                                 | PointerHandler.ApprovesTakeOverByNothing
-                                onCentroidChanged: if (drag.active) {
-                                    const fraction = Math.max(0, Math.min(1,
-                                        (handle.x + handle.width / 2 + drag.centroid.position.x
-                                         - drag.centroid.pressPosition.x) / wave.width))
-                                    if (handle.isStart)
-                                        root.trimStart = Math.min(fraction, root.trimEnd - 0.02)
-                                    else
-                                        root.trimEnd = Math.max(fraction, root.trimStart + 0.02)
-                                    Mixer.setSamplerTrim(root.targetRow, root.targetSlot,
-                                                         root.focused, root.trimStart, root.trimEnd)
-                                }
-                            }
-                        }
 
                         TrimHandle {
                             isStart: true
                             atX: wave.trimStartX
                             visible: wave.hasAudio
+                            height: wave.height
+                            span: wave.width
+                            start: root.trimStart
+                            end: root.trimEnd
+                            tip: qsTr("Where the pad starts. Drag it in to trim the head.")
+                            onMoved: (start, end) => {
+                                root.trimStart = start
+                                root.trimEnd = end
+                                Mixer.setSamplerTrim(root.targetRow, root.targetSlot,
+                                                     root.focused, root.trimStart, root.trimEnd)
+                            }
                         }
                         TrimHandle {
                             isStart: false
                             atX: wave.trimEndX
                             visible: wave.hasAudio
+                            height: wave.height
+                            span: wave.width
+                            start: root.trimStart
+                            end: root.trimEnd
+                            tip: qsTr("Where the pad ends. Drag it in to trim the tail.")
+                            onMoved: (start, end) => {
+                                root.trimStart = start
+                                root.trimEnd = end
+                                Mixer.setSamplerTrim(root.targetRow, root.targetSlot,
+                                                     root.focused, root.trimStart, root.trimEnd)
+                            }
                         }
 
                         // Fade handles: small marks that only move between
                         // their own trim edge and the window's midpoint.
-                        component FadeHandle: Item {
-                            id: fadeHandle
-                            required property bool isIn
-                            property int atX: 0
-                            readonly property bool lit: fadeHover.hovered || fadeDrag.active
-
-                            x: fadeHandle.atX - width / 2
-                            anchors.verticalCenter: wave.verticalCenter
-                            width: Px.px(22)
-                            height: Px.px(22)
-
-                            Rectangle {
-                                anchors.centerIn: parent
-                                width: Px.px(12)
-                                height: Px.px(12)
-                                radius: width / 2
-                                color: fadeHandle.lit ? Skin.focus : Skin.solo
-                                Rectangle {
-                                    anchors.centerIn: parent
-                                    width: parent.width * 1.8
-                                    height: width
-                                    radius: width / 2
-                                    color: "transparent"
-                                    border.width: Px.px(2)
-                                    border.color: fadeHandle.lit ? Skin.focus : Skin.solo
-                                    opacity: 0.45
-                                }
-                            }
-
-                            HoverHandler { id: fadeHover; cursorShape: Qt.SizeHorCursor }
-                            Tip {
-                                text: fadeHandle.isIn
-                                      ? qsTr("Fade in. Drag it right and the pad swells from silence.")
-                                      : qsTr("Fade out. Drag it left and the pad sinks to silence before the end.")
-                                visible: fadeHover.hovered && !fadeDrag.active
-                            }
-
-                            DragHandler {
-                                id: fadeDrag
-                                target: null
-                                xAxis.enabled: true
-                                yAxis.enabled: true
-                                grabPermissions: PointerHandler.CanTakeOverFromAnything
-                                                 | PointerHandler.ApprovesTakeOverByNothing
-                                onCentroidChanged: if (fadeDrag.active) {
-                                    const half = Math.max(1, wave.halfWindow)
-                                    const x = fadeHandle.x + fadeHandle.width / 2
-                                              + fadeDrag.centroid.position.x
-                                              - fadeDrag.centroid.pressPosition.x
-                                    if (fadeHandle.isIn) {
-                                        root.fadeIn = Math.max(0, Math.min(1,
-                                            (x - wave.trimStartX) / half))
-                                    } else {
-                                        root.fadeOut = Math.max(0, Math.min(1,
-                                            (wave.trimEndX - x) / half))
-                                    }
-                                    Mixer.setSamplerFades(root.targetRow, root.targetSlot,
-                                                          root.focused, root.fadeIn, root.fadeOut)
-                                }
-                            }
-                        }
 
                         FadeHandle {
                             isIn: true
                             atX: wave.fadeInX
                             visible: wave.hasAudio
+                            anchors.verticalCenter: wave.verticalCenter
+                            trimStartX: wave.trimStartX
+                            trimEndX: wave.trimEndX
+                            tip: qsTr("Fade in. Drag it right and the pad swells from silence.")
+                            onMoved: fraction => {
+                                root.fadeIn = fraction
+                                Mixer.setSamplerFades(root.targetRow, root.targetSlot,
+                                                      root.focused, root.fadeIn, root.fadeOut)
+                            }
                         }
                         FadeHandle {
                             isIn: false
                             atX: wave.fadeOutX
                             visible: wave.hasAudio
+                            anchors.verticalCenter: wave.verticalCenter
+                            trimStartX: wave.trimStartX
+                            trimEndX: wave.trimEndX
+                            tip: qsTr("Fade out. Drag it left and the pad sinks to silence before the end.")
+                            onMoved: fraction => {
+                                root.fadeOut = fraction
+                                Mixer.setSamplerFades(root.targetRow, root.targetSlot,
+                                                      root.focused, root.fadeIn, root.fadeOut)
+                            }
                         }
                     }
                 }

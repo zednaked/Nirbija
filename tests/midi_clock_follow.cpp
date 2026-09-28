@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // Sends a MIDI beat clock at a known tempo into the engine's clock_in port and
 // checks that the transport follows it: start, tempo, position and stop.
 //

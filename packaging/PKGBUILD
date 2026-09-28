@@ -1,0 +1,39 @@
+# Maintainer: Thiago Gonçalves
+# Arch package built from the git tree: makepkg -si from this directory, or
+# push it to the AUR as nirbija-git. Runtime is what the binary links against;
+# jack is satisfied by pipewire-jack on a PipeWire machine.
+pkgname=nirbija-git
+pkgver=0.4.0.r0
+pkgrel=1
+pkgdesc="A Linux mixer that is also an instrument: drone, sampler, looper, sequencer, plus LV2/CLAP/VST3 hosting"
+arch=('x86_64' 'aarch64')
+url="https://github.com/zednaked/Nirbija"
+license=('GPL-3.0-only')
+depends=('qt6-declarative' 'qt6-base' 'jack' 'libsndfile' 'lilv' 'lua' 'systemd-libs' 'libx11')
+makedepends=('git' 'cmake' 'ninja' 'pkgconf')
+optdepends=('pipewire-jack: JACK over PipeWire'
+            'realtime-privileges: lets the audio thread lock its memory (add the user to the realtime group)'
+            'mesa: forces the Mesa GLX vendor for plugin editors that open black')
+provides=('nirbija')
+conflicts=('nirbija')
+source=("git+https://github.com/zednaked/Nirbija.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd Nirbija
+  local v
+  v=$(sed -n 's/^project(nirbija VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+  printf '%s.r%s.g%s' "$v" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  cmake -S Nirbija -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DNIRBIJA_TESTS=OFF
+  cmake --build build
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+}

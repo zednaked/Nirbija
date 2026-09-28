@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #include "core/keyboard_instrument.h"
 
 #include <algorithm>
@@ -44,7 +46,8 @@ KeyboardInstrumentInstance::KeyboardInstrumentInstance()
 bool KeyboardInstrumentInstance::activate(double sample_rate, uint32_t) {
   sample_rate_ = sample_rate > 0.0 ? sample_rate : 48000.0;
   held_.fill(false);
-  event_count_ = 0;
+  out_.clear();
+  release_all_.store(false, std::memory_order_relaxed);
   // Drop anything a previous activation left queued rather than let it fire
   // the moment this one starts processing.
   KeyEvent discard;
@@ -55,7 +58,7 @@ bool KeyboardInstrumentInstance::activate(double sample_rate, uint32_t) {
 
 void KeyboardInstrumentInstance::deactivate() {
   held_.fill(false);
-  event_count_ = 0;
+  out_.clear();
 }
 
 void KeyboardInstrumentInstance::key_down(int note, int velocity) {
@@ -63,6 +66,7 @@ void KeyboardInstrumentInstance::key_down(int note, int velocity) {
   event.note = static_cast<uint8_t>(std::clamp(note, 0, 127));
   event.velocity = static_cast<uint8_t>(std::clamp(velocity, 1, 127));
   event.down = true;
+  // A key-down the queue cannot take is a missed note, and nothing more.
   incoming_.push(event);
 }
 
@@ -70,62 +74,64 @@ void KeyboardInstrumentInstance::key_up(int note) {
   KeyEvent event;
   event.note = static_cast<uint8_t>(std::clamp(note, 0, 127));
   event.down = false;
-  incoming_.push(event);
+  if (!incoming_.push(event))
+    release_all_.store(true, std::memory_order_release);
 }
 
 void KeyboardInstrumentInstance::emit_event(uint32_t frame, uint8_t status,
                                             uint8_t data1, uint8_t data2) {
-  if (event_count_ >= kMaxEvents) return;
-  MidiEvent& event = events_[event_count_++];
-  event.frame = frame;
-  event.size = 3;
-  event.data[0] = status;
-  event.data[1] = data1;
-  event.data[2] = data2;
+  out_.emit(frame, status, data1, data2);
 }
 
 void KeyboardInstrumentInstance::queue_midi(const MidiEvent& event) {
   // Passed along untouched, so a step sequencer or another instrument can sit
   // ahead of this in the same strip and still be heard.
-  if (event_count_ >= kMaxEvents) return;
-  events_[event_count_++] = event;
+  out_.push(event);
 }
 
 void KeyboardInstrumentInstance::process(const float* const*, float* const*,
-                                         uint32_t) {
+                                         uint32_t frames) {
   const uint8_t channel =
       static_cast<uint8_t>(std::clamp(channel_.load(std::memory_order_relaxed), 0, 15));
 
   // Every frame in the block is close enough to the same instant a physical
   // key press already was by the time it got off the UI thread - there is no
-  // finer timestamp worth chasing here.
+  // finer timestamp worth chasing here. The one exception: a key that went
+  // down and up inside this same block. Its off goes one frame later than
+  // its on, because the output sorts a note-off before a note-on on the same
+  // frame, and the other way round would leave the note ringing.
+  const uint32_t off_after_on = frames > 1 ? 1 : 0;
+  std::array<bool, 128> struck{};
   KeyEvent key;
   while (incoming_.pop(key)) {
     if (key.down) {
       if (held_[key.note]) continue;  // OS key-repeat, or a duplicate press
       held_[key.note] = true;
+      struck[key.note] = true;
       emit_event(0, static_cast<uint8_t>(kNoteOn | channel), key.note,
                 key.velocity);
     } else {
       if (!held_[key.note]) continue;
       held_[key.note] = false;
-      emit_event(0, static_cast<uint8_t>(kNoteOff | channel), key.note, 0);
+      emit_event(struck[key.note] ? off_after_on : 0,
+                 static_cast<uint8_t>(kNoteOff | channel), key.note, 0);
+    }
+  }
+
+  if (release_all_.exchange(false, std::memory_order_acq_rel)) {
+    for (size_t note = 0; note < held_.size(); ++note) {
+      if (!held_[note]) continue;
+      held_[note] = false;
+      emit_event(struck[note] ? off_after_on : 0,
+                 static_cast<uint8_t>(kNoteOff | channel),
+                 static_cast<uint8_t>(note), 0);
     }
   }
 }
 
 size_t KeyboardInstrumentInstance::take_midi_output(MidiEvent* out,
                                                     size_t capacity) {
-  std::sort(events_.begin(), events_.begin() + event_count_,
-            [](const MidiEvent& a, const MidiEvent& b) {
-              if (a.frame != b.frame) return a.frame < b.frame;
-              // Off before on when a key is pressed and released in one block.
-              return (a.data[0] & 0xf0) < (b.data[0] & 0xf0);
-            });
-  const size_t count = std::min(event_count_, capacity);
-  std::copy_n(events_.begin(), count, out);
-  event_count_ = 0;
-  return count;
+  return out_.take(out, capacity);
 }
 
 std::vector<ParameterInfo> KeyboardInstrumentInstance::parameters() const {

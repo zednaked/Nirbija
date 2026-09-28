@@ -1,0 +1,12 @@
+# The style the tree already follows: Google's, two-space indent, 90 columns,
+# pointer hugs the type. Run clang-format on what you touch, not on the tree.
+BasedOnStyle: Google
+ColumnLimit: 90
+IndentWidth: 2
+DerivePointerAlignment: false
+PointerAlignment: Left
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+IncludeBlocks: Preserve
+SortIncludes: CaseSensitive

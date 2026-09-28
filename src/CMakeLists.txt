@@ -18,10 +18,26 @@ add_library(nirbija_core
   core/ble_midi.cpp
 )
 target_include_directories(nirbija_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-pkg_check_modules(SYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
 find_package(Threads REQUIRED)
 target_link_libraries(nirbija_core PUBLIC PkgConfig::JACK
-  PRIVATE PkgConfig::SNDFILE PkgConfig::LUA PkgConfig::SYSTEMD Threads::Threads)
+  PRIVATE PkgConfig::SNDFILE PkgConfig::LUA Threads::Threads)
+
+# The DSP never wants errno set by sqrt(), never wants a trap on a NaN, and is
+# happy to have a*b+c fused: none of that changes a result a listener could
+# hear, and all of it lets the compiler vectorise the per-sample loops. Kept
+# off the UI, where Qt and Lua may care.
+target_compile_options(nirbija_core PRIVATE
+  -fno-math-errno -fno-trapping-math -ffp-contract=fast)
+
+# Bluetooth LE MIDI goes through BlueZ over D-Bus, and the D-Bus client is
+# sd-bus. That makes libsystemd a hard dependency of a mixer, which a distro
+# without systemd cannot meet; off, ble_midi.cpp compiles to a stub that never
+# finds a device and the rest of the host does not notice.
+if(NIRBIJA_BLE_MIDI)
+  pkg_check_modules(SYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
+  target_link_libraries(nirbija_core PRIVATE PkgConfig::SYSTEMD)
+  target_compile_definitions(nirbija_core PUBLIC NIRBIJA_HAVE_BLE_MIDI=1)
+endif()
 
 if(NIRBIJA_LV2)
   target_sources(nirbija_core PRIVATE hosting/lv2_backend.cpp)
@@ -57,7 +73,7 @@ endif()
 
 if(NIRBIJA_VST3)
   target_sources(nirbija_core PRIVATE hosting/vst3_backend.cpp)
-  target_include_directories(nirbija_core PRIVATE ${CMAKE_BINARY_DIR}/vst3)
+  target_include_directories(nirbija_core PRIVATE ${NIRBIJA_VST3_INCLUDE_DIR})
   target_compile_definitions(nirbija_core PUBLIC NIRBIJA_HAVE_VST3=1)
 endif()
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // The two number routines every built-in plugin's state blob goes through.
 // In a file of their own rather than in plugin.cpp so a plugin extracted from
 // the host - the Drone as a CLAP - can carry them without carrying the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #include "hosting/lv2_backend.h"
 
 #include <lilv/lilv.h>
@@ -13,6 +15,8 @@
 #include <lv2/buf-size/buf-size.h>
 #include <lv2/core/lv2.h>
 #include <lv2/options/options.h>
+#include <lv2/parameters/parameters.h>
+#include <lv2/resize-port/resize-port.h>
 #include <lv2/urid/urid.h>
 #include <lv2/worker/worker.h>
 
@@ -34,6 +38,7 @@
 #include <vector>
 
 #include "core/rt_queue.h"
+#include "hosting/common.h"
 
 namespace nirbija {
 namespace {
@@ -167,8 +172,10 @@ struct AtomBridge {
     std::array<uint8_t, 8192> data{};
   };
 
-  RtQueue<Message, 128> to_ui;
-  RtQueue<Message, 16> to_plugin;
+  // Slot queues, not RtQueue: a Message is 8 KiB, and push-by-value copied
+  // each one twice on the audio thread. Here it is written in place once.
+  hosting::SlotQueue<Message, 128> to_ui;
+  hosting::SlotQueue<Message, 16> to_plugin;
 };
 
 enum class PortKind { Ignored, AudioIn, AudioOut, ControlIn, ControlOut, AtomIn, AtomOut };
@@ -181,6 +188,10 @@ struct PortInfo {
   float min_value = 0.0f;
   float max_value = 1.0f;
   float default_value = 0.0f;
+  // Atom ports: rsz:minimumSize, or 0 when the plugin did not say.
+  uint32_t minimum_size = 0;
+  // Atom ports: atom:supports midi:MidiEvent.
+  bool supports_midi = false;
 };
 
 // Cached lilv URIs, built once per world.
@@ -191,10 +202,13 @@ struct PortClasses {
         cv(lilv_new_uri(world, LV2_CORE__CVPort)),
         atom(lilv_new_uri(world, LV2_ATOM__AtomPort)),
         input(lilv_new_uri(world, LV2_CORE__InputPort)),
-        output(lilv_new_uri(world, LV2_CORE__OutputPort)) {}
+        output(lilv_new_uri(world, LV2_CORE__OutputPort)),
+        midi_event(lilv_new_uri(world, LV2_MIDI__MidiEvent)),
+        minimum_size(lilv_new_uri(world, LV2_RESIZE_PORT__minimumSize)) {}
 
   ~PortClasses() {
-    for (LilvNode* node : {audio, control, cv, atom, input, output})
+    for (LilvNode* node : {audio, control, cv, atom, input, output, midi_event,
+                           minimum_size})
       lilv_node_free(node);
   }
 
@@ -204,6 +218,8 @@ struct PortClasses {
   LilvNode* atom;
   LilvNode* input;
   LilvNode* output;
+  LilvNode* midi_event;
+  LilvNode* minimum_size;
 };
 
 // The lilv world, its cached URIs and the URID map, kept alive by every
@@ -230,17 +246,23 @@ struct Lv2World {
 // exists to wrap editors written for a different toolkit than the host's; an
 // X11 editor needs no wrapping, so this covers the common case without the
 // extra dependency.
+class Lv2Instance;
+
 class Lv2Gui : public PluginGui {
  public:
-  Lv2Gui(std::shared_ptr<Lv2World> world, const LilvPlugin* plugin,
-         LilvInstance* instance, std::vector<float>* control_values,
-         std::vector<PortInfo> control_ports, AtomBridge* bridge,
+  Lv2Gui(Lv2Instance* owner, std::shared_ptr<Lv2World> world,
+         const LilvPlugin* plugin, std::vector<float>* control_values,
+         std::vector<PortInfo> control_ports,
+         std::vector<float>* control_out_values,
+         std::vector<PortInfo> control_out_ports, AtomBridge* bridge,
          std::atomic<bool>* state_dirty)
-      : world_(std::move(world)),
+      : owner_(owner),
+        world_(std::move(world)),
         plugin_(plugin),
-        instance_(instance),
         control_values_(control_values),
         control_ports_(std::move(control_ports)),
+        control_out_values_(control_out_values),
+        control_out_ports_(std::move(control_out_ports)),
         bridge_(bridge),
         state_dirty_(state_dirty),
         event_transfer_urid_(world_->urids.map_string(LV2_ATOM__eventTransfer)) {}
@@ -303,15 +325,22 @@ class Lv2Gui : public PluginGui {
 
   int idle() override {
     if (handle_ == nullptr) return 0;
+
+    // The editor was given instance-access to a DSP instance that no longer
+    // exists (the sample rate changed and the plugin was re-instantiated). Its
+    // pointer is dead; the only safe thing is to have it closed. Non-zero is
+    // "the editor asked to close"; the user reopens it against the new one.
+    if (instance_stale()) return 1;
+
     push_changed_ports();
 
     // Whatever the DSP produced for its editor since the last tick.
     if (bridge_ != nullptr && descriptor_ != nullptr &&
         descriptor_->port_event != nullptr) {
-      AtomBridge::Message message;
-      while (bridge_->to_ui.pop(message)) {
-        descriptor_->port_event(handle_, message.port, message.size,
-                                event_transfer_urid_, message.data.data());
+      while (const AtomBridge::Message* message = bridge_->to_ui.peek()) {
+        descriptor_->port_event(handle_, message->port, message->size,
+                                event_transfer_urid_, message->data.data());
+        bridge_->to_ui.pop();
       }
     }
 
@@ -393,10 +422,14 @@ class Lv2Gui : public PluginGui {
     return true;
   }
 
+  // Defined after Lv2Instance: the DSP instance the editor is given access to,
+  // and whether it has since been replaced.
+  LV2_Handle current_handle() const;
+  bool instance_stale() const;
+
   void instantiate(const char* bundle_path, uintptr_t parent_window) {
     parent_feature_ = {LV2_UI__parent, reinterpret_cast<void*>(parent_window)};
-    instance_feature_ = {LV2_INSTANCE_ACCESS_URI,
-                         lilv_instance_get_handle(instance_)};
+    instance_feature_ = {LV2_INSTANCE_ACCESS_URI, current_handle()};
     idle_feature_ = {LV2_UI__idleInterface, nullptr};
 
     // Editors that lay themselves out ask the host for a size, and several
@@ -428,23 +461,39 @@ class Lv2Gui : public PluginGui {
     // right thing while its editor shows something else entirely.
     last_sent_.assign(control_values_->size(),
                       std::numeric_limits<float>::quiet_NaN());
+    last_sent_out_.assign(control_out_values_->size(),
+                          std::numeric_limits<float>::quiet_NaN());
     push_changed_ports();
   }
 
   // Sends the editor every control value that has moved since it was last
   // told. Also covers changes made from outside the editor — a restored
-  // session, or a parameter set from the host.
+  // session, or a parameter set from the host. Control outputs too: meters
+  // and latency readouts are output ports, and an editor with a meter draws
+  // it from what the host forwards, or draws nothing.
   void push_changed_ports() {
     if (descriptor_ == nullptr || descriptor_->port_event == nullptr) return;
     if (handle_ == nullptr) return;
 
     for (size_t i = 0; i < control_ports_.size() && i < control_values_->size();
          ++i) {
-      const float value = (*control_values_)[i];
+      const float value =
+          std::atomic_ref<float>((*control_values_)[i]).load(std::memory_order_relaxed);
       if (last_sent_[i] == value) continue;
       last_sent_[i] = value;
       descriptor_->port_event(handle_, control_ports_[i].index, sizeof(float), 0,
                               &value);
+    }
+    for (size_t i = 0;
+         i < control_out_ports_.size() && i < control_out_values_->size(); ++i) {
+      // The audio thread writes these through the plugin, plainly; the
+      // atomic read at least cannot tear.
+      const float value = std::atomic_ref<float>((*control_out_values_)[i])
+                              .load(std::memory_order_relaxed);
+      if (last_sent_out_[i] == value) continue;
+      last_sent_out_[i] = value;
+      descriptor_->port_event(handle_, control_out_ports_[i].index, sizeof(float),
+                              0, &value);
     }
   }
 
@@ -471,12 +520,13 @@ class Lv2Gui : public PluginGui {
 
     if (format == self->event_transfer_urid_) {
       if (self->bridge_ == nullptr) return;
-      AtomBridge::Message message;
-      if (buffer_size > message.data.size()) return;
-      message.port = port_index;
-      message.size = buffer_size;
-      std::memcpy(message.data.data(), buffer, buffer_size);
-      self->bridge_->to_plugin.push(message);
+      AtomBridge::Message* message = self->bridge_->to_plugin.begin_push();
+      if (message == nullptr) return;  // ring full: the editor repeats itself
+      if (buffer_size > message->data.size()) return;
+      message->port = port_index;
+      message->size = buffer_size;
+      std::memcpy(message->data.data(), buffer, buffer_size);
+      self->bridge_->to_plugin.commit_push();
       return;
     }
 
@@ -485,16 +535,23 @@ class Lv2Gui : public PluginGui {
     const float value = *static_cast<const float*>(buffer);
     for (size_t i = 0; i < self->control_ports_.size(); ++i) {
       if (self->control_ports_[i].index != port_index) continue;
-      (*self->control_values_)[i] = value;
+      // The audio thread reads this float through the port the plugin is
+      // connected to; the store is atomic so it never sees half of it.
+      std::atomic_ref<float>((*self->control_values_)[i])
+          .store(value, std::memory_order_relaxed);
       return;
     }
   }
 
+  Lv2Instance* owner_;
   std::shared_ptr<Lv2World> world_;
   const LilvPlugin* plugin_;
-  LilvInstance* instance_;
+  // Which DSP instance the editor was built against, see instance_stale().
+  mutable uint64_t attached_generation_ = 0;
   std::vector<float>* control_values_;
   std::vector<PortInfo> control_ports_;
+  std::vector<float>* control_out_values_;
+  std::vector<PortInfo> control_out_ports_;
 
   void* library_ = nullptr;
   const LV2UI_Descriptor* descriptor_ = nullptr;
@@ -503,6 +560,7 @@ class Lv2Gui : public PluginGui {
   const LV2UI_Idle_Interface* idle_iface_ = nullptr;
   // What the editor has already been told, so idle only sends what moved.
   std::vector<float> last_sent_;
+  std::vector<float> last_sent_out_;
   AtomBridge* bridge_;
   std::atomic<bool>* state_dirty_;
   LV2_URID event_transfer_urid_;
@@ -522,71 +580,119 @@ class Lv2Instance : public PluginInstance {
     scan_ports(*world_->classes);
   }
 
-  ~Lv2Instance() override { deactivate(); }
+  ~Lv2Instance() override {
+    deactivate();
+    destroy_instance();
+  }
 
   bool activate(double sample_rate, uint32_t max_block_frames) override {
-    // A period change must not free the instance: a live editor holds
-    // instance-access to this handle. Grow buffers and reconnect instead.
+    // LV2 fixes the sample rate at instantiation: there is no way to tell a
+    // running instance the rate moved, so a plugin kept across a rate change
+    // would play everything transposed. The state is carried across a fresh
+    // instantiation instead. The editor, if open, holds instance-access to
+    // the old instance and is told to close (see Lv2Gui::idle).
+    if (instance_ != nullptr && sample_rate != sample_rate_) {
+      const std::vector<uint8_t> carried = save_state();
+      deactivate();
+      destroy_instance();
+      if (!activate(sample_rate, max_block_frames)) return false;
+      if (!carried.empty()) load_state(carried);
+      return true;
+    }
+
+    // Same instance, brought back (or grown): a period change must not free
+    // the instance - a live editor holds instance-access to this handle. Grow
+    // buffers, reconnect, and re-activate instead.
     if (instance_ != nullptr) {
+      // Nothing to change: same block, already running. The park below costs
+      // a real wait per plugin, and prepare() calls this for every insert.
+      if (activated_ && max_block_frames <= max_block_frames_ &&
+          static_cast<int32_t>(max_block_frames) == nominal_block_length_)
+        return true;
+
+      // Reallocating buffers instance_ is connected to races the audio
+      // thread the same way a state restore does, so borrow that guard:
+      // silence process() and wait for it to be seen before touching them.
+      quiet_.store(true, std::memory_order_release);
+      if (!wait_until_parked()) {
+        // Never confirmed the audio thread left lilv_instance_run; leave the
+        // instance exactly as it is rather than reallocate under it.
+        quiet_.store(false, std::memory_order_release);
+        return activated_;
+      }
       if (max_block_frames > max_block_frames_) {
-        // Reallocating buffers instance_ is connected to races the audio
-        // thread the same way a state restore does, so borrow that guard:
-        // silence process() and wait for it to be seen before touching them.
-        restoring_.store(true, std::memory_order_release);
-        wait_until_parked();
         max_block_frames_ = max_block_frames;
         for (auto& buffer : audio_buffers_)
           buffer.assign(max_block_frames_, 0.0f);
-        connect_all();
-        restoring_.store(false, std::memory_order_release);
-      } else {
-        connect_all();
       }
+      connect_all();
+      update_options(max_block_frames);
+      if (!activated_) {
+        if (worker_iface_ != nullptr) start_worker();
+        lilv_instance_activate(instance_);
+        activated_ = true;
+      }
+      quiet_.store(false, std::memory_order_release);
       return true;
     }
+
+    sample_rate_ = sample_rate;
     max_block_frames_ = max_block_frames;
 
     // Features are handed to the plugin by pointer and must outlive it, so they
     // live in members rather than locals.
     build_features(max_block_frames);
     lv2_atom_forge_init(&forge_, world_->urids.map_feature());
+    forges_.assign(atom_in_.size(), forge_);
+    forge_frames_.assign(atom_in_.size(), LV2_Atom_Forge_Frame{});
 
     instance_ = lilv_plugin_instantiate(plugin_, sample_rate, features_.data());
     if (instance_ == nullptr) return false;
+    instance_generation_.fetch_add(1, std::memory_order_acq_rel);
 
     // Audio buffers are per-port and owned here, so a plugin with more ports
     // than the strip is wide still gets a valid buffer for every one.
     audio_buffers_.assign(audio_in_.size() + audio_out_.size(),
                           std::vector<float>(max_block_frames, 0.0f));
-    // Atom ports get a small buffer each: inputs an empty sequence, outputs
-    // scratch the plugin may fill and we discard until MIDI lands.
-    atom_buffers_.assign(atom_in_.size() + atom_out_.size(),
-                         std::vector<uint8_t>(kAtomBufferBytes, 0));
+    // Atom ports get a buffer each, as big as the plugin asked for and never
+    // smaller than the default: inputs an empty sequence, outputs scratch the
+    // plugin may fill.
+    atom_buffers_.clear();
+    for (const PortInfo& port : atom_in_)
+      atom_buffers_.emplace_back(atom_buffer_bytes(port), 0);
+    for (const PortInfo& port : atom_out_)
+      atom_buffers_.emplace_back(atom_buffer_bytes(port), 0);
 
     connect_all();
 
     worker_iface_ = static_cast<const LV2_Worker_Interface*>(
         lilv_instance_get_extension_data(instance_, LV2_WORKER__interface));
+    options_iface_ = static_cast<const LV2_Options_Interface*>(
+        lilv_instance_get_extension_data(instance_, LV2_OPTIONS__interface));
     if (worker_iface_ != nullptr) start_worker();
 
     midnam_iface_ = static_cast<const LV2_Midnam_Interface*>(
         lilv_instance_get_extension_data(instance_, LV2_MIDNAM__interface));
-    note_names_dirty_gen_.fetch_add(1, std::memory_order_acq_rel);
+    note_names_.invalidate();
 
     lilv_instance_activate(instance_);
+    activated_ = true;
+    quiet_.store(false, std::memory_order_release);
     return true;
   }
 
+  // Stops the instance without freeing it: its state, its editor's
+  // instance-access and its buffers all survive, and activate() brings it
+  // back. Only the destructor and a sample-rate change free it.
   void deactivate() override {
-    if (instance_ == nullptr) return;
+    if (instance_ == nullptr || !activated_) return;
+    // process() must be out of lilv_instance_run before deactivate, and must
+    // stay out until activate: quiet_ stays set in between.
+    quiet_.store(true, std::memory_order_release);
+    wait_until_parked();
     stop_worker();
     lilv_instance_deactivate(instance_);
-    worker_iface_ = nullptr;
-    midnam_iface_ = nullptr;
-    note_names_dirty_gen_.fetch_add(1, std::memory_order_acq_rel);
-    note_names_.clear();
-    lilv_instance_free(instance_);
-    instance_ = nullptr;
+    activated_ = false;
   }
 
   void set_transport(const TransportInfo& transport) override {
@@ -595,19 +701,19 @@ class Lv2Instance : public PluginInstance {
   }
 
   void queue_midi(const MidiEvent& event) override {
-    if (atom_in_.empty() || event.size == 0) return;
+    if (midi_in_ < 0 || event.size == 0) return;
     if (!midi_queue_admits(pending_midi_count_, pending_midi_.size(), event))
       return;  // block overrun; note-offs get the last of the room
     pending_midi_[pending_midi_count_++] = event;
   }
 
-  // Reads MIDI the plugin wrote to its first atom output port. A step
+  // Reads MIDI the plugin wrote to its MIDI atom output port. A step
   // sequencer's entire output lives here.
   size_t take_midi_output(MidiEvent* out, size_t capacity) override {
-    if (atom_out_.empty() || instance_ == nullptr) return 0;
+    if (midi_out_ < 0 || instance_ == nullptr) return 0;
 
     const auto* sequence = reinterpret_cast<const LV2_Atom_Sequence*>(
-        atom_buffers_[atom_in_.size()].data());
+        atom_buffers_[atom_in_.size() + static_cast<size_t>(midi_out_)].data());
     if (sequence->atom.type != sequence_urid_) return 0;
 
     size_t written = 0;
@@ -629,23 +735,18 @@ class Lv2Instance : public PluginInstance {
                uint32_t frames) override {
     if (instance_ == nullptr) return;
 
-    // Restore in progress on the UI thread: the instance may be deactivated
-    // under us, so this block is silence and nothing else.
-    if (restoring_.load(std::memory_order_acquire)) {
+    // The UI thread has the instance: a restore, a deactivate, a buffer
+    // change. This block is silence and nothing else, and the counter says
+    // we saw it.
+    if (quiet_.load(std::memory_order_acquire)) {
       for (int ch = 0; ch < strip_channels_; ++ch)
         std::fill_n(outputs[ch], frames, 0.0f);
       processed_generation_.fetch_add(1, std::memory_order_release);
       return;
     }
 
-    // The strip is narrower than the plugin as often as not. Extra plugin inputs
-    // get a copy of the last channel we have rather than silence, which is what
-    // a mono source into a stereo effect should sound like.
-    const int strip_channels = strip_channels_;
-    for (size_t i = 0; i < audio_in_.size(); ++i) {
-      const int source = std::min(static_cast<int>(i), strip_channels - 1);
-      std::copy_n(inputs[source], frames, audio_buffers_[i].data());
-    }
+    hosting::copy_strip_inputs(inputs, strip_channels_, audio_in_ptrs_.data(),
+                               audio_in_ptrs_.size(), frames);
 
     reset_atom_inputs();
     write_input_events();
@@ -653,13 +754,8 @@ class Lv2Instance : public PluginInstance {
     deliver_worker_responses();
     forward_atoms_to_ui();
 
-    const size_t out_base = audio_in_.size();
-    for (int ch = 0; ch < strip_channels; ++ch) {
-      if (audio_out_.empty()) break;
-      const size_t source =
-          out_base + std::min(static_cast<size_t>(ch), audio_out_.size() - 1);
-      std::copy_n(audio_buffers_[source].data(), frames, outputs[ch]);
-    }
+    hosting::copy_strip_outputs(audio_out_ptrs_.data(), audio_out_ptrs_.size(),
+                                outputs, strip_channels_, frames);
   }
 
   void set_channel_layout(int channels) override { strip_channels_ = channels; }
@@ -673,22 +769,13 @@ class Lv2Instance : public PluginInstance {
   }
 
   int extra_output_pairs() const override {
-    const int extra = static_cast<int>(audio_out_.size()) - strip_channels_;
-    return extra > 0 ? (extra + 1) / 2 : 0;
+    return hosting::extra_output_pairs(audio_out_.size(), strip_channels_);
   }
 
   void copy_extra_output(int pair, float* left, float* right,
                          uint32_t frames) override {
-    const size_t base = audio_in_.size() + static_cast<size_t>(strip_channels_) +
-                        static_cast<size_t>(pair) * 2;
-    if (base < audio_buffers_.size())
-      std::copy_n(audio_buffers_[base].data(), frames, left);
-    else
-      std::fill_n(left, frames, 0.0f);
-    if (base + 1 < audio_buffers_.size())
-      std::copy_n(audio_buffers_[base + 1].data(), frames, right);
-    else
-      std::copy_n(left, frames, right);
+    hosting::copy_extra_output(audio_out_ptrs_.data(), audio_out_ptrs_.size(),
+                               strip_channels_, pair, left, right, frames);
   }
 
   std::vector<ParameterInfo> parameters() const override {
@@ -704,14 +791,19 @@ class Lv2Instance : public PluginInstance {
 
   double parameter_value(uint32_t id) const override {
     if (id >= control_values_.size()) return 0.0;
-    return control_values_[id];
+    return std::atomic_ref<const float>(control_values_[id])
+        .load(std::memory_order_relaxed);
   }
 
   void set_parameter(uint32_t id, double value) override {
     if (id >= control_values_.size()) return;
     const PortInfo& port = control_in_[id];
-    control_values_[id] = std::clamp(static_cast<float>(value), port.min_value,
-                                     port.max_value);
+    // The plugin reads this float straight from the connected port on the
+    // audio thread; an atomic store is the one way to never hand it a torn
+    // value.
+    std::atomic_ref<float>(control_values_[id])
+        .store(std::clamp(static_cast<float>(value), port.min_value, port.max_value),
+               std::memory_order_relaxed);
   }
 
   // Real LV2 state, not just the control ports: a sampler's loaded file or a
@@ -752,23 +844,26 @@ class Lv2Instance : public PluginInstance {
     // parked first: a flag makes process() emit silence, two observed blocks
     // prove it is out of lilv_instance_run, and only then is the instance
     // deactivated, restored with the full feature set, and brought back.
-    restoring_.store(true, std::memory_order_release);
+    const bool was_activated = activated_;
+    quiet_.store(true, std::memory_order_release);
     const bool parked = wait_until_parked();
     if (!parked) {
       // Never confirmed the audio thread left lilv_instance_run: restoring
       // now would race it, so back out instead of risking a use-after-free.
-      restoring_.store(false, std::memory_order_release);
+      quiet_.store(!was_activated, std::memory_order_release);
       lilv_state_free(state);
       return false;
     }
 
-    lilv_instance_deactivate(instance_);
+    if (was_activated) lilv_instance_deactivate(instance_);
     lilv_state_restore(state, instance_, &Lv2Instance::set_port_value, this, 0,
                        map_path_features());
-    note_names_dirty_gen_.fetch_add(1, std::memory_order_acq_rel);
-    lilv_instance_activate(instance_);
+    note_names_.invalidate();
+    if (was_activated) {
+      lilv_instance_activate(instance_);
+      quiet_.store(false, std::memory_order_release);
+    }
 
-    restoring_.store(false, std::memory_order_release);
     lilv_state_free(state);
     return true;
   }
@@ -785,55 +880,66 @@ class Lv2Instance : public PluginInstance {
       bridge_ = std::make_unique<AtomBridge>();
       bridge_live_.store(bridge_.get(), std::memory_order_release);
     }
-    return std::make_unique<Lv2Gui>(world_, plugin_, instance_, &control_values_,
-                                    control_in_, bridge_.get(), &state_dirty_);
+    return std::make_unique<Lv2Gui>(this, world_, plugin_, &control_values_,
+                                    control_in_, &control_outputs_scratch_,
+                                    control_out_, bridge_.get(), &state_dirty_);
   }
 
   bool take_state_dirty() override {
     const bool dirty = state_dirty_.exchange(false, std::memory_order_acq_rel);
-    if (dirty) note_names_dirty_gen_.fetch_add(1, std::memory_order_acq_rel);
+    if (dirty) note_names_.invalidate();
     return dirty;
   }
 
   std::vector<NoteName> note_names() const override {
-    if (note_names_cached_gen_ != note_names_dirty_gen_.load(std::memory_order_acquire))
-      refresh_note_names();
-    return note_names_;
+    if (note_names_.stale()) refresh_note_names();
+    return note_names_.names();
+  }
+
+  // For the editor: the instance it is given access to, and a count that moves
+  // every time that instance is replaced.
+  LV2_Handle instance_handle() const {
+    return instance_ != nullptr ? lilv_instance_get_handle(instance_) : nullptr;
+  }
+  uint64_t instance_generation() const {
+    return instance_generation_.load(std::memory_order_acquire);
   }
 
  private:
-  // Waits for two blocks that observed the restoring_ flag, which is what
-  // proves the audio thread is out of lilv_instance_run.
-  //
-  // The counter only moves inside that branch, so no movement at all means
-  // process() is not being called — the host graph is already parked, or there
-  // is no audio thread. That is the common case on session load, and the old
-  // unconditional 100 x 2 ms spin charged it 200 ms for every plugin.
+  // Waits for two blocks that observed the quiet_ flag, which is what proves
+  // the audio thread is out of lilv_instance_run. The counter only moves
+  // inside that branch, so no movement at all means process() is not being
+  // called — the host graph is already parked, or there is no audio thread.
   // Returns whether the audio thread was confirmed parked (or was never
-  // running process() at all). False means the wait timed out with the
-  // audio thread still moving, and the caller must not touch the instance.
+  // running process() at all). False means the wait timed out with the audio
+  // thread still moving, and the caller must not touch the instance.
   bool wait_until_parked() {
-    const uint64_t seen = processed_generation_.load(std::memory_order_acquire);
+    return hosting::wait_for_audio_thread(
+        processed_generation_, [this](uint64_t seen) {
+          return processed_generation_.load(std::memory_order_acquire) >= seen + 2;
+        });
+  }
 
-    bool moving = false;
-    for (int spins = 0; spins < 5 && !moving; ++spins) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(2));
-      moving = processed_generation_.load(std::memory_order_acquire) > seen;
-    }
-    if (!moving) return true;  // nothing is calling process(); nothing to wait for
-
-    for (int spins = 0;
-         spins < 100 &&
-         processed_generation_.load(std::memory_order_acquire) < seen + 2;
-         ++spins) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    }
-    return processed_generation_.load(std::memory_order_acquire) >= seen + 2;
+  void destroy_instance() {
+    if (instance_ == nullptr) return;
+    worker_iface_ = nullptr;
+    options_iface_ = nullptr;
+    midnam_iface_ = nullptr;
+    note_names_.clear();
+    lilv_instance_free(instance_);
+    instance_ = nullptr;
+    // A generation the editor never saw: whichever it was attached to is gone.
+    instance_generation_.fetch_add(1, std::memory_order_acq_rel);
   }
 
   // Room for a full pending_midi_ of three-byte events, each an atom of its
-  // own with a frame time: 24 bytes apiece, plus the transport.
+  // own with a frame time: 24 bytes apiece, plus the transport. A plugin may
+  // ask for more through rsz:minimumSize, never for less.
   static constexpr size_t kAtomBufferBytes = 32768;
+
+  static size_t atom_buffer_bytes(const PortInfo& port) {
+    return std::max<size_t>(kAtomBufferBytes, port.minimum_size);
+  }
 
   // State is kept in memory rather than in a bundle on disk, so the subject URI
   // only has to be stable, not resolvable.
@@ -860,7 +966,8 @@ class Lv2Instance : public PluginInstance {
     if (size != sizeof(float) || type != self->float_urid_) return;
     for (size_t i = 0; i < self->control_in_.size(); ++i) {
       if (self->control_in_[i].symbol != port_symbol) continue;
-      self->control_values_[i] = *static_cast<const float*>(value);
+      std::atomic_ref<float>(self->control_values_[i])
+          .store(*static_cast<const float*>(value), std::memory_order_relaxed);
       return;
     }
   }
@@ -897,6 +1004,12 @@ class Lv2Instance : public PluginInstance {
           control_out_.push_back(info);
         }
       } else if (lilv_port_is_a(plugin_, port, classes.atom)) {
+        info.supports_midi = lilv_port_supports_event(plugin_, port, classes.midi_event);
+        if (LilvNode* minimum = lilv_port_get(plugin_, port, classes.minimum_size)) {
+          if (lilv_node_is_int(minimum) && lilv_node_as_int(minimum) > 0)
+            info.minimum_size = static_cast<uint32_t>(lilv_node_as_int(minimum));
+          lilv_node_free(minimum);
+        }
         (is_input ? atom_in_ : atom_out_).push_back(info);
       } else if (lilv_port_is_a(plugin_, port, classes.cv)) {
         // CV is not routed yet; the port still needs a buffer so the plugin does
@@ -906,10 +1019,35 @@ class Lv2Instance : public PluginInstance {
     }
     control_outputs_scratch_.assign(control_out_.size(), 0.0f);
 
-    for (size_t i = 0; i < control_out_.size(); ++i) {
-      if (control_out_[i].symbol == "latency") {
+    // MIDI goes to the atom port that says it takes MIDI, not to whichever
+    // atom port comes first: a plugin with a control atom port ahead of its
+    // MIDI port would otherwise never hear a note. A plugin that says nothing
+    // gets the first one, which is what it always got.
+    auto pick_midi = [](const std::vector<PortInfo>& ports) {
+      for (size_t i = 0; i < ports.size(); ++i)
+        if (ports[i].supports_midi) return static_cast<int>(i);
+      return ports.empty() ? -1 : 0;
+    };
+    midi_in_ = pick_midi(atom_in_);
+    midi_out_ = pick_midi(atom_out_);
+
+    // Latency is the control output the plugin marked lv2:reportsLatency (or
+    // designated lv2:latency); lilv resolves both. The symbol "latency" is
+    // the fallback for plugins that only named it.
+    if (lilv_plugin_has_latency(plugin_)) {
+      const uint32_t index = lilv_plugin_get_latency_port_index(plugin_);
+      for (size_t i = 0; i < control_out_.size(); ++i) {
+        if (control_out_[i].index != index) continue;
         latency_port_ = static_cast<int>(i);
         break;
+      }
+    }
+    if (latency_port_ < 0) {
+      for (size_t i = 0; i < control_out_.size(); ++i) {
+        if (control_out_[i].symbol == "latency") {
+          latency_port_ = static_cast<int>(i);
+          break;
+        }
       }
     }
   }
@@ -974,17 +1112,43 @@ class Lv2Instance : public PluginInstance {
       worker_iface_->end_run(lilv_instance_get_handle(instance_));
   }
 
+  // --- options ------------------------------------------------------------
+
+  // The values the option list points at. Members: the plugin keeps the
+  // pointers for as long as it lives.
+  void set_option_values(uint32_t nominal_block) {
+    max_block_length_ = static_cast<int32_t>(max_block_frames_);
+    nominal_block_length_ = static_cast<int32_t>(nominal_block);
+    min_block_length_ = 1;
+    sample_rate_option_ = static_cast<float>(sample_rate_);
+    size_t sequence = kAtomBufferBytes;
+    for (const PortInfo& port : atom_in_)
+      sequence = std::max(sequence, atom_buffer_bytes(port));
+    sequence_size_ = static_cast<int32_t>(sequence);
+  }
+
   void build_features(uint32_t max_block_frames) {
     map_feature_ = {LV2_URID__map, urids_.map_feature()};
     unmap_feature_ = {LV2_URID__unmap, urids_.unmap_feature()};
 
     const LV2_URID int_urid = urids_.map_string(LV2_ATOM__Int);
-    block_length_ = static_cast<int32_t>(max_block_frames);
+    const LV2_URID float_urid = urids_.map_string(LV2_ATOM__Float);
+    set_option_values(max_block_frames);
+    // min is 1, not the block size: JACK hands a shorter block at a period
+    // change and on the last cycle before a stop, and a plugin told the
+    // minimum was 256 is entitled to assume it. Nominal is what it usually
+    // gets, max what it must survive.
     options_ = {
         {LV2_OPTIONS_INSTANCE, 0, urids_.map_string(LV2_BUF_SIZE__maxBlockLength),
-         sizeof(int32_t), int_urid, &block_length_},
+         sizeof(int32_t), int_urid, &max_block_length_},
         {LV2_OPTIONS_INSTANCE, 0, urids_.map_string(LV2_BUF_SIZE__minBlockLength),
-         sizeof(int32_t), int_urid, &block_length_},
+         sizeof(int32_t), int_urid, &min_block_length_},
+        {LV2_OPTIONS_INSTANCE, 0, urids_.map_string(LV2_BUF_SIZE__nominalBlockLength),
+         sizeof(int32_t), int_urid, &nominal_block_length_},
+        {LV2_OPTIONS_INSTANCE, 0, urids_.map_string(LV2_BUF_SIZE__sequenceSize),
+         sizeof(int32_t), int_urid, &sequence_size_},
+        {LV2_OPTIONS_INSTANCE, 0, urids_.map_string(LV2_PARAMETERS__sampleRate),
+         sizeof(float), float_urid, &sample_rate_option_},
         {LV2_OPTIONS_INSTANCE, 0, 0, 0, 0, nullptr},
     };
     options_feature_ = {LV2_OPTIONS__options, options_.data()};
@@ -1007,39 +1171,34 @@ class Lv2Instance : public PluginInstance {
                  &midnam_feature_,  nullptr};
   }
 
-  static void midnam_changed(void* handle) {
-    static_cast<Lv2Instance*>(handle)->note_names_dirty_gen_.fetch_add(
-        1, std::memory_order_acq_rel);
+  // The block sizes moved after instantiation. A plugin with the options
+  // interface is told; one without keeps what it was told at instantiation,
+  // which is why maxBlockLength only ever grows. Called with the audio thread
+  // parked: set() is in the instantiation class and must not overlap run().
+  void update_options(uint32_t nominal_block) {
+    const int32_t old_max = max_block_length_;
+    const int32_t old_nominal = nominal_block_length_;
+    set_option_values(nominal_block);
+    if (options_iface_ == nullptr || options_iface_->set == nullptr) return;
+    if (old_max == max_block_length_ && old_nominal == nominal_block_length_) return;
+    const LV2_Options_Option changed[] = {options_[0], options_[2], options_[5]};
+    options_iface_->set(lilv_instance_get_handle(instance_), changed);
   }
 
-  // midnam_changed can fire from any thread while this runs (Ardour's
-  // midnam extension makes no threading promise). A plain "valid" flag set
-  // at the end would clobber an invalidation that landed mid-read, so this
-  // retries until the generation it started with is still current.
+  static void midnam_changed(void* handle) {
+    static_cast<Lv2Instance*>(handle)->note_names_.invalidate();
+  }
+
   void refresh_note_names() const {
-    // Bounded: Ardour's midnam extension makes no threading promise, so a
-    // plugin that keeps bumping the generation could otherwise spin the
-    // calling thread forever. Settle for a possibly-stale result after a
-    // few tries rather than freeze.
-    static constexpr int kMaxAttempts = 8;
-    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
-      const uint64_t gen = note_names_dirty_gen_.load(std::memory_order_acquire);
-      note_names_.clear();
-      if (instance_ != nullptr && midnam_iface_ != nullptr &&
-          midnam_iface_->midnam != nullptr) {
-        char* xml = midnam_iface_->midnam(lilv_instance_get_handle(instance_));
-        if (xml != nullptr) {
-          note_names_ = parse_midnam_notes(xml);
-          if (midnam_iface_->free != nullptr) midnam_iface_->free(xml);
-        }
-      }
-      if (note_names_dirty_gen_.load(std::memory_order_acquire) == gen) {
-        note_names_cached_gen_ = gen;
+    note_names_.refresh([this](std::vector<NoteName>& out) {
+      if (instance_ == nullptr || midnam_iface_ == nullptr ||
+          midnam_iface_->midnam == nullptr)
         return;
-      }
-      // Still moving: note_names_cached_gen_ is left stale on purpose, so
-      // the next call (if any) will simply try again, bounded the same way.
-    }
+      char* xml = midnam_iface_->midnam(lilv_instance_get_handle(instance_));
+      if (xml == nullptr) return;
+      out = parse_midnam_notes(xml);
+      if (midnam_iface_->free != nullptr) midnam_iface_->free(xml);
+    });
   }
 
   static char* abstract_path(LV2_State_Map_Path_Handle, const char* path) {
@@ -1052,12 +1211,18 @@ class Lv2Instance : public PluginInstance {
   const LV2_Feature* const* map_path_features() const { return features_.data(); }
 
   void connect_all() {
-    for (size_t i = 0; i < audio_in_.size(); ++i)
+    audio_in_ptrs_.clear();
+    audio_out_ptrs_.clear();
+    for (size_t i = 0; i < audio_in_.size(); ++i) {
+      audio_in_ptrs_.push_back(audio_buffers_[i].data());
       lilv_instance_connect_port(instance_, audio_in_[i].index,
                                  audio_buffers_[i].data());
-    for (size_t i = 0; i < audio_out_.size(); ++i)
+    }
+    for (size_t i = 0; i < audio_out_.size(); ++i) {
+      audio_out_ptrs_.push_back(audio_buffers_[audio_in_.size() + i].data());
       lilv_instance_connect_port(instance_, audio_out_[i].index,
                                  audio_buffers_[audio_in_.size() + i].data());
+    }
 
     for (size_t i = 0; i < control_in_.size(); ++i)
       lilv_instance_connect_port(instance_, control_in_[i].index,
@@ -1074,50 +1239,81 @@ class Lv2Instance : public PluginInstance {
                                  atom_buffers_[atom_in_.size() + i].data());
   }
 
-  // Builds this block's input sequence on the first atom port, which is where a
-  // synth listens: the transport first, then the MIDI. Both have to go through
-  // the forge because an atom object is not something to hand-assemble.
+  // Whether `forge` can take `bytes` more. The forge refuses an atom that does
+  // not fit, but only after the frame time before it went in - and a time
+  // stamp with no atom behind it is a corrupt sequence. So the room is checked
+  // for the whole event before either half is written.
+  static bool forge_has_room(const LV2_Atom_Forge& forge, size_t bytes) {
+    return static_cast<size_t>(forge.offset) + bytes <= forge.size;
+  }
+
+  // Builds this block's input sequences: on the MIDI port the transport first,
+  // then the MIDI; on every atom input whatever its editor asked to reach the
+  // DSP. Everything goes through the forge, because an atom object is not
+  // something to hand-assemble.
+  //
+  // MIDI goes in before the editor's messages: when the block is too full for
+  // both it is the editor's message that is dropped, never a note, and never
+  // a note-off.
   void write_input_events() {
     if (atom_in_.empty()) return;
 
-    lv2_atom_forge_set_buffer(&forge_, atom_buffers_[0].data(), kAtomBufferBytes);
+    for (size_t k = 0; k < atom_in_.size(); ++k) {
+      lv2_atom_forge_set_buffer(&forges_[k], atom_buffers_[k].data(),
+                                atom_buffers_[k].size());
+      lv2_atom_forge_sequence_head(&forges_[k], &forge_frames_[k], 0);
+    }
 
-    LV2_Atom_Forge_Frame sequence;
-    lv2_atom_forge_sequence_head(&forge_, &sequence, 0);
+    if (midi_in_ >= 0) {
+      LV2_Atom_Forge& forge = forges_[static_cast<size_t>(midi_in_)];
+      if (has_transport_) write_transport(forge);
 
-    if (has_transport_) write_transport();
+      for (size_t i = 0; i < pending_midi_count_; ++i) {
+        const MidiEvent& event = pending_midi_[i];
+        const size_t needed = sizeof(LV2_Atom_Event) + lv2_atom_pad_size(event.size);
+        if (!forge_has_room(forge, needed)) break;
+        if (lv2_atom_forge_frame_time(&forge, event.frame) == 0) break;
+        if (lv2_atom_forge_atom(&forge, event.size, midi_event_urid_) == 0) break;
+        if (lv2_atom_forge_write(&forge, event.data, event.size) == 0) break;
+      }
+    }
+    pending_midi_count_ = 0;
 
     // Anything the editor asked to reach the DSP, injected as events at the
-    // start of the block.
+    // start of the block, on the port it named.
     if (AtomBridge* bridge = bridge_live_.load(std::memory_order_acquire)) {
-      AtomBridge::Message message;
-      while (bridge->to_plugin.pop(message)) {
-        if (message.port != atom_in_[0].index) continue;
-        if (message.size < sizeof(LV2_Atom)) continue;
-        const auto* atom = reinterpret_cast<const LV2_Atom*>(message.data.data());
+      while (const AtomBridge::Message* message = bridge->to_plugin.peek()) {
+        // Popped whatever happens to it: a message that cannot be delivered
+        // must not clog the ring for the ones behind it.
+        struct Pop {
+          AtomBridge* bridge;
+          ~Pop() { bridge->to_plugin.pop(); }
+        } pop{bridge};
+
+        size_t k = 0;
+        while (k < atom_in_.size() && atom_in_[k].index != message->port) ++k;
+        if (k == atom_in_.size()) continue;
+        if (message->size < sizeof(LV2_Atom)) continue;
+        const auto* atom = reinterpret_cast<const LV2_Atom*>(message->data.data());
         // The header's own length field is the editor's word, not ours: an
         // atom claiming more than arrived would read off the end of the ring.
         const size_t total = sizeof(LV2_Atom) + atom->size;
-        if (total > message.size) continue;
-        lv2_atom_forge_frame_time(&forge_, 0);
-        lv2_atom_forge_raw(&forge_, atom, total);
-        lv2_atom_forge_pad(&forge_, total);
+        if (total > message->size) continue;
+        LV2_Atom_Forge& forge = forges_[k];
+        if (!forge_has_room(forge, sizeof(int64_t) + lv2_atom_pad_size(total)))
+          continue;
+        if (lv2_atom_forge_frame_time(&forge, 0) == 0) continue;
+        lv2_atom_forge_raw(&forge, atom, total);
+        lv2_atom_forge_pad(&forge, total);
       }
     }
 
-    for (size_t i = 0; i < pending_midi_count_; ++i) {
-      const MidiEvent& event = pending_midi_[i];
-      lv2_atom_forge_frame_time(&forge_, event.frame);
-      lv2_atom_forge_atom(&forge_, event.size, midi_event_urid_);
-      lv2_atom_forge_write(&forge_, event.data, event.size);
-    }
+    for (size_t k = 0; k < atom_in_.size(); ++k)
+      lv2_atom_forge_pop(&forges_[k], &forge_frames_[k]);
 
-    lv2_atom_forge_pop(&forge_, &sequence);
-    pending_midi_count_ = 0;
-
-    if (debug_transport_) {
-      const auto* written =
-          reinterpret_cast<const LV2_Atom_Sequence*>(atom_buffers_[0].data());
+    if (debug_transport_ && midi_in_ >= 0) {
+      const auto* written = reinterpret_cast<const LV2_Atom_Sequence*>(
+          atom_buffers_[static_cast<size_t>(midi_in_)].data());
       uint32_t events = 0;
       LV2_ATOM_SEQUENCE_FOREACH(written, event) { (void)event; ++events; }
       std::fprintf(stderr,
@@ -1130,32 +1326,36 @@ class Lv2Instance : public PluginInstance {
 
   // A time:Position object at the start of the block. Without it a sequencer
   // has no clock and simply never advances.
-  void write_transport() {
+  void write_transport(LV2_Atom_Forge& forge) {
+    // Seven properties of a few bytes each; well under this, and a buffer
+    // that cannot take it is too small for the MIDI behind it anyway.
+    if (!forge_has_room(forge, 256)) return;
+
     const double beats_per_bar = static_cast<double>(transport_.numerator);
     const double bars = beats_per_bar > 0.0 ? transport_.beats / beats_per_bar : 0.0;
     const double bar = std::floor(bars);
 
     LV2_Atom_Forge_Frame object;
-    lv2_atom_forge_frame_time(&forge_, 0);
-    lv2_atom_forge_object(&forge_, &object, 0, time_position_urid_);
+    lv2_atom_forge_frame_time(&forge, 0);
+    lv2_atom_forge_object(&forge, &object, 0, time_position_urid_);
 
-    lv2_atom_forge_key(&forge_, time_frame_urid_);
-    lv2_atom_forge_long(&forge_, static_cast<int64_t>(transport_.frame));
-    lv2_atom_forge_key(&forge_, time_speed_urid_);
-    lv2_atom_forge_float(&forge_, transport_.playing ? 1.0f : 0.0f);
-    lv2_atom_forge_key(&forge_, time_bar_urid_);
-    lv2_atom_forge_long(&forge_, static_cast<int64_t>(bar));
-    lv2_atom_forge_key(&forge_, time_bar_beat_urid_);
-    lv2_atom_forge_float(&forge_,
+    lv2_atom_forge_key(&forge, time_frame_urid_);
+    lv2_atom_forge_long(&forge, static_cast<int64_t>(transport_.frame));
+    lv2_atom_forge_key(&forge, time_speed_urid_);
+    lv2_atom_forge_float(&forge, transport_.playing ? 1.0f : 0.0f);
+    lv2_atom_forge_key(&forge, time_bar_urid_);
+    lv2_atom_forge_long(&forge, static_cast<int64_t>(bar));
+    lv2_atom_forge_key(&forge, time_bar_beat_urid_);
+    lv2_atom_forge_float(&forge,
                          static_cast<float>((bars - bar) * beats_per_bar));
-    lv2_atom_forge_key(&forge_, time_beats_per_bar_urid_);
-    lv2_atom_forge_float(&forge_, static_cast<float>(beats_per_bar));
-    lv2_atom_forge_key(&forge_, time_beat_unit_urid_);
-    lv2_atom_forge_int(&forge_, transport_.denominator);
-    lv2_atom_forge_key(&forge_, time_bpm_urid_);
-    lv2_atom_forge_float(&forge_, static_cast<float>(transport_.tempo_bpm));
+    lv2_atom_forge_key(&forge, time_beats_per_bar_urid_);
+    lv2_atom_forge_float(&forge, static_cast<float>(beats_per_bar));
+    lv2_atom_forge_key(&forge, time_beat_unit_urid_);
+    lv2_atom_forge_int(&forge, transport_.denominator);
+    lv2_atom_forge_key(&forge, time_bpm_urid_);
+    lv2_atom_forge_float(&forge, static_cast<float>(transport_.tempo_bpm));
 
-    lv2_atom_forge_pop(&forge_, &object);
+    lv2_atom_forge_pop(&forge, &object);
   }
 
   // Copies what the DSP wrote to its atom outputs into the ring the editor
@@ -1171,12 +1371,13 @@ class Lv2Instance : public PluginInstance {
 
       LV2_ATOM_SEQUENCE_FOREACH(sequence, event) {
         const uint32_t total = sizeof(LV2_Atom) + event->body.size;
-        AtomBridge::Message message;
-        if (total > message.data.size()) continue;  // oversized frame, skip
-        message.port = atom_out_[out].index;
-        message.size = total;
-        std::memcpy(message.data.data(), &event->body, total);
-        if (!bridge->to_ui.push(message)) return;  // ring full, UI will catch up
+        AtomBridge::Message* message = bridge->to_ui.begin_push();
+        if (message == nullptr) return;  // ring full, UI will catch up
+        if (total > message->data.size()) continue;  // oversized frame, skip
+        message->port = atom_out_[out].index;
+        message->size = total;
+        std::memcpy(message->data.data(), &event->body, total);
+        bridge->to_ui.commit_push();
       }
     }
   }
@@ -1193,9 +1394,9 @@ class Lv2Instance : public PluginInstance {
       sequence->body.pad = 0;
     }
     for (size_t i = 0; i < atom_out_.size(); ++i) {
-      auto* sequence =
-          reinterpret_cast<LV2_Atom_Sequence*>(atom_buffers_[atom_in_.size() + i].data());
-      sequence->atom.size = kAtomBufferBytes - sizeof(LV2_Atom);
+      auto& buffer = atom_buffers_[atom_in_.size() + i];
+      auto* sequence = reinterpret_cast<LV2_Atom_Sequence*>(buffer.data());
+      sequence->atom.size = static_cast<uint32_t>(buffer.size() - sizeof(LV2_Atom));
       sequence->atom.type = sequence_urid;
     }
   }
@@ -1205,11 +1406,18 @@ class Lv2Instance : public PluginInstance {
   std::shared_ptr<Lv2World> world_;
   UridMap& urids_;
   LilvInstance* instance_ = nullptr;
+  bool activated_ = false;
+  // Moves whenever instance_ is created or freed; the editor compares.
+  std::atomic<uint64_t> instance_generation_{0};
 
   int strip_channels_ = 2;
+  double sample_rate_ = 0.0;
   uint32_t max_block_frames_ = 0;
-  // Index into control_out_ of the port named "latency", or -1 for none.
+  // Index into control_out_ of the latency port, or -1 for none.
   int latency_port_ = -1;
+  // Index into atom_in_/atom_out_ of the port MIDI travels on, or -1.
+  int midi_in_ = -1;
+  int midi_out_ = -1;
   // Read once at construction, not per block: getenv walks the environment.
   const bool debug_transport_ = std::getenv("NIRBIJA_DEBUG_TRANSPORT") != nullptr;
 
@@ -1218,6 +1426,7 @@ class Lv2Instance : public PluginInstance {
   std::vector<float> control_values_;
   std::vector<float> control_outputs_scratch_;
   std::vector<std::vector<float>> audio_buffers_;
+  std::vector<float*> audio_in_ptrs_, audio_out_ptrs_;
   std::vector<std::vector<uint8_t>> atom_buffers_;
 
   LV2_URID sequence_urid_ = urids_.map_string(LV2_ATOM__Sequence);
@@ -1232,11 +1441,17 @@ class Lv2Instance : public PluginInstance {
   LV2_URID time_beat_unit_urid_ = urids_.map_string(LV2_TIME__beatUnit);
   LV2_URID time_bpm_urid_ = urids_.map_string(LV2_TIME__beatsPerMinute);
 
+  // One forge per atom input, so a block's events can be spread over several
+  // ports in one pass.
   LV2_Atom_Forge forge_{};
+  std::vector<LV2_Atom_Forge> forges_;
+  std::vector<LV2_Atom_Forge_Frame> forge_frames_;
   TransportInfo transport_;
   bool has_transport_ = false;
 
-  std::atomic<bool> restoring_{false};
+  // process() emits silence and counts the block while this is set: the UI
+  // thread has the instance (restore, deactivate, buffer change).
+  std::atomic<bool> quiet_{true};
   std::atomic<bool> state_dirty_{false};
   std::atomic<uint64_t> processed_generation_{0};
 
@@ -1244,16 +1459,17 @@ class Lv2Instance : public PluginInstance {
   // more than this is a chord nobody plays.
   std::array<MidiEvent, 1024> pending_midi_{};
   size_t pending_midi_count_ = 0;
-  int32_t block_length_ = 0;
+  int32_t max_block_length_ = 0;
+  int32_t min_block_length_ = 1;
+  int32_t nominal_block_length_ = 0;
+  int32_t sequence_size_ = 0;
+  float sample_rate_option_ = 0.0f;
   LV2_Feature map_feature_{}, unmap_feature_{}, options_feature_{}, bounded_feature_{};
   LV2_Feature worker_feature_{}, map_path_feature_{}, midnam_feature_{};
   LV2_Midnam midnam_host_{};
   const LV2_Midnam_Interface* midnam_iface_ = nullptr;
-  // See refresh_note_names(): a generation counter, not a bool, so a
-  // cross-thread invalidation during refresh can't be silently overwritten.
-  mutable std::atomic<uint64_t> note_names_dirty_gen_{1};
-  mutable uint64_t note_names_cached_gen_ = 0;
-  mutable std::vector<NoteName> note_names_;
+  const LV2_Options_Interface* options_iface_ = nullptr;
+  hosting::NoteNameCache note_names_;
   LV2_State_Map_Path map_path_{};
   LV2_Worker_Schedule schedule_{};
   std::vector<LV2_Options_Option> options_;
@@ -1268,6 +1484,15 @@ class Lv2Instance : public PluginInstance {
   RtQueue<WorkMessage, 32> work_requests_;
   RtQueue<WorkMessage, 32> work_responses_;
 };
+
+LV2_Handle Lv2Gui::current_handle() const {
+  attached_generation_ = owner_->instance_generation();
+  return owner_->instance_handle();
+}
+
+bool Lv2Gui::instance_stale() const {
+  return owner_->instance_generation() != attached_generation_;
+}
 
 class Lv2Backend : public PluginBackend {
  public:

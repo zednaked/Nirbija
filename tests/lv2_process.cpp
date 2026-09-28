@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // Loads real LV2 plugins installed on this machine, runs audio through them and
 // checks the output is sane. Mocking a plugin here would test nothing: the whole
 // point of a host is surviving third-party code.
@@ -83,7 +85,7 @@ int main() {
 
   if (backend == nullptr) {
     std::printf("LV2 backend not compiled in, skipping\n");
-    return 0;
+    return 77;
   }
 
   const auto all = backend->scan();
@@ -123,7 +125,7 @@ int main() {
       find_by_name(all, "Dragonfly Hall Reverb");
   if (reverb == nullptr) {
     std::printf("Dragonfly Hall Reverb not installed, skipping\n");
-    return failures > 0 ? 1 : 0;
+    return failures > 0 ? 1 : 77;
   }
 
   auto plugin = backend->instantiate(*reverb);
@@ -157,6 +159,33 @@ int main() {
     if (plugin->parameter_value(id) == original) fail("set_parameter had no effect");
     if (!plugin->load_state(blob)) fail("load_state rejected its own blob");
     if (plugin->parameter_value(id) != original) fail("state round-trip lost a value");
+  }
+
+  // A JACK period change re-activates every insert with a bigger block: the
+  // instance must come back with its state, not be built again at defaults.
+  if (!params.empty()) {
+    const uint32_t id = params.front().id;
+    const double moved =
+        (plugin->parameter_value(id) == params.front().max_value)
+            ? params.front().min_value
+            : params.front().max_value;
+    plugin->set_parameter(id, moved);
+    plugin->deactivate();
+    if (!plugin->activate(kSampleRate, kBlock * 4))
+      fail("re-activate with a bigger block failed");
+    if (plugin->parameter_value(id) != moved) fail("re-activation lost a parameter");
+    if (tail_after_impulse(*plugin, 2) <= 1e-5f)
+      fail("re-activated plugin is silent");
+
+    // A sample-rate change means a new LV2 instance; the state must ride
+    // across it.
+    if (!plugin->activate(44100.0, kBlock)) fail("activate at 44.1k failed");
+    if (plugin->parameter_value(id) != moved)
+      fail("the sample-rate change lost a parameter");
+    if (tail_after_impulse(*plugin, 2) <= 1e-5f)
+      fail("plugin re-instantiated at 44.1k is silent");
+    if (plugin->latency_samples() > 48000)
+      fail("latency reads garbage after re-instantiation");
   }
 
   plugin->deactivate();

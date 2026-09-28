@@ -1,6 +1,11 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #include "hosting/clap_backend.h"
 
 #include "core/rt_queue.h"
+#include "hosting/clap_events.h"
+#include "hosting/common.h"
+#include "hosting/gui_resize.h"
 
 #include <clap/clap.h>
 #include <dlfcn.h>
@@ -11,14 +16,12 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
-#include <map>
 #include <memory>
-#include <mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace nirbija {
@@ -38,6 +41,7 @@ std::vector<fs::path> clap_search_paths() {
 class ClapModule {
  public:
   static std::shared_ptr<ClapModule> open(const fs::path& path) {
+    hosting::module_open_count().fetch_add(1, std::memory_order_relaxed);
     void* handle = dlopen(path.c_str(), RTLD_LOCAL | RTLD_NOW);
     if (handle == nullptr) return nullptr;
 
@@ -71,18 +75,34 @@ class ClapModule {
 // window and lets it draw inside; nothing is reparented behind its back.
 class ClapInstance;
 
-class ClapGui : public PluginGui {
+class ClapGui : public PluginGui, public hosting::ResizablePluginGui {
  public:
   ClapGui(ClapInstance* owner, const clap_plugin_t* plugin,
-          const clap_plugin_gui_t* gui)
-      : owner_(owner), plugin_(plugin), gui_(gui) {}
+          const clap_plugin_gui_t* gui);
 
-  ~ClapGui() override { detach(); }
+  ~ClapGui() override;
 
   bool attach(uintptr_t parent_window) override {
     if (created_) detach();
     if (!gui_->create(plugin_, CLAP_WINDOW_API_X11, false)) return false;
     created_ = true;
+    close_requested_.store(false, std::memory_order_relaxed);
+    pending_resize_.store(0, std::memory_order_relaxed);
+
+    // The order the extension prescribes: scale, then size, then parent, then
+    // show. A plugin told its parent before its size lays out once at some
+    // default and again at the real one, and a few only ever do the first.
+    gui_->set_scale(plugin_, 1.0);
+    resizable_ = gui_->can_resize(plugin_);
+
+    // The plugin knows what size it wants, but it will not lay itself out
+    // until the host confirms one, so ask and then tell. A fixed-size editor
+    // is not told: set_size on one is a contract violation some enforce.
+    uint32_t width = 0;
+    uint32_t height = 0;
+    if (gui_->get_size(plugin_, &width, &height) && width > 0 && height > 0 &&
+        resizable_)
+      gui_->set_size(plugin_, width, height);
 
     clap_window_t window{};
     window.api = CLAP_WINDOW_API_X11;
@@ -91,13 +111,6 @@ class ClapGui : public PluginGui {
       detach();
       return false;
     }
-
-    // The plugin knows what size it wants, but it will not lay itself out
-    // until the host confirms one, so ask and then tell.
-    uint32_t width = 0;
-    uint32_t height = 0;
-    if (gui_->get_size(plugin_, &width, &height) && width > 0 && height > 0)
-      gui_->set_size(plugin_, width, height);
 
     gui_->show(plugin_);
     return true;
@@ -124,11 +137,56 @@ class ClapGui : public PluginGui {
     return true;
   }
 
+  // --- hosting::ResizablePluginGui ---
+  // The plugin asked, through clap_host_gui.request_resize, for its client
+  // area to be this big. Returned once per request; the window that embeds the
+  // editor is expected to poll this right after idle(), resize itself, and
+  // then call resized() with what it settled on.
+  bool take_resize_request(int* width, int* height) override {
+    const uint64_t packed = pending_resize_.exchange(0, std::memory_order_acq_rel);
+    if (packed == 0) return false;
+    *width = static_cast<int>(packed >> 32);
+    *height = static_cast<int>(packed & 0xffffffffu);
+    return true;
+  }
+
+  // The embedding window is now `width` x `height`. Tells a resizable editor
+  // so it can lay out; a fixed one already is what it is.
+  void resized(int width, int height) override {
+    if (!created_ || !resizable_ || width <= 0 || height <= 0) return;
+    uint32_t w = static_cast<uint32_t>(width);
+    uint32_t h = static_cast<uint32_t>(height);
+    // adjust_size lets the plugin round to a size it can actually draw at -
+    // an aspect ratio, a step - before it is committed to.
+    gui_->adjust_size(plugin_, &w, &h);
+    gui_->set_size(plugin_, w, h);
+  }
+
+  bool resizable() const override { return resizable_; }
+
+  // What the plugin would make of a size the user is dragging towards.
+  bool constrain_size(int* width, int* height) const override {
+    if (!created_ || !resizable_ || *width <= 0 || *height <= 0) return false;
+    uint32_t w = static_cast<uint32_t>(*width);
+    uint32_t h = static_cast<uint32_t>(*height);
+    if (!gui_->adjust_size(plugin_, &w, &h)) return false;
+    *width = static_cast<int>(w);
+    *height = static_cast<int>(h);
+    return true;
+  }
+
  private:
+  friend class ClapInstance;
+
   ClapInstance* owner_;
   const clap_plugin_t* plugin_;
   const clap_plugin_gui_t* gui_;
   bool created_ = false;
+  bool resizable_ = false;
+  // width << 32 | height, zero for none. Written from whatever thread the
+  // plugin calls request_resize on, read on the main thread.
+  std::atomic<uint64_t> pending_resize_{0};
+  std::atomic<bool> close_requested_{false};
 };
 
 class ClapInstance : public PluginInstance {
@@ -157,6 +215,22 @@ class ClapInstance : public PluginInstance {
     // reached the session file.
     state_support_.mark_dirty = &ClapInstance::host_mark_dirty;
     note_name_host_.changed = &ClapInstance::host_note_name_changed;
+
+    latency_host_.changed = &ClapInstance::host_latency_changed;
+    params_host_.rescan = &ClapInstance::host_params_rescan;
+    params_host_.clear = &ClapInstance::host_params_clear;
+    params_host_.request_flush = &ClapInstance::host_params_request_flush;
+    gui_host_.resize_hints_changed = &ClapInstance::host_gui_resize_hints_changed;
+    gui_host_.request_resize = &ClapInstance::host_gui_request_resize;
+    gui_host_.request_show = &ClapInstance::host_gui_request_show;
+    gui_host_.request_hide = &ClapInstance::host_gui_request_hide;
+    gui_host_.closed = &ClapInstance::host_gui_closed;
+    audio_ports_host_.is_rescan_flag_supported =
+        &ClapInstance::host_audio_ports_is_rescan_flag_supported;
+    audio_ports_host_.rescan = &ClapInstance::host_audio_ports_rescan;
+
+    discard_out_events_.ctx = nullptr;
+    discard_out_events_.try_push = &ClapInstance::discard_event;
   }
 
   ~ClapInstance() override { destroy(); }
@@ -184,14 +258,22 @@ class ClapInstance : public PluginInstance {
         plugin_->get_extension(plugin_, CLAP_EXT_TIMER_SUPPORT));
     plugin_fds_ = static_cast<const clap_plugin_posix_fd_support_t*>(
         plugin_->get_extension(plugin_, CLAP_EXT_POSIX_FD_SUPPORT));
+    plugin_latency_ = static_cast<const clap_plugin_latency_t*>(
+        plugin_->get_extension(plugin_, CLAP_EXT_LATENCY));
 
     read_port_counts();
     // Whether it takes notes comes from its note ports, once there is an
     // instance to ask. The scan guessed from the feature list; this is the
-    // plugin's own word.
+    // plugin's own word - and so is the dialect: a synth that only speaks
+    // CLAP notes hears nothing in a MIDI event, and would stay silent.
     if (const auto* note_ports = static_cast<const clap_plugin_note_ports_t*>(
-            plugin_->get_extension(plugin_, CLAP_EXT_NOTE_PORTS)))
+            plugin_->get_extension(plugin_, CLAP_EXT_NOTE_PORTS))) {
       desc_.has_midi_input = note_ports->count(plugin_, true) > 0;
+      clap_note_port_info_t info{};
+      if (desc_.has_midi_input && note_ports->get(plugin_, 0, true, &info))
+        dialect_ = hosting::ClapNoteDialect::from_port(info.supported_dialects,
+                                                       info.preferred_dialect);
+    }
     return true;
   }
 
@@ -203,6 +285,8 @@ class ClapInstance : public PluginInstance {
 
     if (!plugin_->activate(plugin_, sample_rate, 1, max_block_frames)) return false;
     active_ = true;
+    sample_rate_ = sample_rate;
+    max_block_ = max_block_frames;
 
     input_channels_.assign(std::max(desc_.audio_inputs, 1),
                            std::vector<float>(max_block_frames, 0.0f));
@@ -212,9 +296,10 @@ class ClapInstance : public PluginInstance {
     output_ptrs_.clear();
     for (auto& channel : input_channels_) input_ptrs_.push_back(channel.data());
     for (auto& channel : output_channels_) output_ptrs_.push_back(channel.data());
-    plugin_latency_ = static_cast<const clap_plugin_latency_t*>(
-        plugin_->get_extension(plugin_, CLAP_EXT_LATENCY));
+    // latency.get is allowed while active or being activated, which this is;
+    // it is not allowed once deactivated, so this is the moment to ask.
     refresh_latency();
+    latency_dirty_.store(false, std::memory_order_relaxed);
 
     want_processing_.store(true, std::memory_order_release);
     return true;
@@ -228,19 +313,9 @@ class ClapInstance : public PluginInstance {
     // stop_processing on the audio thread) before calling plugin_->deactivate,
     // which CLAP requires to happen only once processing has stopped. If
     // nothing is calling process() at all, there is nothing to wait for.
-    const uint64_t seen = process_generation_.load(std::memory_order_acquire);
-    bool moving = false;
-    for (int spins = 0; spins < 5 && !moving; ++spins) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(2));
-      moving = process_generation_.load(std::memory_order_acquire) > seen;
-    }
-    if (moving) {
-      for (int spins = 0;
-           spins < 100 && processing_.load(std::memory_order_acquire);
-           ++spins) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-      }
-    }
+    hosting::wait_for_audio_thread(process_generation_, [this](uint64_t) {
+      return !processing_.load(std::memory_order_acquire);
+    });
 
     plugin_->deactivate(plugin_);
     active_ = false;
@@ -264,12 +339,8 @@ class ClapInstance : public PluginInstance {
     }
     if (!proc) return;
 
-    // Feed every plugin input, duplicating the last strip channel when the
-    // plugin is wider than the strip.
-    for (size_t i = 0; i < input_ptrs_.size(); ++i) {
-      const int source = std::min(static_cast<int>(i), strip_channels_ - 1);
-      std::copy_n(inputs[source], frames, input_ptrs_[i]);
-    }
+    hosting::copy_strip_inputs(inputs, strip_channels_, input_ptrs_.data(),
+                               input_ptrs_.size(), frames);
 
     clap_audio_buffer_t in_bus{};
     in_bus.data32 = input_ptrs_.data();
@@ -296,33 +367,35 @@ class ClapInstance : public PluginInstance {
     while (pending_n < kMaxBlockMidi && param_queue_.pop(incoming))
       pending[pending_n++] = incoming;
     in_events_.rebuild(pending, pending_n, pending_midi_.data(),
-                       pending_midi_count_);
+                       pending_midi_count_, dialect_);
     pending_midi_count_ = 0;
     produced_midi_count_ = 0;
 
     plugin_->process(plugin_, &process);
     steady_time_ += frames;
 
-    for (int ch = 0; ch < strip_channels_; ++ch) {
-      if (output_ptrs_.empty()) break;
-      const size_t source =
-          std::min(static_cast<size_t>(ch), output_ptrs_.size() - 1);
-      std::copy_n(output_ptrs_[source], frames, outputs[ch]);
-    }
+    hosting::copy_strip_outputs(output_ptrs_.data(), output_ptrs_.size(), outputs,
+                                strip_channels_, frames);
   }
 
   std::vector<ParameterInfo> parameters() const override {
-    std::vector<ParameterInfo> out;
-    if (params_ == nullptr) return out;
+    if (params_ == nullptr) return {};
+    if (params_rescan_.exchange(false, std::memory_order_acq_rel))
+      params_cache_valid_ = false;
+    if (params_cache_valid_) return params_cache_;
+
+    params_cache_.clear();
     const uint32_t count = params_->count(plugin_);
-    out.reserve(count);
+    params_cache_.reserve(count);
     for (uint32_t i = 0; i < count; ++i) {
       clap_param_info_t info{};
       if (!params_->get_info(plugin_, i, &info)) continue;
-      out.push_back({static_cast<uint32_t>(info.id), info.name, info.min_value,
-                     info.max_value, info.default_value});
+      params_cache_.push_back({static_cast<uint32_t>(info.id), info.name,
+                               info.min_value, info.max_value,
+                               info.default_value});
     }
-    return out;
+    params_cache_valid_ = true;
+    return params_cache_;
   }
 
   double parameter_value(uint32_t id) const override {
@@ -378,28 +451,79 @@ class ClapInstance : public PluginInstance {
 
   void set_parameter(uint32_t id, double value) override {
     // Parameter changes reach the plugin as events on the next process call,
-    // which is the only way CLAP allows them to be sampled in time.
-    param_queue_.push({id, value});
+    // which is the only way CLAP allows them to be sampled in time - while it
+    // is active. Deactivated, there is no next process call, and the extension
+    // says to hand them over through flush() on the main thread instead.
+    // Without that, every knob turned before the engine started was lost.
+    if (!active_) {
+      const PendingParam single{id, value};
+      flush_params_now(&single, 1);
+      return;
+    }
+    if (!param_queue_.push({id, value}))
+      param_drops_.fetch_add(1, std::memory_order_relaxed);
   }
 
   bool take_state_dirty() override {
     const bool dirty = state_dirty_.exchange(false, std::memory_order_acq_rel);
-    if (dirty) note_names_dirty_gen_.fetch_add(1, std::memory_order_acq_rel);
+    if (dirty) note_names_.invalidate();
     return dirty;
   }
 
   std::vector<NoteName> note_names() const override {
-    if (note_names_cached_gen_ != note_names_dirty_gen_.load(std::memory_order_acquire) ||
-        state_dirty_.load(std::memory_order_acquire))
+    if (note_names_.stale() || state_dirty_.load(std::memory_order_acquire))
       refresh_note_names();
-    return note_names_;
+    return note_names_.names();
   }
 
   void host_idle() override {
     pump_main_thread();
-    // The main thread is the only place allowed to ask, so the audio thread's
-    // cached copy is refreshed on the same tick that pumps the editor.
-    refresh_latency();
+    if (plugin_ == nullptr) return;
+
+    // A plugin that changed its ports, its latency or anything else it may
+    // only change deactivated asks for this and waits. Same instance, same
+    // state; only the activation is redone.
+    if (restart_requested_.exchange(false, std::memory_order_acq_rel) && active_) {
+      deactivate();
+      activate(sample_rate_, max_block_);
+    }
+
+    // latency.get is [main-thread & (being-activated | active)]: the cached
+    // copy the audio thread reads is refreshed here, only while that holds.
+    if (active_ && latency_dirty_.exchange(false, std::memory_order_acq_rel))
+      refresh_latency();
+
+    // params.flush is the main thread's job only while inactive; active, the
+    // plugin's own process() is where its pending changes get flushed.
+    if (flush_requested_.exchange(false, std::memory_order_acq_rel) && !active_)
+      flush_params_now(nullptr, 0);
+
+    // Active, but nothing is calling process(): the engine has no audio
+    // server, or this strip is out of the graph. Edits would sit in the queue
+    // until it overflowed. If a whole idle interval passed with the block
+    // counter still, no audio thread is consuming the queue and the main
+    // thread may drain it itself - the graph is only ever changed from this
+    // same thread, so process() cannot start on us in between.
+    const uint64_t generation = process_generation_.load(std::memory_order_acquire);
+    if (active_ && !processing_.load(std::memory_order_acquire) &&
+        generation == idle_seen_generation_ && param_queue_.size() > 0) {
+      PendingParam pending[kMaxBlockMidi];
+      size_t pending_n = 0;
+      PendingParam incoming;
+      while (pending_n < kMaxBlockMidi && param_queue_.pop(incoming))
+        pending[pending_n++] = incoming;
+      flush_params_now(pending, pending_n);
+    }
+    idle_seen_generation_ = generation;
+
+    const uint32_t drops = param_drops_.load(std::memory_order_relaxed);
+    if (drops > 0 && !param_drops_logged_) {
+      param_drops_logged_ = true;
+      std::fprintf(stderr,
+                   "clap: %s dropped %u parameter change(s): the queue to the "
+                   "audio thread was full\n",
+                   desc_.name.c_str(), drops);
+    }
   }
 
   std::vector<uint8_t> save_state() const override {
@@ -414,7 +538,7 @@ class ClapInstance : public PluginInstance {
     if (state_ == nullptr || blob.empty()) return false;
     InStream stream{&blob};
     const bool ok = state_->load(plugin_, &stream.stream);
-    note_names_dirty_gen_.fetch_add(1, std::memory_order_acq_rel);
+    note_names_.invalidate();
     return ok;
   }
 
@@ -426,28 +550,14 @@ class ClapInstance : public PluginInstance {
     return latency_.load(std::memory_order_relaxed);
   }
 
-  void refresh_latency() {
-    if (plugin_latency_ == nullptr || plugin_ == nullptr) return;
-    latency_.store(plugin_latency_->get(plugin_), std::memory_order_relaxed);
-  }
-
   int extra_output_pairs() const override {
-    const int extra = static_cast<int>(output_ptrs_.size()) - strip_channels_;
-    return extra > 0 ? (extra + 1) / 2 : 0;
+    return hosting::extra_output_pairs(output_ptrs_.size(), strip_channels_);
   }
 
   void copy_extra_output(int pair, float* left, float* right,
                          uint32_t frames) override {
-    const size_t base = static_cast<size_t>(strip_channels_) +
-                        static_cast<size_t>(pair) * 2;
-    if (base < output_ptrs_.size())
-      std::copy_n(output_ptrs_[base], frames, left);
-    else
-      std::fill_n(left, frames, 0.0f);
-    if (base + 1 < output_ptrs_.size())
-      std::copy_n(output_ptrs_[base + 1], frames, right);
-    else
-      std::copy_n(left, frames, right);
+    hosting::copy_extra_output(output_ptrs_.data(), output_ptrs_.size(),
+                               strip_channels_, pair, left, right, frames);
   }
 
   std::unique_ptr<PluginGui> create_gui() override {
@@ -508,6 +618,8 @@ class ClapInstance : public PluginInstance {
   }
 
  private:
+  friend class ClapGui;
+
   struct Timer {
     clap_id id;
     uint32_t period_ms;
@@ -538,7 +650,8 @@ class ClapInstance : public PluginInstance {
     }
 
     void rebuild(const PendingParam* pending, size_t pending_count,
-                 const MidiEvent* midi, size_t midi_count) {
+                 const MidiEvent* midi, size_t midi_count,
+                 hosting::ClapNoteDialect dialect) {
       events.clear();
 
       // Both kinds share one list, and CLAP wants it sorted by time. Parameter
@@ -558,20 +671,13 @@ class ClapInstance : public PluginInstance {
         event.channel = -1;
         event.key = -1;
         event.value = param.value;
-        events.push_back(Event{event});
+        events.push_back(hosting::ClapInEvent{event});
       }
 
       for (size_t i = 0; i < midi_count; ++i) {
-        const MidiEvent& source = midi[i];
-        clap_event_midi_t event{};
-        event.header.size = sizeof(event);
-        event.header.time = source.frame;
-        event.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
-        event.header.type = CLAP_EVENT_MIDI;
-        event.header.flags = 0;
-        event.port_index = 0;
-        std::memcpy(event.data, source.data, sizeof(event.data));
-        events.push_back(Event{event});
+        hosting::ClapInEvent event;
+        if (hosting::clap_event_from_midi(midi[i], dialect, &event))
+          events.push_back(event);
       }
     }
 
@@ -586,20 +692,8 @@ class ClapInstance : public PluginInstance {
       return &self->events[index].header;
     }
 
-    // Parameter changes and MIDI travel in the same list, so the storage has to
-    // hold either one. Both start with a clap_event_header_t.
-    union Event {
-      Event() : header{} {}
-      explicit Event(const clap_event_param_value_t& value) : param(value) {}
-      explicit Event(const clap_event_midi_t& value) : midi(value) {}
-
-      clap_event_header_t header;
-      clap_event_param_value_t param;
-      clap_event_midi_t midi;
-    };
-
     clap_input_events_t list{};
-    std::vector<Event> events;
+    std::vector<hosting::ClapInEvent> events;
   };
 
   // Plugins push their own events here during process: parameter gestures,
@@ -629,12 +723,9 @@ class ClapInstance : public PluginInstance {
       case CLAP_EVENT_NOTE_OFF: {
         const auto* note = reinterpret_cast<const clap_event_note_t*>(header);
         if (note->key < 0) return true;
-        const uint8_t channel = note->channel < 0 ? 0 : static_cast<uint8_t>(note->channel);
-        event.size = 3;
-        event.data[0] = (header->type == CLAP_EVENT_NOTE_ON ? 0x90 : 0x80) | channel;
-        event.data[1] = static_cast<uint8_t>(note->key);
-        event.data[2] = static_cast<uint8_t>(
-            std::clamp(note->velocity * 127.0, 0.0, 127.0));
+        event = hosting::make_note_event(header->type == CLAP_EVENT_NOTE_ON,
+                                         note->channel < 0 ? 0 : note->channel,
+                                         note->key, note->velocity, header->time);
         break;
       }
       default:
@@ -643,6 +734,22 @@ class ClapInstance : public PluginInstance {
 
     self->produced_midi_[self->produced_midi_count_++] = event;
     return true;
+  }
+
+  // The output side of a main-thread flush. Whatever the plugin says back -
+  // parameter values it clamped, gestures - has nowhere to go here, and the
+  // audio thread's MIDI collector must not be touched from this thread.
+  static bool discard_event(const clap_output_events_t*, const clap_event_header_t*) {
+    return true;
+  }
+
+  // Hands `items` to the plugin through params.flush, on the main thread, for
+  // when there is no process() to carry them. Also what a plugin gets when it
+  // asked for a flush itself and nothing needs saying (items null).
+  void flush_params_now(const PendingParam* items, size_t count) {
+    if (plugin_ == nullptr || params_ == nullptr || params_->flush == nullptr) return;
+    flush_events_.rebuild(items, count, nullptr, 0, dialect_);
+    params_->flush(plugin_, &flush_events_.list, &discard_out_events_);
   }
 
   struct OutStream {
@@ -690,6 +797,11 @@ class ClapInstance : public PluginInstance {
       desc_.audio_outputs = static_cast<int>(info.channel_count);
   }
 
+  void refresh_latency() {
+    if (plugin_latency_ == nullptr || plugin_ == nullptr) return;
+    latency_.store(plugin_latency_->get(plugin_), std::memory_order_relaxed);
+  }
+
   void destroy() {
     deactivate();
     if (plugin_ != nullptr) {
@@ -702,60 +814,45 @@ class ClapInstance : public PluginInstance {
     return static_cast<ClapInstance*>(host->host_data);
   }
 
-  // The two event-loop extensions, state, and note names. Anything else a
-  // plugin asks for is better left unanswered than half-implemented.
+  // The extensions this host answers to. Anything else a plugin asks for is
+  // better left unanswered than half-implemented.
   static const void* host_get_extension(const clap_host_t* host, const char* id) {
     ClapInstance* self = self_of(host);
     if (std::strcmp(id, CLAP_EXT_TIMER_SUPPORT) == 0) return &self->timer_support_;
     if (std::strcmp(id, CLAP_EXT_POSIX_FD_SUPPORT) == 0) return &self->fd_support_;
     if (std::strcmp(id, CLAP_EXT_STATE) == 0) return &self->state_support_;
     if (std::strcmp(id, CLAP_EXT_NOTE_NAME) == 0) return &self->note_name_host_;
+    if (std::strcmp(id, CLAP_EXT_LATENCY) == 0) return &self->latency_host_;
+    if (std::strcmp(id, CLAP_EXT_PARAMS) == 0) return &self->params_host_;
+    if (std::strcmp(id, CLAP_EXT_GUI) == 0) return &self->gui_host_;
+    if (std::strcmp(id, CLAP_EXT_AUDIO_PORTS) == 0) return &self->audio_ports_host_;
     return nullptr;
   }
 
   static void host_note_name_changed(const clap_host_t* host) {
-    self_of(host)->note_names_dirty_gen_.fetch_add(1, std::memory_order_acq_rel);
+    self_of(host)->note_names_.invalidate();
   }
 
-  // host_note_name_changed can fire from any thread while this runs. A plain
-  // "valid" flag set at the end would clobber an invalidation that landed
-  // mid-read, so instead this retries until the generation it started with
-  // is still current when it finishes.
   void refresh_note_names() const {
-    // Bounded: a plugin that bumps the generation from its own thread on
-    // every block could otherwise never let this converge, spinning the
-    // calling (UI/main) thread forever. Settle for a possibly-stale result
-    // after a few tries rather than freeze.
-    static constexpr int kMaxAttempts = 8;
-    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
-      const uint64_t gen = note_names_dirty_gen_.load(std::memory_order_acquire);
-      note_names_.clear();
-      if (plugin_ != nullptr) {
-        const auto* ext = static_cast<const clap_plugin_note_name_t*>(
-            plugin_->get_extension(plugin_, CLAP_EXT_NOTE_NAME));
-        if (ext != nullptr && ext->count != nullptr && ext->get != nullptr) {
-          const uint32_t n = ext->count(plugin_);
-          note_names_.reserve(n);
-          for (uint32_t i = 0; i < n; ++i) {
-            clap_note_name_t item{};
-            if (!ext->get(plugin_, i, &item)) continue;
-            if (item.key < 0 || item.key > 127) continue;
-            const size_t len = strnlen(item.name, CLAP_NAME_SIZE);
-            if (len == 0) continue;
-            NoteName named;
-            named.key = item.key;
-            named.name.assign(item.name, len);
-            note_names_.push_back(std::move(named));
-          }
-        }
+    note_names_.refresh([this](std::vector<NoteName>& out) {
+      if (plugin_ == nullptr) return;
+      const auto* ext = static_cast<const clap_plugin_note_name_t*>(
+          plugin_->get_extension(plugin_, CLAP_EXT_NOTE_NAME));
+      if (ext == nullptr || ext->count == nullptr || ext->get == nullptr) return;
+      const uint32_t n = ext->count(plugin_);
+      out.reserve(n);
+      for (uint32_t i = 0; i < n; ++i) {
+        clap_note_name_t item{};
+        if (!ext->get(plugin_, i, &item)) continue;
+        if (item.key < 0 || item.key > 127) continue;
+        const size_t len = strnlen(item.name, CLAP_NAME_SIZE);
+        if (len == 0) continue;
+        NoteName named;
+        named.key = item.key;
+        named.name.assign(item.name, len);
+        out.push_back(std::move(named));
       }
-      if (note_names_dirty_gen_.load(std::memory_order_acquire) == gen) {
-        note_names_cached_gen_ = gen;
-        return;
-      }
-      // Still moving: note_names_cached_gen_ is left stale on purpose, so
-      // the next call (if any) will simply try again, bounded the same way.
-    }
+    });
   }
 
   // Callable from any thread per the extension, so the flag is atomic and the
@@ -763,15 +860,84 @@ class ClapInstance : public PluginInstance {
   static void host_mark_dirty(const clap_host_t* host) {
     ClapInstance* self = self_of(host);
     self->state_dirty_.store(true, std::memory_order_release);
-    self->note_names_dirty_gen_.fetch_add(1, std::memory_order_acq_rel);
+    self->note_names_.invalidate();
   }
 
-  static void host_request_restart(const clap_host_t*) {}
+  // [thread-safe] Serviced on the next host_idle: deactivate and activate
+  // again with the same sample rate and block size.
+  static void host_request_restart(const clap_host_t* host) {
+    self_of(host)->restart_requested_.store(true, std::memory_order_release);
+  }
+
+  // The plugin wants process() called even with no audio to run. The graph
+  // calls it every block for every active insert anyway, so there is nothing
+  // to arrange; an insert that is out of the graph is deactivated.
   static void host_request_process(const clap_host_t*) {}
 
   // Called from any thread, serviced on the next main-thread pump.
   static void host_request_callback(const clap_host_t* host) {
     self_of(host)->callback_requested_.store(true, std::memory_order_release);
+  }
+
+  // The plugin's latency moved. Only legal while deactivated (or it must ask
+  // for a restart); the cached value is re-read once it is active again.
+  static void host_latency_changed(const clap_host_t* host) {
+    self_of(host)->latency_dirty_.store(true, std::memory_order_release);
+  }
+
+  // The parameter list itself changed: names, ranges, or which exist. The
+  // cached list is dropped and the state counts as changed, since a plugin
+  // that grew a parameter usually did so by loading something.
+  static void host_params_rescan(const clap_host_t* host, clap_param_rescan_flags flags) {
+    ClapInstance* self = self_of(host);
+    self->params_rescan_.store(true, std::memory_order_release);
+    if (flags & (CLAP_PARAM_RESCAN_VALUES | CLAP_PARAM_RESCAN_ALL))
+      self->state_dirty_.store(true, std::memory_order_release);
+  }
+
+  // Nothing of the host's is keyed on a parameter id that would need clearing:
+  // no automation, no modulation.
+  static void host_params_clear(const clap_host_t*, clap_id, clap_param_clear_flags) {}
+
+  static void host_params_request_flush(const clap_host_t* host) {
+    self_of(host)->flush_requested_.store(true, std::memory_order_release);
+  }
+
+  static void host_gui_resize_hints_changed(const clap_host_t*) {}
+
+  static bool host_gui_request_resize(const clap_host_t* host, uint32_t width,
+                                      uint32_t height) {
+    ClapInstance* self = self_of(host);
+    ClapGui* gui = self->gui_object_.load(std::memory_order_acquire);
+    if (gui == nullptr || width == 0 || height == 0) return false;
+    gui->pending_resize_.store((static_cast<uint64_t>(width) << 32) | height,
+                               std::memory_order_release);
+    // True here means the request is acknowledged and will be processed; the
+    // window follows when it polls take_resize_request.
+    return true;
+  }
+
+  // The window's visibility is the host's; a plugin cannot show or hide it.
+  static bool host_gui_request_show(const clap_host_t*) { return false; }
+  static bool host_gui_request_hide(const clap_host_t*) { return false; }
+
+  static void host_gui_closed(const clap_host_t* host, bool) {
+    ClapInstance* self = self_of(host);
+    if (ClapGui* gui = self->gui_object_.load(std::memory_order_acquire))
+      gui->close_requested_.store(true, std::memory_order_release);
+  }
+
+  static bool host_audio_ports_is_rescan_flag_supported(const clap_host_t*, uint32_t) {
+    return true;
+  }
+
+  // Ports changed. The plugin may only say so about anything but names while
+  // deactivated, so the counts are read back then; the next activate sizes
+  // its buffers from them.
+  static void host_audio_ports_rescan(const clap_host_t* host, uint32_t flags) {
+    ClapInstance* self = self_of(host);
+    if (flags == CLAP_AUDIO_PORTS_RESCAN_NAMES) return;
+    if (!self->active_) self->read_port_counts();
   }
 
   static bool host_register_timer(const clap_host_t* host, uint32_t period_ms,
@@ -840,19 +1006,30 @@ class ClapInstance : public PluginInstance {
   clap_host_posix_fd_support_t fd_support_{};
   clap_host_state_t state_support_{};
   clap_host_note_name_t note_name_host_{};
+  clap_host_latency_t latency_host_{};
+  clap_host_params_t params_host_{};
+  clap_host_gui_t gui_host_{};
+  clap_host_audio_ports_t audio_ports_host_{};
   std::atomic<bool> state_dirty_{false};
-  // See refresh_note_names(): a generation counter, not a bool, so a
-  // cross-thread invalidation during refresh can't be silently overwritten.
-  mutable std::atomic<uint64_t> note_names_dirty_gen_{1};
-  mutable uint64_t note_names_cached_gen_ = 0;
-  mutable std::vector<NoteName> note_names_;
+  hosting::NoteNameCache note_names_;
   std::vector<Timer> timers_;
   std::vector<RegisteredFd> fds_;
   std::vector<pollfd> poll_set_;
   clap_id next_timer_id_ = 1;
   std::atomic<bool> callback_requested_{false};
+  std::atomic<bool> restart_requested_{false};
+  std::atomic<bool> latency_dirty_{false};
+  std::atomic<bool> flush_requested_{false};
+  mutable std::atomic<bool> params_rescan_{false};
+  mutable std::vector<ParameterInfo> params_cache_;
+  mutable bool params_cache_valid_ = false;
+  // The one editor open on this instance, for the gui callbacks to reach.
+  std::atomic<ClapGui*> gui_object_{nullptr};
+  hosting::ClapNoteDialect dialect_;
 
   bool active_ = false;
+  double sample_rate_ = 48000.0;
+  uint32_t max_block_ = 0;
   // start_processing/stop_processing are [audio-thread] per the CLAP spec,
   // so activate()/deactivate() (called from the UI/control thread) only
   // request the state; process() (the audio thread) is what actually calls
@@ -860,14 +1037,17 @@ class ClapInstance : public PluginInstance {
   std::atomic<bool> want_processing_{false};
   std::atomic<bool> processing_{false};
   std::atomic<uint64_t> process_generation_{0};
+  uint64_t idle_seen_generation_ = 0;
   int strip_channels_ = 2;
   int64_t steady_time_ = 0;
   std::atomic<uint32_t> latency_{0};
+  std::atomic<uint32_t> param_drops_{0};
+  bool param_drops_logged_ = false;
 
   std::vector<std::vector<float>> input_channels_, output_channels_;
   std::vector<float*> input_ptrs_, output_ptrs_;
   static constexpr size_t kMaxBlockMidi = 1024;
-  RtQueue<PendingParam, 64> param_queue_;
+  RtQueue<PendingParam, 256> param_queue_;
   std::array<MidiEvent, kMaxBlockMidi> pending_midi_{};
   size_t pending_midi_count_ = 0;
   std::array<MidiEvent, kMaxBlockMidi> produced_midi_{};
@@ -875,12 +1055,29 @@ class ClapInstance : public PluginInstance {
   clap_event_transport_t transport_event_{};
   bool has_transport_ = false;
   InEventList in_events_;
+  // Main-thread only, for flush(): the audio thread's list must not be rebuilt
+  // under it.
+  InEventList flush_events_;
   clap_output_events_t out_events_{this, &ClapInstance::out_event_push};
+  clap_output_events_t discard_out_events_{};
 };
+
+ClapGui::ClapGui(ClapInstance* owner, const clap_plugin_t* plugin,
+                 const clap_plugin_gui_t* gui)
+    : owner_(owner), plugin_(plugin), gui_(gui) {
+  owner_->gui_object_.store(this, std::memory_order_release);
+}
+
+ClapGui::~ClapGui() {
+  detach();
+  owner_->gui_object_.store(nullptr, std::memory_order_release);
+}
 
 int ClapGui::idle() {
   owner_->pump_main_thread();
-  return 0;
+  // Non-zero is "the editor asked to close", which is what clap_host_gui.closed
+  // means; the window that embeds it tears down through detach() as usual.
+  return close_requested_.load(std::memory_order_acquire) ? 1 : 0;
 }
 
 class ClapBackend : public PluginBackend {
@@ -889,19 +1086,26 @@ class ClapBackend : public PluginBackend {
 
   std::vector<PluginDescriptor> scan() override {
     std::vector<PluginDescriptor> found;
+    hosting::ScanCache cache("clap");
     for (const fs::path& dir : clap_search_paths()) {
       std::error_code ec;
       if (!fs::is_directory(dir, ec)) continue;
       for (const auto& entry : fs::recursive_directory_iterator(dir, ec)) {
         if (entry.path().extension() != ".clap") continue;
-        scan_module(entry.path(), found);
+        std::vector<PluginDescriptor> here;
+        if (!cache.lookup(entry.path().string(), entry.path(), &here)) {
+          scan_module(entry.path(), here);
+          cache.store(entry.path().string(), entry.path(), here);
+        }
+        found.insert(found.end(), here.begin(), here.end());
       }
     }
+    cache.save();
     return found;
   }
 
   std::unique_ptr<PluginInstance> instantiate(const PluginDescriptor& desc) override {
-    std::shared_ptr<ClapModule> module = module_for(desc.path);
+    std::shared_ptr<ClapModule> module = module_for(desc.path, true);
     if (module == nullptr) return nullptr;
 
     auto instance = std::make_unique<ClapInstance>(desc, std::move(module));
@@ -910,17 +1114,8 @@ class ClapBackend : public PluginBackend {
   }
 
  private:
-  // Modules are cached so loading two plugins from one bundle does not dlopen it
-  // twice, and so a module stays resident while any of its plugins is alive.
-  std::shared_ptr<ClapModule> module_for(const std::string& path) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = modules_.find(path);
-    if (it != modules_.end())
-      if (std::shared_ptr<ClapModule> alive = it->second.lock()) return alive;
-
-    std::shared_ptr<ClapModule> module = ClapModule::open(path);
-    if (module != nullptr) modules_[path] = module;
-    return module;
+  std::shared_ptr<ClapModule> module_for(const std::string& path, bool pin) {
+    return modules_.get(path, [&path] { return ClapModule::open(path); }, pin);
   }
 
   // CLAP declares itself as a null-terminated list of feature strings. The
@@ -956,7 +1151,7 @@ class ClapBackend : public PluginBackend {
   }
 
   void scan_module(const fs::path& path, std::vector<PluginDescriptor>& out) {
-    std::shared_ptr<ClapModule> module = module_for(path.string());
+    std::shared_ptr<ClapModule> module = module_for(path.string(), false);
     if (module == nullptr) return;
 
     const clap_plugin_factory_t* factory = module->factory();
@@ -979,8 +1174,7 @@ class ClapBackend : public PluginBackend {
     }
   }
 
-  std::mutex mutex_;
-  std::map<std::string, std::weak_ptr<ClapModule>> modules_;
+  hosting::ModuleCache<ClapModule> modules_;
 };
 
 }  // namespace

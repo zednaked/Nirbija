@@ -1,16 +1,34 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #include "core/drone.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
-#include <cstdio>
 #include <string>
 #include <string_view>
+
+#include "core/dsp.h"
 
 namespace nirbija {
 namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kTwoPi = 2.0 * kPi;
+
+// One cycle of a sine plus a wrap point, filled once at load rather than on
+// first use, so the audio thread never runs a static initialiser.
+constexpr int kSineBits = 10;
+constexpr int kSineSize = 1 << kSineBits;
+struct SineTable {
+  std::array<float, kSineSize + 1> v{};
+  SineTable() {
+    for (int i = 0; i <= kSineSize; ++i)
+      v[static_cast<size_t>(i)] =
+          static_cast<float>(std::sin(kTwoPi * i / kSineSize));
+  }
+};
+const SineTable kSine;
 
 // The twelve semitones above a root as small-integer ratios. Five-limit,
 // which is what a harmonium, a tanpura and most drone records are tuned to;
@@ -54,21 +72,22 @@ double cutoff_hz(double cutoff) { return 40.0 * std::exp2(cutoff * 8.64); }  // 
 // --- static tables -----------------------------------------------------------
 
 const char* DroneInstance::param_name(uint32_t id) {
-  static constexpr const char* kVoiceNames[kVoiceStride] = {"Interval", "Detune",
-                                                            "Level", "Shape"};
+  // "String 1 Level": the number is one-based because the editor labels the
+  // strings that way and a mapping list should read the same. Spelled out
+  // rather than formatted into a thread_local buffer, so two names held at
+  // once (a list, a comparison) do not turn into the same string.
+  static constexpr const char* kStringNames[kVoices * kVoiceStride] = {
+      "String 1 Interval", "String 1 Detune", "String 1 Level", "String 1 Shape",
+      "String 2 Interval", "String 2 Detune", "String 2 Level", "String 2 Shape",
+      "String 3 Interval", "String 3 Detune", "String 3 Level", "String 3 Shape",
+      "String 4 Interval", "String 4 Detune", "String 4 Level", "String 4 Shape",
+      "String 5 Interval", "String 5 Detune", "String 5 Level", "String 5 Shape",
+      "String 6 Interval", "String 6 Detune", "String 6 Level", "String 6 Shape",
+  };
   static constexpr const char* kGlobalNames[] = {
       "Swell", "Rise",   "Root",   "Just",  "Drift", "Tide", "Cutoff",
       "Resonance", "Motion", "Space", "Grit", "Width", "Glide"};
-  if (id < Swell) {
-    // "String 1 Level": the number is one-based because the editor labels the
-    // strings that way and a mapping list should read the same.
-    static thread_local char buffer[32];
-    const uint32_t voice = id / kVoiceStride + 1;
-    const uint32_t which = id % kVoiceStride;
-    std::snprintf(buffer, sizeof(buffer), "String %u %s", voice,
-                  kVoiceNames[which]);
-    return buffer;
-  }
+  if (id < Swell) return kStringNames[id];
   if (id < kParamCount) return kGlobalNames[id - Swell];
   return "";
 }
@@ -245,6 +264,23 @@ double DroneInstance::midi_to_hz(double note) {
   return 440.0 * std::exp2((note - 69.0) / 12.0);
 }
 
+float DroneInstance::fast_sin(double phase01) {
+  phase01 -= std::floor(phase01);
+  const double x = phase01 * kSineSize;
+  const int i = static_cast<int>(x);
+  const float frac = static_cast<float>(x - i);
+  const float a = kSine.v[static_cast<size_t>(i)];
+  const float b = kSine.v[static_cast<size_t>(i + 1)];
+  return a + (b - a) * frac;
+}
+
+float DroneInstance::soft_clip(float x) {
+  if (x >= 3.0f) return 1.0f;
+  if (x <= -3.0f) return -1.0f;
+  const float x2 = x * x;
+  return x * (27.0f + x2) / (27.0f + 9.0f * x2);
+}
+
 PluginDescriptor DroneInstance::make_descriptor() {
   PluginDescriptor descriptor;
   descriptor.format = PluginFormat::Internal;
@@ -297,8 +333,23 @@ bool DroneInstance::activate(double sample_rate, uint32_t) {
     for (int a = 0; a < 2; ++a)
       ap_[ch][a].setup(
           static_cast<size_t>(sample_rate_ * (kApMs[a] + offset * 0.2) * 0.001));
+  }
+  reset();
+  return true;
+}
+
+void DroneInstance::reset() {
+  for (int ch = 0; ch < 2; ++ch) {
+    for (int c = 0; c < kCombs; ++c)
+      std::fill(comb_[ch][c].data.begin(), comb_[ch][c].data.end(), 0.0f);
+    for (int a = 0; a < 2; ++a)
+      std::fill(ap_[ch][a].data.begin(), ap_[ch][a].data.end(), 0.0f);
+    for (int c = 0; c < kCombs; ++c) {
+      comb_[ch][c].w = 0;
+      damp_state_[ch][c] = 0.0f;
+    }
+    for (int a = 0; a < 2; ++a) ap_[ch][a].w = 0;
     svf_lp_[ch] = svf_bp_[ch] = 0.0f;
-    for (int c = 0; c < kCombs; ++c) damp_state_[ch][c] = 0.0f;
   }
 
   for (int v = 0; v < kVoices; ++v) {
@@ -334,7 +385,6 @@ bool DroneInstance::activate(double sample_rate, uint32_t) {
   breath_phase_ = 0.0;
   breath_walk_ = {};
   rng_ = 0x9e3779b9u;
-  return true;
 }
 
 // --- MIDI ----------------------------------------------------------------------
@@ -382,7 +432,7 @@ float DroneInstance::osc(double phase, double inc, float shape) {
   // shape 0 is a sine, 0.5 a triangle, 1 a saw; in between is a crossfade.
   // A drone lives on its overtones, and this is the one knob that says how
   // many there are.
-  const float sine = static_cast<float>(std::sin(kTwoPi * phase));
+  const float sine = fast_sin(phase);
   const float tri = static_cast<float>(4.0 * std::fabs(phase - 0.5) - 1.0);
   const float saw =
       static_cast<float>(2.0 * phase - 1.0) - polyblep(phase, inc);
@@ -408,7 +458,7 @@ float DroneInstance::reverb(int ch, float in) {
     float& lp = damp_state_[ch][c];
     lp = out + damp * (lp - out);
     comb.data[comb.w] = in + lp * fb + 1e-20f;  // the 1e-20 keeps denormals away
-    comb.w = (comb.w + 1) % comb.data.size();
+    comb.w = dsp::ring_next(comb.w, comb.data.size());
     acc += out;
   }
   acc *= 0.25f;
@@ -417,7 +467,7 @@ float DroneInstance::reverb(int ch, float in) {
     const float d = ap.data[ap.w];
     const float y = acc - 0.5f * d;
     ap.data[ap.w] = y + 1e-20f;
-    ap.w = (ap.w + 1) % ap.data.size();
+    ap.w = dsp::ring_next(ap.w, ap.data.size());
     acc = d + 0.5f * y;
   }
   return acc;
@@ -521,10 +571,38 @@ void DroneInstance::process(const float* const*, float* const* outputs,
   const float wet = space_ * 0.9f;
   const float dry = 1.0f - 0.5f * wet;
 
+  // Phase increments are refreshed every kHzInterval samples, not every
+  // sample: the pitches glide over 50 ms at the very least, so a frequency
+  // that steps every two thirds of a millisecond is still a glide, and the
+  // seven exp2 a sample it saves were most of the voice loop. The phase
+  // itself is continuous, so a step in increment is never a step in level.
+  // Each increment is taken from where the glide will be halfway through
+  // its group rather than at its start, so the staircase sits on the curve
+  // instead of lagging it and the phase comes out where a per-sample glide
+  // would have put it.
+  const double half_group = std::pow(1.0 - static_cast<double>(glide_coeff),
+                                     kHzInterval / 2);
+  double inc_l[kVoices] = {};
+  double inc_r[kVoices] = {};
+  bool audible[kVoices] = {};
+
   float peak = 0.0f;
   for (uint32_t i = 0; i < frames; ++i) {
     root_ += glide_coeff * (root_target - root_);
-    const double root_hz = midi_to_hz(root_);
+    if (i % kHzInterval == 0) {
+      const double root_mid = root_target + (root_ - root_target) * half_group;
+      const double root_hz = midi_to_hz(root_mid);
+      for (int v = 0; v < kVoices; ++v) {
+        const Voice& voice = voices_[static_cast<size_t>(v)];
+        const double pitch_mid =
+            pitch_target[v] + (voice.pitch - pitch_target[v]) * half_group;
+        const double hz = root_hz * std::exp2(pitch_mid / 12.0);
+        inc_l[v] = hz * spread[v] / sr;
+        inc_r[v] = hz / spread[v] / sr;
+        // Past Nyquist, say nothing.
+        audible[v] = inc_l[v] < 0.5 && inc_r[v] < 0.5;
+      }
+    }
 
     // The swell ramps straight, then the gain is its square: a line sounds
     // like it arrives all at once, a square rises out of nothing.
@@ -540,19 +618,16 @@ void DroneInstance::process(const float* const*, float* const* outputs,
       voice.pitch += glide_coeff * (pitch_target[v] - voice.pitch);
       voice.gain += gain_coeff * (level_target[v] - voice.gain);
       if (voice.gain < 1e-5f && level_target[v] < 1e-5f) continue;
-      const double hz = root_hz * std::exp2(voice.pitch / 12.0);
-      const double inc_l = hz * spread[v] / sr;
-      const double inc_r = hz / spread[v] / sr;
-      if (inc_l >= 0.5 || inc_r >= 0.5) continue;  // past Nyquist, say nothing
+      if (!audible[v]) continue;
       const float shape = shape_smooth_[v];
-      const float l = osc(voice.phase[0], inc_l, shape);
-      voice.phase[0] += inc_l;
-      voice.phase[0] -= std::floor(voice.phase[0]);
+      const float l = osc(voice.phase[0], inc_l[v], shape);
+      voice.phase[0] += inc_l[v];
+      if (voice.phase[0] >= 1.0) voice.phase[0] -= 1.0;
       float r = l;
       if (width > 1) {
-        r = osc(voice.phase[1], inc_r, shape);
-        voice.phase[1] += inc_r;
-        voice.phase[1] -= std::floor(voice.phase[1]);
+        r = osc(voice.phase[1], inc_r[v], shape);
+        voice.phase[1] += inc_r[v];
+        if (voice.phase[1] >= 1.0) voice.phase[1] -= 1.0;
       }
       mix[0] += l * voice.gain * pan_l[v];
       mix[1] += r * voice.gain * pan_r[v];
@@ -562,7 +637,7 @@ void DroneInstance::process(const float* const*, float* const* outputs,
       // Grit, then the filter, then the swell, then the room. The room comes
       // after the swell on purpose: dropping the swell leaves the tail
       // hanging in the air, which is the sound of a drone stopping.
-      float s = std::tanh(mix[ch] * 0.4f * drive) * drive_norm;
+      float s = soft_clip(mix[ch] * 0.4f * drive) * drive_norm;
 
       const float v3 = s - svf_lp_[ch];
       const float v1 = a1 * svf_bp_[ch] + a2 * v3;

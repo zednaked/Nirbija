@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // Scratch probe: loads the session named by NIRBIJA_SESSION, presses play,
 // and reports the master and per-strip peaks every half second for a few
 // seconds. Not a ctest target.
@@ -13,6 +15,7 @@ int main(int argc, char* argv[]) {
   qputenv("QT_QPA_PLATFORM", "offscreen");
   QGuiApplication app(argc, argv);
   nirbija::MixerModel mixer;
+  mixer.waitForScan();
   if (!mixer.running()) {
     std::printf("no audio server\n");
     return 1;

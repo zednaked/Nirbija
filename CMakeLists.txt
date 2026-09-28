@@ -11,8 +11,42 @@ option(NIRBIJA_CLAP "Build the CLAP plugin backend" ON)
 option(NIRBIJA_VST3 "Build the VST3 plugin backend" ON)
 option(NIRBIJA_UI "Build the Qt6 QML user interface" ON)
 option(NIRBIJA_TESTS "Build the CLI test harnesses" ON)
+option(NIRBIJA_BLE_MIDI "Talk to Bluetooth LE MIDI devices over BlueZ (needs libsystemd)" ON)
+option(NIRBIJA_WERROR "Treat warnings as errors (the pre-push hook and CI turn this on)" OFF)
+option(NIRBIJA_LTO "Link-time optimisation for Release builds, when the toolchain has it" ON)
+
+# A tree configured with no build type is a Debug tree with no -g: the slowest
+# binary there is, and the one a first `cmake -S . -B build` used to hand out.
+# Release it is unless asked otherwise; the presets say it explicitly.
+get_property(nirbija_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(NOT nirbija_multi_config AND NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+  set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInfo)
+endif()
 
 add_compile_options(-Wall -Wextra -Wpedantic)
+if(NIRBIJA_WERROR)
+  add_compile_options(-Werror)
+endif()
+
+# Release only. -fno-plt turns every call into a shared library into a direct
+# GOT load, which is what a callback-heavy audio path wants; the visibility
+# flags stop the static core's every symbol from being exported by the
+# executable, which shrinks the binary and lets the linker drop what nothing
+# uses. Plugins never look symbols up in the host, so nothing is lost.
+add_compile_options($<$<CONFIG:Release,RelWithDebInfo>:-fno-plt>)
+add_compile_options($<$<CONFIG:Release,RelWithDebInfo>:-fvisibility-inlines-hidden>)
+
+if(NIRBIJA_LTO)
+  include(CheckIPOSupported)
+  check_ipo_supported(RESULT nirbija_ipo_ok OUTPUT nirbija_ipo_why LANGUAGES CXX)
+  if(nirbija_ipo_ok)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
+  else()
+    message(STATUS "LTO not available: ${nirbija_ipo_why}")
+  endif()
+endif()
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(JACK REQUIRED IMPORTED_TARGET jack)
@@ -42,6 +76,12 @@ if(NIRBIJA_VST3)
     GIT_SHALLOW TRUE
     SOURCE_DIR ${CMAKE_BINARY_DIR}/vst3/pluginterfaces)
   FetchContent_MakeAvailable(vst3_pluginterfaces)
+  # Where `pluginterfaces/...` resolves from: the parent of wherever the
+  # sources actually landed, which is the SOURCE_DIR above unless a
+  # -DFETCHCONTENT_SOURCE_DIR_VST3_PLUGINTERFACES override pointed elsewhere
+  # (a second tree reusing the first one's checkout does exactly that).
+  get_filename_component(NIRBIJA_VST3_INCLUDE_DIR
+    "${vst3_pluginterfaces_SOURCE_DIR}" DIRECTORY)
 endif()
 
 if(NIRBIJA_CLAP)

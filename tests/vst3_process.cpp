@@ -1,8 +1,11 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // Runs audio through a real VST3 plugin installed on this machine: the same
 // bar the LV2 and CLAP backends had to clear.
 
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -57,7 +60,7 @@ int main(int argc, char* argv[]) {
       backend = std::move(candidate);
   if (backend == nullptr) {
     std::printf("VST3 backend not compiled in, skipping\n");
-    return 0;
+    return 77;
   }
 
   const auto all = backend->scan();
@@ -66,7 +69,7 @@ int main(int argc, char* argv[]) {
     if (desc.name == wanted) chosen = &desc;
   if (chosen == nullptr) {
     std::printf("%s not installed as VST3, skipping\n", wanted.c_str());
-    return 0;
+    return 77;
   }
 
   auto plugin = backend->instantiate(*chosen);
@@ -112,9 +115,46 @@ int main(int argc, char* argv[]) {
 
     const auto blob = plugin->save_state();
     if (blob.empty()) fail("state blob is empty");
+    // Framed: component and controller both, behind a header old sessions
+    // never wrote.
+    static const char kMagic[] = {'n', 'v', 's', 't', '3', 0, 1};
+    if (blob.size() < sizeof(kMagic) + 4 ||
+        std::memcmp(blob.data(), kMagic, sizeof(kMagic)) != 0)
+      fail("state blob does not carry the nvst3 header");
     plugin->set_parameter(first.id, original);
     plugin->process(in_ptrs, out.ptrs, kBlock);
     if (!plugin->load_state(blob)) fail("load_state rejected its own blob");
+    if (plugin->parameter_value(first.id) != moved)
+      fail("state round-trip lost a parameter");
+
+    // The headerless blob of an old session: the component state alone.
+    std::vector<uint8_t> legacy(blob.begin() + sizeof(kMagic) + 4, blob.end());
+    uint32_t component_length = 0;
+    for (int i = 0; i < 4; ++i)
+      component_length |= static_cast<uint32_t>(blob[sizeof(kMagic) + i]) << (8 * i);
+    legacy.resize(component_length);
+    if (!plugin->load_state(legacy)) fail("a headerless (old) blob was rejected");
+
+    // A JACK period change re-activates every insert with a bigger block: the
+    // instance must come back with its state, not at defaults.
+    plugin->deactivate();
+    if (!plugin->activate(kSampleRate, kBlock * 4))
+      fail("re-activate with a bigger block failed");
+    if (plugin->parameter_value(first.id) != moved)
+      fail("re-activation lost a parameter");
+    std::vector<float> big_l(kBlock * 4), big_r(kBlock * 4);
+    float* big_out[2] = {big_l.data(), big_r.data()};
+    std::vector<float> big_in_l(kBlock * 4), big_in_r(kBlock * 4);
+    for (uint32_t i = 0; i < kBlock * 4; ++i)
+      big_in_l[i] = big_in_r[i] = std::sin(static_cast<float>(i) * 0.37f) * 0.5f;
+    const float* big_in[2] = {big_in_l.data(), big_in_r.data()};
+    plugin->process(big_in, big_out, kBlock * 4);
+    float big_peak = 0.0f;
+    for (float sample : big_l) {
+      if (!std::isfinite(sample)) fail("NaN after re-activation");
+      big_peak = std::max(big_peak, std::fabs(sample));
+    }
+    if (big_peak <= 1e-5f) fail("re-activated plugin is silent");
   }
 
   // As a strip insert, which is how it is actually used.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // Drives the step sequencer against a synthetic transport and reads back the
 // MIDI it produced. No JACK, no plugins, no display — the whole point of the
 // thing is arithmetic against transport position, and that is testable at a
@@ -1647,6 +1649,193 @@ int main() {
     for (size_t i = 0; i < count; ++i)
       if ((drained[i].data[0] & 0xf0) == 0x80) saw_off = true;
     expect(saw_off, "a note-off was dropped from a nearly full block");
+  }
+
+  // Raw frames rather than beats, for the checks below that are about
+  // sample accuracy: absolute frame = block index * block size + event frame.
+  struct RawNote {
+    bool on;
+    int pitch;
+    int64_t frame;
+  };
+  const auto run_raw = [](Seq& seq, uint32_t block, int blocks) {
+    const double bb = block / kRate * kTempo / 60.0;
+    std::vector<RawNote> out;
+    nirbija::MidiEvent buffer[128];
+    for (int i = 0; i < blocks; ++i) {
+      nirbija::TransportInfo transport;
+      transport.playing = true;
+      transport.tempo_bpm = kTempo;
+      transport.beats = i * bb;
+      seq.set_transport(transport);
+      seq.process(nullptr, nullptr, block);
+      const size_t count = seq.take_midi_output(buffer, 128);
+      for (size_t e = 0; e < count; ++e) {
+        const uint8_t status = buffer[e].data[0] & 0xf0;
+        if (status != 0x90 && status != 0x80) continue;
+        out.push_back({status == 0x90 && buffer[e].data[2] > 0,
+                       buffer[e].data[1],
+                       static_cast<int64_t>(i) * block + buffer[e].frame});
+      }
+    }
+    return out;
+  };
+
+  // --- the queued pattern owns the downbeat, wherever the bar line falls ------
+  //
+  // 448 frames does not divide the 96000 frames of a bar, so the line at
+  // beat 4 lands inside a block rather than on its edge. Deciding the switch
+  // by the block's start beat played that step - the downbeat of the new
+  // pattern, the one the player is waiting for - with the old pattern.
+  {
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
+    constexpr uint32_t kOdd = 448;
+    seq.activate(kRate, kOdd);
+    seq.set_parameter(13, 1.0);
+    seq.set_cell(0, 0, 0, 60, 100, true, 1.0f);
+    seq.set_cell(1, 0, 0, 72, 100, true, 1.0f);
+    seq.set_parameter(197, 2.0);  // next = pattern 1
+    const int blocks = static_cast<int>(std::ceil(96000.0 * 1.5 / kOdd));
+    const std::vector<RawNote> notes = run_raw(seq, kOdd, blocks);
+    bool new_downbeat = false;
+    bool old_downbeat = false;
+    for (const RawNote& note : notes) {
+      if (!note.on) continue;
+      if (note.frame == 96000 && note.pitch == 72) new_downbeat = true;
+      if (note.frame >= 96000 && note.pitch == 60) old_downbeat = true;
+    }
+    expect(new_downbeat, "the downbeat of bar 2 did not play the queued pattern");
+    expect(!old_downbeat, "the old pattern was still heard after the bar line");
+    expect(seq.pattern() == 1, "queued pattern did not become current");
+    expect(seq.next_pattern() < 0, "next pattern did not clear after the bar");
+  }
+
+  // --- gate closes on its own frame, not on the next step's -----------------
+  //
+  // With 1024-frame blocks a 1/16 (6000 frames) and its 25% gate (1500
+  // frames) often share a block with the step after them. The pending
+  // note-off used to be written after the step loop, so an off and the next
+  // on in one block put the off on the on's frame: gate stretched by up to a
+  // block, differently every step.
+  {
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
+    seq.activate(kRate, 1024);
+    for (int i = 0; i < Seq::kVisibleSteps; ++i) seq.set_parameter(80 + i, 1.0);
+    seq.set_parameter(2, 0.25);  // gate
+    for (int lane = 1; lane < Seq::kLanes; ++lane) seq.set_lane_mute(lane, true);
+    const std::vector<RawNote> notes =
+        run_raw(seq, 1024, static_cast<int>(std::ceil(96000.0 / 1024)) + 1);
+    int64_t on_frame = -1;
+    int pairs = 0;
+    for (const RawNote& note : notes) {
+      if (note.on) {
+        if (note.frame % 6000 != 0)
+          fail("a 1/16 landed on frame " + std::to_string(note.frame));
+        on_frame = note.frame;
+      } else if (on_frame >= 0) {
+        if (note.frame != on_frame + 1500)
+          fail("gate 25% closed at frame " + std::to_string(note.frame) +
+               ", wanted " + std::to_string(on_frame + 1500));
+        ++pairs;
+        on_frame = -1;
+      }
+    }
+    expect(pairs == 16, "expected 16 on/off pairs, got " + std::to_string(pairs));
+  }
+
+  // --- ratchet pulses keep their own gate inside one block ------------------
+  //
+  // Ratchet 4 on a 1/16 is a pulse every 1500 frames; gate 50% closes each
+  // one 750 frames in. Two pulses in one 1024-frame block used to share the
+  // off with the next on, so the gate knob did nothing to a roll.
+  {
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
+    seq.activate(kRate, 1024);
+    seq.set_parameter(13, 1.0);
+    seq.set_parameter(194, 1.0);  // ratchet macro fully on; gate stays 0.5
+    seq.set_cell(0, 0, 0, 60, 100, true, 1.0f);
+    seq.set_trig(0, 0, 0, 0.0f, 4, Seq::Always, 0);
+    const std::vector<RawNote> notes = run_raw(seq, 1024, 6);
+    std::vector<int64_t> ons, offs;
+    for (const RawNote& note : notes) (note.on ? ons : offs).push_back(note.frame);
+    expect(ons == std::vector<int64_t>({0, 1500, 3000, 4500}),
+           "ratchet ons were not on the pulse grid");
+    expect(offs == std::vector<int64_t>({750, 2250, 3750, 5250}),
+           "ratchet offs did not follow the 50% gate");
+  }
+
+  // --- an external clock that skips over a step still plays it --------------
+  //
+  // Under MIDI clock the song position comes from ticks, and the beat a block
+  // is handed can jump a little ahead of where the previous block ended. A
+  // grid step in that gap belongs to nobody: it was not in the last block and
+  // is already behind this one. Every step here is arranged to fall in such a
+  // gap, so a walk that only looks forward from the block start loses all
+  // but the first.
+  {
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
+    seq.activate(kRate, kBlock);
+    for (int i = 0; i < Seq::kVisibleSteps; ++i) seq.set_parameter(80 + i, 1.0);
+    for (int lane = 1; lane < Seq::kLanes; ++lane) seq.set_lane_mute(lane, true);
+
+    nirbija::MidiEvent buffer[128];
+    int ons = 0;
+    int gaps = 0;
+    double beat = 0.0;
+    // Stops short of beat 4, or the last jump would hand it step 16 as well.
+    while (beat + block_beats < 4.0) {
+      // The next grid line inside this block: jump past it.
+      const double grid = std::ceil(beat / 0.25) * 0.25;
+      if (grid > beat && grid < beat + block_beats) {
+        beat = grid + 0.0005;
+        ++gaps;
+      }
+      nirbija::TransportInfo transport;
+      transport.playing = true;
+      transport.tempo_bpm = kTempo;
+      transport.beats = beat;
+      seq.set_transport(transport);
+      seq.process(nullptr, nullptr, kBlock);
+      const size_t count = seq.take_midi_output(buffer, 128);
+      for (size_t e = 0; e < count; ++e)
+        if ((buffer[e].data[0] & 0xf0) == 0x90 && buffer[e].data[2] > 0) ++ons;
+      beat += block_beats;
+    }
+    expect(gaps >= 15, "the test did not put the steps in the gaps");
+    expect(ons == 16, "a clock that jumps over steps played " +
+                          std::to_string(ons) + " of 16");
+  }
+
+  // --- a relocate is not a gap: the step behind the jump stays unplayed -----
+  //
+  // The catch-up above reaches back at most one step. A jump of a bar with
+  // transport.changed set is the user moving the song, and a note from the
+  // old position must not fire at the new one.
+  {
+    const auto seq_owned = std::make_unique<Seq>();
+    Seq& seq = *seq_owned;
+    seq.activate(kRate, kBlock);
+    seq.set_parameter(13, 1.0);
+    seq.set_cell(0, 0, 0, 60, 100, true, 1.0f);
+    seq.set_cell(0, 0, 4, 62, 100, true, 1.0f);
+    for (int lane = 1; lane < Seq::kLanes; ++lane) seq.set_lane_mute(lane, true);
+    run(seq, 1);  // plays step 0 at beat 0
+    nirbija::MidiEvent buffer[128];
+    nirbija::TransportInfo transport;
+    transport.playing = true;
+    transport.tempo_bpm = kTempo;
+    transport.beats = 1.0 + 0.001;  // just past step 4, a whole beat away
+    transport.changed = true;
+    seq.set_transport(transport);
+    seq.process(nullptr, nullptr, kBlock);
+    const size_t count = seq.take_midi_output(buffer, 128);
+    for (size_t e = 0; e < count; ++e)
+      if ((buffer[e].data[0] & 0xf0) == 0x90 && buffer[e].data[2] > 0)
+        fail("a relocate replayed the step it jumped over");
   }
 
   if (failures > 0) {

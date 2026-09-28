@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // Opens a JACK client, builds a few channels, moves a fader through the command
 // queue, and shuts down. Skips (exit 0) when no JACK/PipeWire server is running,
 // so the test is usable on a headless build machine.

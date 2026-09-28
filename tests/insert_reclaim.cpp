@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // An insert pulled out of a strip is not freed on the spot: the audio thread
 // may still be inside it, so it waits in a retired list until two renders have
 // gone by. This checks the three states that gate has to tell apart.

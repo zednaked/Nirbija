@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // The computer keyboard has no transport and no clock: a key down is a
 // note-on the moment process() next runs, a key up its note-off. What is
 // worth checking at a desk is the queue crossing threads correctly, the
@@ -174,6 +176,50 @@ int main() {
     if (!restored.load_state(blob)) fail("load_state refused its own blob");
     if (restored.parameter_value(0) != 5.0)
       fail("channel did not survive the state round trip");
+  }
+
+  // --- pressed and released in one block: the on still comes first ----------
+  //
+  // Everything the keyboard makes lands on frame 0, and the output puts a
+  // note-off before a note-on on the same frame - which for one key that
+  // went down and up in the same block would be off, then on: a stuck note.
+  {
+    nirbija::KeyboardInstrumentInstance kb;
+    kb.activate(48000.0, 256);
+    kb.key_down(60, 90);
+    kb.key_up(60);
+    const std::vector<Note> notes = drain(kb);
+    expect(notes.size() == 2, "a tap should be an on and an off");
+    if (notes.size() == 2) {
+      expect(notes[0].on && !notes[1].on, "the off came before the on");
+    }
+  }
+
+  // --- a key-up the queue could not take still lets go of the note ----------
+  //
+  // OS key-repeat can flood the queue with downs faster than the audio thread
+  // drains it. A down that is lost is a note that did not play; an up that is
+  // lost is a note that never stops, so that one makes the audio thread
+  // release everything it holds.
+  {
+    nirbija::KeyboardInstrumentInstance kb;
+    kb.activate(48000.0, 256);
+    kb.key_down(60, 100);
+    kb.key_down(64, 100);
+    for (int i = 0; i < 2000; ++i) kb.key_down(60, 100);  // repeats; fills it
+    kb.key_up(60);  // nowhere to go
+    const std::vector<Note> notes = drain(kb);
+    int held = 0;
+    for (const Note& note : notes) held += note.on ? 1 : -1;
+    expect(held == 0, "a dropped key-up left " + std::to_string(held) +
+                          " note(s) sounding");
+    bool off60 = false;
+    for (const Note& note : notes)
+      if (!note.on && note.pitch == 60) off60 = true;
+    expect(off60, "the key whose release was lost never got its note-off");
+    // And it is really let go of: a later release finds nothing to release.
+    kb.key_up(64);
+    expect(drain(kb).empty(), "the all-notes-off left something held");
   }
 
   if (failures > 0) {

@@ -1,4 +1,24 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #include "core/ble_midi.h"
+
+#if !NIRBIJA_HAVE_BLE_MIDI
+
+// Built without libsystemd: the object exists so the engine can own one, and
+// it never finds a device.
+namespace nirbija {
+BleMidi::BleMidi() = default;
+BleMidi::~BleMidi() = default;
+void BleMidi::start() {}
+void BleMidi::stop() {}
+size_t BleMidi::pop(MidiEvent*, size_t) { return 0; }
+void BleMidi::thread_main() {}
+bool BleMidi::run_one_device() { return false; }
+void BleMidi::feed(const uint8_t*, size_t) {}
+void BleMidi::emit(uint8_t, uint8_t, uint8_t, uint8_t) {}
+}  // namespace nirbija
+
+#else
 
 #include <systemd/sd-bus.h>
 
@@ -226,3 +246,5 @@ void BleMidi::thread_main() {
 }
 
 }  // namespace nirbija
+
+#endif  // NIRBIJA_HAVE_BLE_MIDI

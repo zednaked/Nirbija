@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 import QtQuick
 import Nirbija
 
@@ -192,8 +193,8 @@ Item {
         enabled: !bar.mapping
         target: null
         dragThreshold: 0
+        // No Approves bit: once this handler has the grab nobody may take it.
         grabPermissions: PointerHandler.CanTakeOverFromAnything
-                         | PointerHandler.ApprovesTakeOverByNothing
         property real startValue: 0
         onActiveChanged: if (active) {
             bar.forceActiveFocus(Qt.MouseFocusReason)

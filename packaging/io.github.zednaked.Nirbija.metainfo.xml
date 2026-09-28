@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata. Validate with: appstreamcli validate this-file -->
+<component type="desktop-application">
+  <id>io.github.zednaked.Nirbija</id>
+  <name>Nirbija</name>
+  <summary>A mixer that is also an instrument</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <developer id="io.github.zednaked">
+    <name>Thiago Gonçalves</name>
+  </developer>
+  <description>
+    <p>
+      A rack of channel strips for Linux, in the spirit of AUM on iOS. Each
+      strip is a chain: an instrument, then effects, then a fader with sends.
+      A drone synth, a sixteen-pad sampler, a looper, a step sequencer and an
+      arpeggiator ship inside the binary, and LV2, CLAP and VST3 plugins go in
+      the same slot, over JACK or PipeWire, with their own editors embedded.
+    </p>
+    <p>
+      Every control answers a drag, the wheel and the keyboard. The whole
+      interface is sized off one number, remembered per machine.
+    </p>
+  </description>
+  <launchable type="desktop-id">Nirbija.desktop</launchable>
+  <url type="homepage">https://zednaked.github.io/nirbija-site/</url>
+  <url type="bugtracker">https://github.com/zednaked/Nirbija/issues</url>
+  <url type="vcs-browser">https://github.com/zednaked/Nirbija</url>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+    <category>Midi</category>
+  </categories>
+  <keywords>
+    <keyword>mixer</keyword>
+    <keyword>plugin</keyword>
+    <keyword>lv2</keyword>
+    <keyword>clap</keyword>
+    <keyword>vst3</keyword>
+    <keyword>jack</keyword>
+    <keyword>pipewire</keyword>
+    <keyword>synth</keyword>
+    <keyword>looper</keyword>
+    <keyword>sequencer</keyword>
+  </keywords>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/zednaked/Nirbija/master/docs/nirbija.png</image>
+      <caption>The mixer with the built-in instruments open</caption>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1"/>
+  <provides>
+    <binary>nirbija</binary>
+  </provides>
+  <releases>
+    <release version="0.4.0" date="2026-09-27"/>
+  </releases>
+</component>

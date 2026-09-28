@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // Manual tool: brings up one channel with a synth on it, wires a MIDI source
 // into the channel and the master bus to the speakers, and prints the level
 // while you play. Not a ctest target — it needs hardware and a human.

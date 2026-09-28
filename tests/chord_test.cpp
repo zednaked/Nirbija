@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // Feeds the chord plugin trigger keys and passthrough notes, reads back what
 // it emits. Same shape as arpeggiator_test.cpp: no JACK, no display, no
 // transport - this plugin is purely reactive to queue_midi.
@@ -78,6 +80,8 @@ std::string show(const std::vector<int>& values) {
   for (const int value : values) text += std::to_string(value) + " ";
   return text;
 }
+
+constexpr int kMajorDegrees[] = {0, 2, 4, 5, 7, 9, 11};
 
 std::vector<int> sorted(std::vector<int> values) {
   std::sort(values.begin(), values.end());
@@ -290,6 +294,65 @@ int main() {
     for (uint32_t id = kRoot; id <= kChannel; ++id)
       if (restored.parameter_value(id) != chord.parameter_value(id))
         fail("parameter " + std::to_string(id) + " did not survive the state");
+  }
+
+  // --- the off goes out on the channel the on went out on --------------------
+  //
+  // Moving the channel knob with a key held used to send the chord's offs on
+  // the new channel, where nothing was sounding, and leave the old channel
+  // ringing until something else closed it.
+  {
+    Chord chord;
+    chord.activate(48000.0, 512);
+    chord.set_parameter(kChannel, 2);
+    note_on(chord, 48);  // trigger zone
+    note_on(chord, 72);  // passthrough zone
+    nirbija::MidiEvent buffer[64];
+    size_t count = chord.take_midi_output(buffer, 64);
+    expect(count == 4, "a chord and a melody note should be four ons");
+    for (size_t e = 0; e < count; ++e)
+      if ((buffer[e].data[0] & 0x0f) != 2) fail("an on left on the wrong channel");
+
+    chord.set_parameter(kChannel, 9);
+    note_off(chord, 48);
+    note_off(chord, 72);
+    count = chord.take_midi_output(buffer, 64);
+    expect(count == 4, "four ons want four offs, got " + std::to_string(count));
+    for (size_t e = 0; e < count; ++e) {
+      expect((buffer[e].data[0] & 0xf0) == 0x80, "an on came out where an off was due");
+      expect((buffer[e].data[0] & 0x0f) == 2,
+             "an off went out on channel " + std::to_string(buffer[e].data[0] & 0x0f) +
+                 ", not the channel its on used");
+    }
+  }
+
+  // --- a full block keeps room for note-offs ----------------------------------
+  {
+    Chord chord;
+    chord.activate(48000.0, 512);
+    chord.set_parameter(kVoices, 4);
+    // Only scale tones make a chord, so the keys are C major's white keys.
+    // 24 of them at four voices is 96 ons; the block holds 128, the last 16
+    // for note-offs only.
+    std::vector<int> keys;
+    for (int key = 0; key < 60 && keys.size() < 24; ++key)
+      if (std::count(std::begin(kMajorDegrees), std::end(kMajorDegrees), key % 12))
+        keys.push_back(key);
+    for (const int key : keys) note_on(chord, key);
+    // Six keys retriggered: 24 offs fill the block to the brim, and every one
+    // must land; the ons that come with them are what gets dropped.
+    for (int i = 0; i < 6; ++i) {
+      note_off(chord, keys[static_cast<size_t>(i)]);
+      note_on(chord, keys[static_cast<size_t>(i)]);
+    }
+    nirbija::MidiEvent buffer[256];
+    const size_t count = chord.take_midi_output(buffer, 256);
+    expect(count <= 128, "the block took more than it can hold");
+    int offs = 0;
+    for (size_t e = 0; e < count; ++e)
+      if ((buffer[e].data[0] & 0xf0) == 0x80) ++offs;
+    expect(offs == 24, "a note-off was dropped from a full block, " +
+                           std::to_string(offs) + " of 24 came out");
   }
 
   if (failures > 0) {

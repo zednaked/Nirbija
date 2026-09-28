@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // Records a take from a live engine and reads the files back. A recorder that
 // writes a file is not the same as a recorder that writes the audio, so this
 // checks the samples, not just that something appeared on disk.

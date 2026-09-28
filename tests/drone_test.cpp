@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -65,6 +67,12 @@ struct Run {
 // Runs `blocks` blocks and listens to the left channel. `skip` leading
 // blocks are processed but not counted, so a measurement can wait for the
 // swell and the smoothing to settle.
+//
+// The frequency is the count of rising zero crossings over the time between
+// the first and the last of them, each placed between its two samples by
+// interpolation. Counting them against the window length instead has a
+// resolution of one crossing per window - two hertz on a half-second window,
+// which is more than the drift this file measures.
 Run run(DroneInstance& drone, int blocks, int skip = 0) {
   std::vector<float> l(kBlock), r(kBlock);
   float* outs[2] = {l.data(), r.data()};
@@ -74,6 +82,7 @@ Run run(DroneInstance& drone, int blocks, int skip = 0) {
   long counted = 0, zc = 0;
   float previous = 0.0f;
   bool have_previous = false;
+  double first_cross = 0.0, last_cross = 0.0;
   for (int b = 0; b < blocks; ++b) {
     drone.process(ins, outs, kBlock);
     if (b < skip) {
@@ -88,17 +97,23 @@ Run run(DroneInstance& drone, int blocks, int skip = 0) {
       out.peak = std::max(out.peak, std::fabs(s));
       if (have_previous) {
         out.max_delta = std::max(out.max_delta, std::fabs(s - previous));
-        if (previous <= 0.0f && s > 0.0f) ++zc;
+        if (previous <= 0.0f && s > 0.0f) {
+          const double at = static_cast<double>(counted) - 1.0 +
+                            static_cast<double>(-previous) /
+                                static_cast<double>(s - previous);
+          if (zc == 0) first_cross = at;
+          last_cross = at;
+          ++zc;
+        }
       }
       previous = s;
       have_previous = true;
       ++counted;
     }
   }
-  if (counted > 0) {
-    out.rms = std::sqrt(energy / counted);
-    out.zc_per_sec = zc * (kRate / counted);
-  }
+  if (counted > 0) out.rms = std::sqrt(energy / counted);
+  if (zc >= 2 && last_cross > first_cross)
+    out.zc_per_sec = static_cast<double>(zc - 1) * kRate / (last_cross - first_cross);
   return out;
 }
 
@@ -124,6 +139,77 @@ int main() {
       fail("a tempered fifth is not 2^(7/12)");
     if (std::fabs(DroneInstance::midi_to_hz(69) - 440.0) > 1e-9)
       fail("A4 is not 440");
+  }
+
+  // The oscillator's sine comes from a table. Its error against the real
+  // thing has to stay under what a sustained tone could show.
+  {
+    double worst = 0.0;
+    for (int i = -20000; i <= 40000; ++i) {
+      const double phase = i / 20000.0 + 1e-7 * (i % 7);
+      const double want = std::sin(2.0 * M_PI * phase);
+      worst = std::max(worst, std::fabs(DroneInstance::fast_sin(phase) - want));
+    }
+    if (worst > 1e-4)
+      fail("the sine table is off by " + std::to_string(worst));
+  }
+
+  // The saturator stands in for tanh: odd, monotone, inside two percent of
+  // it where the drone drives it, and pinned at one beyond.
+  {
+    double worst = 0.0;
+    float last = -2.0f;
+    for (int i = -400; i <= 400; ++i) {
+      const float x = i / 100.0f;
+      const float y = DroneInstance::soft_clip(x);
+      // Flat to the ulp against the clamp near |x| = 3, so a hair of slack.
+      if (y < last - 1e-6f) fail("soft_clip is not monotone at " + std::to_string(x));
+      last = y;
+      if (std::fabs(y + DroneInstance::soft_clip(-x)) > 1e-6f)
+        fail("soft_clip is not odd at " + std::to_string(x));
+      if (std::fabs(x) <= 3.0f)
+        worst = std::max(worst, std::fabs(static_cast<double>(y) - std::tanh(x)));
+    }
+    if (worst > 0.03)
+      fail("soft_clip strays " + std::to_string(worst) + " from tanh");
+    if (DroneInstance::soft_clip(3.0f) != 1.0f || DroneInstance::soft_clip(-9.0f) != -1.0f)
+      fail("soft_clip is not pinned at one past the knee");
+  }
+
+  // Two names held at once stay two names: param_name used to format into
+  // one thread-local buffer, so the second call overwrote the first.
+  {
+    const char* a = DroneInstance::param_name(DroneInstance::Detune);
+    const char* b = DroneInstance::param_name(3 * DroneInstance::kVoiceStride +
+                                              DroneInstance::Level);
+    if (std::string(a) != "String 1 Detune" || std::string(b) != "String 4 Level")
+      fail(std::string("param_name gave ") + a + " and " + b);
+  }
+
+  // reset() is activate() without the allocation: a drone that has been
+  // sounding for a second is, after it, indistinguishable from a fresh one.
+  {
+    auto used = make();
+    used->set_parameter(DroneInstance::Rise, 0.2);
+    run(*used, seconds(1.0));
+    used->reset();
+    auto fresh = make();
+    fresh->set_parameter(DroneInstance::Rise, 0.2);
+    std::vector<float> ul(kBlock), ur(kBlock), fl(kBlock), fr(kBlock);
+    float* uouts[2] = {ul.data(), ur.data()};
+    float* fouts[2] = {fl.data(), fr.data()};
+    float worst = 0.0f, peak = 0.0f;
+    for (int b = 0; b < seconds(0.5); ++b) {
+      used->process(nullptr, uouts, kBlock);
+      fresh->process(nullptr, fouts, kBlock);
+      for (uint32_t i = 0; i < kBlock; ++i) {
+        worst = std::max(worst, std::fabs(ul[i] - fl[i]));
+        peak = std::max(peak, std::fabs(fl[i]));
+      }
+    }
+    if (peak < 0.01f) fail("the fresh drone in the reset test is silent");
+    if (worst > 1e-5f)
+      fail("a reset drone differs from a fresh one by " + std::to_string(worst));
   }
 
   // A fresh drone sounds without being asked, but not at once: it rises out

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #include "core/chord.h"
 
 #include <algorithm>
@@ -149,18 +151,12 @@ void ChordInstance::deactivate() {
   origin_.fill(Origin::None);
   trigger_voice_count_.fill(0);
   passthrough_pitch_.fill(-1);
-  event_count_ = 0;
+  out_.clear();
 }
 
 void ChordInstance::emit(uint32_t frame, uint8_t status, uint8_t data1,
                          uint8_t data2) {
-  if (event_count_ >= kMaxEvents) return;
-  MidiEvent& event = events_[event_count_++];
-  event.frame = frame;
-  event.size = 3;
-  event.data[0] = status;
-  event.data[1] = data1;
-  event.data[2] = data2;
+  out_.emit(frame, status, data1, data2);
 }
 
 void ChordInstance::handle_trigger_on(uint32_t frame, uint8_t note,
@@ -190,12 +186,13 @@ void ChordInstance::handle_trigger_on(uint32_t frame, uint8_t note,
          static_cast<uint8_t>(chord[k]), velocity);
   }
   trigger_voice_count_[note] = static_cast<uint8_t>(voice_count);
+  trigger_channel_[note] = static_cast<uint8_t>(channel);
 }
 
 void ChordInstance::handle_trigger_off(uint32_t frame, uint8_t note) {
   const uint8_t count = trigger_voice_count_[note];
   if (count == 0) return;
-  const int channel = clamp_int(channel_.load(std::memory_order_relaxed), 0, 15);
+  const uint8_t channel = trigger_channel_[note];  // the on's, not the knob's
   for (uint8_t k = 0; k < count; ++k)
     emit(frame, static_cast<uint8_t>(kNoteOff | channel), trigger_voices_[note][k], 0);
   trigger_voice_count_[note] = 0;
@@ -213,6 +210,7 @@ void ChordInstance::handle_passthrough_on(uint32_t frame, uint8_t note,
   }
   const int channel = clamp_int(channel_.load(std::memory_order_relaxed), 0, 15);
   passthrough_pitch_[note] = static_cast<int16_t>(out_note);
+  passthrough_channel_[note] = static_cast<uint8_t>(channel);
   emit(frame, static_cast<uint8_t>(kNoteOn | channel), static_cast<uint8_t>(out_note),
        velocity);
 }
@@ -220,7 +218,7 @@ void ChordInstance::handle_passthrough_on(uint32_t frame, uint8_t note,
 void ChordInstance::handle_passthrough_off(uint32_t frame, uint8_t note) {
   const int16_t out_note = passthrough_pitch_[note];
   if (out_note < 0) return;
-  const int channel = clamp_int(channel_.load(std::memory_order_relaxed), 0, 15);
+  const uint8_t channel = passthrough_channel_[note];  // the on's channel
   emit(frame, static_cast<uint8_t>(kNoteOff | channel), static_cast<uint8_t>(out_note), 0);
   passthrough_pitch_[note] = -1;
 }
@@ -266,15 +264,7 @@ void ChordInstance::process(const float* const*, float* const*, uint32_t) {
 }
 
 size_t ChordInstance::take_midi_output(MidiEvent* out, size_t capacity) {
-  std::sort(events_.begin(), events_.begin() + event_count_,
-            [](const MidiEvent& a, const MidiEvent& b) {
-              if (a.frame != b.frame) return a.frame < b.frame;
-              return (a.data[0] & 0xf0) < (b.data[0] & 0xf0);  // off before on
-            });
-  const size_t count = std::min(event_count_, capacity);
-  std::copy_n(events_.begin(), count, out);
-  event_count_ = 0;
-  return count;
+  return out_.take(out, capacity);
 }
 
 std::vector<ParameterInfo> ChordInstance::parameters() const {

@@ -49,6 +49,12 @@ set(nirbija_qml
   qml/KeyboardEditor.qml
   qml/SamplerEditor.qml
   qml/RenameDialog.qml
+  qml/ConfirmDialog.qml
+  qml/EditorPopup.qml
+  qml/StageChip.qml
+  qml/MapRing.qml
+  qml/TrimHandle.qml
+  qml/FadeHandle.qml
   qml/PanControl.qml
   qml/ValueTrack.qml
   qml/ParamBar.qml
@@ -91,6 +97,8 @@ qt_add_qml_module(nirbija_ui
   SOURCES
     compositor_rules.cpp
     compositor_rules.h
+    expose_watcher.cpp
+    expose_watcher.h
     mixer_model.cpp
     mixer_model.h
     mixer_session.cpp
@@ -136,3 +144,7 @@ install(FILES ${CMAKE_SOURCE_DIR}/packaging/nirbija.svg
         DESTINATION share/icons/hicolor/scalable/apps)
 install(FILES ${CMAKE_SOURCE_DIR}/packaging/nirbija.png
         DESTINATION share/icons/hicolor/256x256/apps)
+# AppStream metadata: what a software centre, appimagehub or a Flatpak
+# manifest reads to show the app with a description and screenshots.
+install(FILES ${CMAKE_SOURCE_DIR}/packaging/io.github.zednaked.Nirbija.metainfo.xml
+        DESTINATION share/metainfo)

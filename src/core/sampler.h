@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #pragma once
 
 #include <array>
@@ -8,6 +10,8 @@
 #include <string_view>
 #include <vector>
 
+#include "core/dsp.h"
+#include "core/file_player.h"
 #include "core/plugin.h"
 #include "core/rt_queue.h"
 
@@ -184,6 +188,14 @@ class SamplerInstance : public PluginInstance {
   // mantem em quarentena o que foi liberado.
   size_t retired_count() const { return retired_.size(); }
 
+  // How many voices can sound at once, across all pads. Two per pad: a
+  // retrigger lets the last hit finish its short release while the new one
+  // starts, instead of restarting the wave mid-cycle.
+  static constexpr int kVoicePool = 2 * kPads;
+  // The anti-click envelope, in frames: every start and every stop that is
+  // not the pad's own fade goes through a ramp this long.
+  static constexpr int kFade = 64;
+
   // Just the pads: names, tuning and audio, not the instrument's own gain,
   // quantize or count-in — what "swap the kit" means without also resetting
   // how Rec behaves. A different shape from save_state()/load_state(), which
@@ -193,23 +205,13 @@ class SamplerInstance : public PluginInstance {
 
   const PluginDescriptor& descriptor() const override { return descriptor_; }
 
-  // Interleaved stereo at the file's (or the rec take's) own rate. Public so
-  // the decoder in the .cpp can name it without being a member.
-  struct Buffer {
-    std::vector<float> samples;
-    uint64_t frames = 0;
-    double sample_rate = 48000.0;
-  };
+  // Interleaved stereo at the file's (or the rec take's) own rate: the same
+  // shape the File Player decodes into, so the two share one decoder.
+  using Buffer = DecodedAudio;
 
  private:
   static constexpr size_t kMaxEvents = 64;
   static constexpr size_t kQueueCapacity = 256;
-  static constexpr int kFade = 64;
-
-  struct RetiredBuffer {
-    std::shared_ptr<Buffer> buffer;
-    uint64_t generation = 0;
-  };
 
   struct Pad {
     std::shared_ptr<Buffer> owned;
@@ -250,8 +252,20 @@ class SamplerInstance : public PluginInstance {
     float gain_l = 1.0f;
     float gain_r = 1.0f;
     int attack = 0;
-    int release = kFade;
+    // The release is `release_left * release_inv`, so it can be shortened
+    // mid-way (a swapped buffer must be left inside the block) without the
+    // level stepping: the scale is refitted to the level it was at.
+    int release_left = kFade;
+    float release_inv = 1.0f / kFade;
     bool releasing = false;
+    uint64_t serial = 0;  // start order, for stealing the oldest
+    // The pad's fades, refreshed once per block: frame counts and their
+    // reciprocals, so the per-sample gain is a compare and a multiply and
+    // not two atomic loads and two divisions.
+    uint64_t fade_in_frames = 0;
+    uint64_t fade_out_frames = 0;
+    float fade_in_inv = 0.0f;
+    float fade_out_inv = 0.0f;
   };
 
   struct Preview {
@@ -263,7 +277,6 @@ class SamplerInstance : public PluginInstance {
   void publish(int pad, std::shared_ptr<Buffer> buffer);
   void start_voice(int pad, int velocity, uint32_t frame);
   void release_voice(int pad);
-  void chase_pad(int pad);
   void handle_midi(const MidiEvent& event);
   int pad_for_note(int note) const;
   void seed_defaults();
@@ -271,16 +284,21 @@ class SamplerInstance : public PluginInstance {
   void stash_undo(int pad);
   void fire_count_click(bool downbeat);
   void flash_pad(int pad);
-  float fade_gain(int pad, uint64_t position, uint64_t start,
-                  uint64_t end) const;
+  void refresh_voice_fades(Voice& voice) const;
+  static void shorten_release(Voice& voice, int frames);
+  std::shared_ptr<Buffer> decode_for_pad(const std::string& path) const;
   void write_pads_to(std::vector<uint8_t>& out) const;
   bool read_pads_from(const uint8_t*& cursor, const uint8_t* end,
                       int pad_count, bool has_path_field);
 
   PluginDescriptor descriptor_;
   std::array<Pad, kPads> pads_{};
-  std::vector<RetiredBuffer> retired_;
+  dsp::RetiredList<Buffer> retired_;
   std::atomic<uint64_t> process_generation_{0};
+  // reclaim_retired(false) frees everything at once because there is no
+  // audio thread; the next block must then drop, not fade, any voice still
+  // pointing at a buffer that is no longer its pad's.
+  std::atomic<bool> reclaimed_without_audio_{false};
 
   double engine_rate_ = 48000.0;
   int channels_ = 2;
@@ -292,7 +310,6 @@ class SamplerInstance : public PluginInstance {
   std::atomic<bool> rec_request_{false};
   std::atomic<bool> recording_{false};
   std::atomic<int> rec_pad_{0};
-  std::atomic<uint32_t> stop_mask_{0};
   std::atomic<uint32_t> sounding_mask_{0};
   std::atomic<bool> armed_{false};
   std::atomic<float> rec_fill_{0.0f};
@@ -315,10 +332,7 @@ class SamplerInstance : public PluginInstance {
   double count_phase_ = 0.0;
   int count_total_ = 0;
   std::atomic<int> count_in_left_{0};
-  uint32_t click_remaining_ = 0;
-  uint32_t click_length_ = 0;
-  double click_phase_ = 0.0;
-  double click_step_ = 0.0;
+  dsp::ClickTone click_;
 
   // Audio thread writes, UI thread copies after Rec drops. Sized in activate.
   std::vector<float> rec_buffer_;
@@ -332,6 +346,7 @@ class SamplerInstance : public PluginInstance {
   size_t incoming_count_ = 0;
   RtQueue<Preview, kQueueCapacity> preview_;
 
-  std::array<Voice, kPads> voices_{};  // audio thread only
+  std::array<Voice, kVoicePool> voices_{};  // audio thread only
+  uint64_t voice_serial_ = 0;
 };
 }  // namespace nirbija

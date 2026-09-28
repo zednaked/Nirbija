@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #include "core/script_plugin.h"
 
 #include <lua.hpp>
@@ -165,12 +167,36 @@ void ScriptInstance::reclaim_retired(bool audio_running) {
   });
 }
 
+ScriptInstance::Clock::time_point ScriptInstance::now() const {
+  return clock_ ? clock_() : Clock::now();
+}
+
+void ScriptInstance::set_clock_for_tests(
+    std::function<Clock::time_point()> now) {
+  clock_ = std::move(now);
+}
+
+void ScriptInstance::rebuild_if_due() {
+  if (!rebuild_pending_.load(std::memory_order_acquire)) return;
+  if (now() - last_rebuild_ < kRebuildInterval) return;
+  // set_script clears the flag and stamps the time.
+  set_script(script());
+}
+
+void ScriptInstance::host_idle() { rebuild_if_due(); }
+
 bool ScriptInstance::set_script(const std::string& source) {
   {
     const std::lock_guard<std::mutex> guard(text_mutex_);
     source_ = source;
     error_.clear();
   }
+  // Whatever a knob asked for is covered by this build: it reads the knobs
+  // as they are now. Counted and stamped before the run, so a failing script
+  // still resets the debounce rather than being retried every idle poll.
+  rebuild_pending_.store(false, std::memory_order_release);
+  rebuild_count_.fetch_add(1, std::memory_order_relaxed);
+  last_rebuild_ = now();
   // A fresh interpreter every time, rather than a fresh chunk in the old one.
   // Globals survive a chunk, so a script that no longer defines `build` would
   // keep running the previous one, and what a script did would depend on what
@@ -257,8 +283,6 @@ std::string ScriptInstance::error() const {
 }
 
 void ScriptInstance::queue_midi(const MidiEvent& event) {
-  if (event_count_ >= kMaxEvents) return;
-
   const Tables* tables = live_.load(std::memory_order_acquire);
   const uint8_t status = event.data[0] & 0xf0;
   const bool is_note = event.size >= 3 && (status == kNoteOn || status == kNoteOff);
@@ -266,7 +290,7 @@ void ScriptInstance::queue_midi(const MidiEvent& event) {
   // Anything that is not a note, and anything at all before a script has been
   // published, goes through untouched.
   if (tables == nullptr || !is_note) {
-    events_[event_count_++] = event;
+    out_.push(event);
     return;
   }
 
@@ -280,11 +304,14 @@ void ScriptInstance::queue_midi(const MidiEvent& event) {
       if (sounding_[i].in_note != in_note ||
           sounding_[i].in_channel != in_channel)
         continue;
-      MidiEvent& out = events_[event_count_++];
-      out = event;
+      MidiEvent out = event;
       out.data[0] = static_cast<uint8_t>(kNoteOff | sounding_[i].out_channel);
       out.data[1] = sounding_[i].out_note;
       out.data[2] = event.data[2];
+      // A note-off the block cannot take (it is full to the last slot) stays
+      // owed: the entry remains so the next release of the key still finds
+      // it. Note-offs have the reserve, so this is the block entirely full.
+      if (!out_.push(out)) return;
       sounding_[i] = sounding_[sounding_count_ - 1];
       --sounding_count_;
       return;
@@ -304,11 +331,11 @@ void ScriptInstance::queue_midi(const MidiEvent& event) {
 
   const uint8_t out_channel =
       static_cast<uint8_t>(tables->channel[in_channel] & 0x0f);
-  MidiEvent& out = events_[event_count_++];
-  out = event;
+  MidiEvent out = event;
   out.data[0] = static_cast<uint8_t>(status | out_channel);
   out.data[1] = static_cast<uint8_t>(note);
   out.data[2] = static_cast<uint8_t>(velocity);
+  if (!out_.push(out)) return;  // a note-on dropped is a missed note, no more
 
   if (!off && sounding_count_ < sounding_.size())
     sounding_[sounding_count_++] = {in_note, in_channel,
@@ -322,9 +349,12 @@ void ScriptInstance::process(const float* const*, float* const*, uint32_t) {
 }
 
 size_t ScriptInstance::take_midi_output(MidiEvent* out, size_t capacity) {
-  const size_t count = std::min(event_count_, capacity);
-  std::copy_n(events_.begin(), count, out);
-  event_count_ = 0;
+  // Not out_.take(): that sorts, and the input's own order is the right one
+  // here - every event keeps the frame it came in on, and a script does not
+  // make new notes, only rewrites the ones it is handed.
+  const size_t count = std::min(out_.count(), capacity);
+  std::copy_n(out_.begin(), count, out);
+  out_.clear();
   return count;
 }
 
@@ -348,8 +378,11 @@ void ScriptInstance::set_parameter(uint32_t id, double value) {
   if (id >= kKnobs) return;
   knobs_[id].store(std::clamp(value, 0.0, 1.0), std::memory_order_relaxed);
   // A knob is an input to the script, so moving one means building again.
-  // This is the UI thread, which is where that is allowed to happen.
-  set_script(script());
+  // This is the UI thread, which is where that is allowed to happen - but
+  // not a hundred times a second while a slider is dragged. The first move
+  // after a quiet spell builds at once; the rest wait for host_idle().
+  rebuild_pending_.store(true, std::memory_order_release);
+  rebuild_if_due();
 }
 
 std::vector<uint8_t> ScriptInstance::save_state() const {

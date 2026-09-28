@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // Feeds the arpeggiator a chord and reads back the figure it makes. Same shape
 // as the step sequencer's test: a synthetic transport, no JACK, no display.
 
@@ -356,6 +358,26 @@ int main() {
     for (uint32_t id = 0; id <= 6; ++id)
       if (restored.parameter_value(id) != arp.parameter_value(id))
         fail("parameter " + std::to_string(id) + " did not survive the state");
+  }
+
+  // --- a full block keeps room for note-offs ----------------------------------
+  //
+  // With thru on, what comes in shares the block with the figure. Once it is
+  // nearly full a note-on is the thing to lose; a note-off lost is a stuck
+  // note on whatever sits after the arpeggiator.
+  {
+    Arp arp;
+    arp.activate(kRate, kBlock);
+    arp.set_parameter(6, 1.0);  // thru
+    for (int i = 0; i < 100; ++i) note_on(arp, 30 + i % 12);
+    note_off(arp, 30);
+    nirbija::MidiEvent buffer[128];
+    const size_t count = arp.take_midi_output(buffer, 128);
+    expect(count < 100, "the block took more than it can hold");
+    bool saw_off = false;
+    for (size_t i = 0; i < count; ++i)
+      if ((buffer[i].data[0] & 0xf0) == 0x80) saw_off = true;
+    expect(saw_off, "a note-off was dropped from a full block");
   }
 
   if (failures > 0) {

@@ -1,0 +1,116 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 28, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "NIRBIJA_TESTS": "ON"
+      }
+    },
+    {
+      "name": "dev",
+      "displayName": "Release with the UI, the tree you run",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "NIRBIJA_UI": "ON"
+      }
+    },
+    {
+      "name": "debug",
+      "displayName": "Debug with the UI, for a debugger",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "NIRBIJA_UI": "ON"
+      }
+    },
+    {
+      "name": "asan",
+      "displayName": "Headless core under ASan+UBSan (what the pre-push hook runs)",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build-asan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "NIRBIJA_UI": "OFF",
+        "NIRBIJA_WERROR": "ON",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer -g",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address,undefined"
+      }
+    },
+    {
+      "name": "asan-ui",
+      "displayName": "UI models under ASan+UBSan (offscreen Qt)",
+      "inherits": "asan",
+      "binaryDir": "${sourceDir}/build-asan-ui",
+      "cacheVariables": { "NIRBIJA_UI": "ON" }
+    },
+    {
+      "name": "tsan",
+      "displayName": "Headless core under ThreadSanitizer",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build-tsan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "NIRBIJA_UI": "OFF",
+        "CMAKE_CXX_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer -g",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "What dist.sh ships: Release, LTO, no tests",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "NIRBIJA_UI": "ON",
+        "NIRBIJA_TESTS": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "dev", "configurePreset": "dev" },
+    { "name": "debug", "configurePreset": "debug" },
+    { "name": "asan", "configurePreset": "asan" },
+    { "name": "asan-ui", "configurePreset": "asan-ui" },
+    { "name": "tsan", "configurePreset": "tsan" },
+    { "name": "release", "configurePreset": "release" }
+  ],
+  "testPresets": [
+    {
+      "name": "quick",
+      "displayName": "The offline suite: no audio server, no installed plugins",
+      "configurePreset": "asan",
+      "filter": { "include": { "label": "quick" } },
+      "environment": {
+        "ASAN_OPTIONS": "detect_leaks=0",
+        "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=0"
+      },
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "all",
+      "displayName": "Everything, including the plugin scan of this machine",
+      "configurePreset": "asan",
+      "environment": {
+        "ASAN_OPTIONS": "detect_leaks=0",
+        "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=0"
+      },
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan",
+      "filter": { "include": { "label": "quick" } },
+      "environment": { "TSAN_OPTIONS": "halt_on_error=0 second_deadlock_stack=1" },
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

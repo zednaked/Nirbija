@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // The Drone as a CLAP plugin. The instrument is DroneInstance, unchanged; this
 // file is the shell CLAP wants around it - a descriptor, a factory, and the
 // four extensions a host needs to play it: parameters, state, one stereo
@@ -48,6 +50,11 @@ struct Plugin {
   DroneInstance drone;
   double sample_rate = 48000.0;
   uint32_t max_frames = 256;
+  // The Root the host last knows about: what it set itself, or what we last
+  // told it. A note re-roots the drone behind the host's back, and the
+  // difference is what plugin_process reports as a parameter change so the
+  // host's UI and automation follow the key that was played.
+  double root_known = DroneInstance::param_default(DroneInstance::Root);
 };
 
 Plugin* self(const clap_plugin_t* plugin) {
@@ -62,19 +69,26 @@ void handle_event(Plugin& p, const clap_event_header_t* header) {
     case CLAP_EVENT_PARAM_VALUE: {
       const auto* event = reinterpret_cast<const clap_event_param_value_t*>(header);
       p.drone.set_parameter(event->param_id, event->value);
+      if (event->param_id == DroneInstance::Root)
+        p.root_known = p.drone.parameter_value(DroneInstance::Root);
       break;
     }
     case CLAP_EVENT_NOTE_ON: {
       const auto* event = reinterpret_cast<const clap_event_note_t*>(header);
       if (event->key < 0 || event->key > 127) break;
+      // A note-on at velocity zero is a note-off by another name, and a
+      // note-off does nothing to a drone. Rounded up to velocity 1 it
+      // re-rooted the drone on what a controller meant as a release.
+      const int velocity =
+          std::clamp(static_cast<int>(std::lround(event->velocity * 127.0)), 0, 127);
       MidiEvent midi;
       midi.frame = header->time;
       midi.size = 3;
       midi.data[0] = static_cast<uint8_t>(
-          0x90u | static_cast<uint8_t>(std::clamp<int16_t>(event->channel, 0, 15)));
+          (velocity > 0 ? 0x90u : 0x80u) |
+          static_cast<uint8_t>(std::clamp<int16_t>(event->channel, 0, 15)));
       midi.data[1] = static_cast<uint8_t>(event->key);
-      midi.data[2] = static_cast<uint8_t>(
-          std::clamp(static_cast<int>(std::lround(event->velocity * 127.0)), 1, 127));
+      midi.data[2] = static_cast<uint8_t>(velocity);
       p.drone.queue_midi(midi);
       break;
     }
@@ -201,9 +215,33 @@ bool params_text_to_value(const clap_plugin_t*, clap_id id, const char* text,
   return true;
 }
 
+// Tells the host the Root moved without it asking - a played note did it.
+void report_root(Plugin& p, const clap_output_events_t* out, uint32_t time) {
+  const double root = p.drone.parameter_value(DroneInstance::Root);
+  if (root == p.root_known) return;
+  p.root_known = root;
+  if (out == nullptr || out->try_push == nullptr) return;
+  clap_event_param_value_t event{};
+  event.header.size = sizeof(event);
+  event.header.time = time;
+  event.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+  event.header.type = CLAP_EVENT_PARAM_VALUE;
+  event.header.flags = 0;
+  event.param_id = DroneInstance::Root;
+  event.cookie = nullptr;
+  event.note_id = -1;
+  event.port_index = -1;
+  event.channel = -1;
+  event.key = -1;
+  event.value = root;
+  out->try_push(out, &event.header);
+}
+
 void params_flush(const clap_plugin_t* plugin, const clap_input_events_t* in,
-                  const clap_output_events_t*) {
-  handle_events(*self(plugin), in);
+                  const clap_output_events_t* out) {
+  Plugin& p = *self(plugin);
+  handle_events(p, in);
+  report_root(p, out, 0);
 }
 
 const clap_plugin_params_t kParams = {
@@ -234,7 +272,11 @@ bool state_load(const clap_plugin_t* plugin, const clap_istream_t* stream) {
     if (n == 0) break;
     blob.insert(blob.end(), chunk, chunk + n);
   }
-  return self(plugin)->drone.load_state(blob);
+  Plugin& p = *self(plugin);
+  const bool ok = p.drone.load_state(blob);
+  // A loaded Root is the host's own doing, not a note's: nothing to report.
+  p.root_known = p.drone.parameter_value(DroneInstance::Root);
+  return ok;
 }
 
 const clap_plugin_state_t kState = {state_save, state_load};
@@ -296,8 +338,9 @@ bool plugin_start_processing(const clap_plugin_t*) { return true; }
 void plugin_stop_processing(const clap_plugin_t*) {}
 
 void plugin_reset(const clap_plugin_t* plugin) {
-  Plugin& p = *self(plugin);
-  p.drone.activate(p.sample_rate, p.max_frames);
+  // Called on the audio thread: clear, do not reallocate. activate() sizes
+  // the reverb and would allocate here.
+  self(plugin)->drone.reset();
 }
 
 clap_process_status plugin_process(const clap_plugin_t* plugin,
@@ -311,6 +354,7 @@ clap_process_status plugin_process(const clap_plugin_t* plugin,
   p.drone.set_channel_layout(channels);
   float* outputs[2] = {out.data32[0], channels > 1 ? out.data32[1] : nullptr};
   p.drone.process(nullptr, outputs, process->frames_count);
+  report_root(p, process->out_events, 0);
   // A drone is never done: the host must keep calling.
   return CLAP_PROCESS_CONTINUE;
 }

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #pragma once
 
 #include <array>
@@ -5,6 +7,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "core/midi_out.h"
 #include "core/plugin.h"
 
 namespace nirbija {
@@ -118,8 +121,7 @@ class ArpeggiatorInstance : public PluginInstance {
   double last_step_beat_ = -1.0;
   uint32_t random_state_ = 0x9e3779b9u;
 
-  std::array<MidiEvent, kMaxEvents> events_{};
-  size_t event_count_ = 0;
+  MidiOutBlock<kMaxEvents> out_;
 };
 
 }  // namespace nirbija

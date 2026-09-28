@@ -1,4 +1,5 @@
 pragma ComponentBehavior: Bound
+// SPDX-License-Identifier: GPL-3.0-only
 
 import QtQuick
 import QtQuick.Controls.Basic
@@ -14,7 +15,7 @@ import Nirbija
 //
 // Nothing here is a switch. Every gesture lands on a smoothed value in the
 // plugin, so the drone can be played from this window without a click.
-Popup {
+EditorPopup {
     id: root
 
     property int targetRow: -1
@@ -28,7 +29,6 @@ Popup {
     property real rootNow: 38
     property bool mapping: false
     property int waitingParam: -1
-    property bool positioned: false
     // Seconds since the editor opened, advanced by the poll. The strings'
     // motion is drawn from it rather than from a per-string animation, so
     // six canvases stay in step and stop together when the popup closes.
@@ -119,76 +119,29 @@ Popup {
 
     width: Px.px(900)
     height: Px.px(620)
-    modal: false
-    padding: Skin.spacingL
-    closePolicy: (root.mapping || Mixer.learning)
-                 ? Popup.NoAutoClose
-                 : Popup.CloseOnEscape
-
-    background: Rectangle {
-        gradient: Gradient {
-            GradientStop { position: 0.0; color: Qt.lighter(Skin.popup, 1.08) }
-            GradientStop { position: 1.0; color: Skin.popup }
-        }
-        border.width: 1
-        border.color: Skin.border
-        radius: Skin.radiusL
-        clip: true
-
-        // The glow: light under a door, in the root's colour, as bright as
-        // the drone is loud. It is the only thing in the window that moves
-        // when nobody is touching it, and it says the drone is alive with the
-        // popup half seen across a dark room.
-        Rectangle {
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.bottom: parent.bottom
-            height: parent.height * 0.4
-            radius: parent.radius
-            gradient: Gradient {
-                GradientStop { position: 0.0; color: "transparent" }
-                GradientStop { position: 1.0; color: root.pitchHue(0) }
-            }
-            opacity: Math.min(0.32, root.peak * 0.5)
-            Behavior on opacity { NumberAnimation { duration: 120 } }
-        }
-
-        HoverHandler {}
-        TapHandler {}
-        DragHandler {
-            target: null
-            grabPermissions: PointerHandler.TakeOverForbidden
-            onCentroidChanged: if (active) {
-                const nx = root.x + centroid.position.x - centroid.pressPosition.x
-                const ny = root.y + centroid.position.y - centroid.pressPosition.y
-                const maxX = Overlay.overlay
-                    ? Math.max(0, Overlay.overlay.width - root.width) : nx
-                const maxY = Overlay.overlay
-                    ? Math.max(0, Overlay.overlay.height - root.height) : ny
-                root.x = Math.max(0, Math.min(nx, maxX))
-                root.y = Math.max(0, Math.min(ny, maxY))
-            }
-        }
-    }
+    // The chrome, the glow and the drag are EditorPopup's; what the glow
+    // says is this editor's.
+    holdOpen: root.mapping || Mixer.learning
+    glowHue: root.pitchHue(0)
+    glowOpacity: Math.min(0.32, root.peak * 0.5)
+    eatsWheel: false
 
     function openFor(row, slot) {
         root.targetRow = row
         root.targetSlot = slot
         root.refresh()
-        if (!root.positioned) {
-            // Clamped: opened before the window has its size, the centre of
-            // a zero-sized overlay is off the top-left corner.
-            root.x = Math.max(0, Math.round((Overlay.overlay.width - root.width) / 2))
-            root.y = Math.max(0, Math.round((Overlay.overlay.height - root.height) / 2))
-            root.positioned = true
-        }
+        root.place()
         root.open()
     }
 
-    onOpened: poll.start()
-    onClosed: {
-        poll.stop()
-        root.stopMapping()
+    onClosed: root.stopMapping()
+
+    // Whether any string has weight: with none, and nothing coming out, the
+    // strings are drawn once at rest and the clock stands still.
+    readonly property bool anyGain: {
+        for (let i = 0; i < root.gains.length; ++i)
+            if (root.gains[i] > 0.001) return true
+        return false
     }
 
     function refresh() {
@@ -230,13 +183,15 @@ Popup {
         onActivated: root.stopMapping()
     }
 
-    Timer {
-        id: poll
-        interval: 40
-        repeat: true
-        onTriggered: {
+    // On the mixer's 30 Hz beat rather than a timer of this popup's own. The
+    // clock the six canvases repaint on only advances while the drone is
+    // making sound: in silence the strings hang at rest and nothing repaints.
+    Connections {
+        target: Mixer
+        enabled: root.visible
+        function onTick() {
             root.refresh()
-            root.clock += poll.interval / 1000
+            if (root.peak > 0.001 || root.anyGain) root.clock += 1 / 30
         }
     }
 
@@ -598,8 +553,8 @@ Popup {
                                         enabled: !root.mapping
                                         target: null
                                         dragThreshold: 0
+                                        // No Approves bit: once this handler has the grab nobody may take it.
                                         grabPermissions: PointerHandler.CanTakeOverFromAnything
-                                                         | PointerHandler.ApprovesTakeOverByNothing
                                         property int axis: 0  // 0 undecided, 1 level, 2 detune
                                         property real pressDetune: 0
                                         onActiveChanged: {
@@ -919,8 +874,8 @@ Popup {
                             enabled: !root.mapping
                             target: null
                             dragThreshold: 0
+                            // No Approves bit: once this handler has the grab nobody may take it.
                             grabPermissions: PointerHandler.CanTakeOverFromAnything
-                                             | PointerHandler.ApprovesTakeOverByNothing
                             function apply() {
                                 sky.forceActiveFocus(Qt.MouseFocusReason)
                                 root.setP(root.pCutoff, Math.max(0, Math.min(1, centroid.position.x / Math.max(1, sky.width))))

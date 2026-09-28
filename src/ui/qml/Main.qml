@@ -1,4 +1,5 @@
 pragma ComponentBehavior: Bound
+// SPDX-License-Identifier: GPL-3.0-only
 
 import QtQuick
 import QtQuick.Controls.Basic
@@ -15,17 +16,46 @@ ApplicationWindow {
     minimumWidth: Px.px(660)
     minimumHeight: Px.px(520)
     visible: true
-    title: Mixer.dirty ? qsTr("Nirbija •") : qsTr("Nirbija")
+    // The dot says "unsaved". It follows `dirty` up at once and down only
+    // after the flag has stayed down a while: the autosave clears it once a
+    // second in the middle of a fader drag, and the title used to blink at
+    // that rate the whole way down.
+    property bool showDirty: Mixer.dirty
+    title: window.showDirty ? qsTr("Nirbija •") : qsTr("Nirbija")
     color: Skin.background
+
+    Connections {
+        target: Mixer
+        function onDirtyChanged() {
+            if (Mixer.dirty) {
+                cleanSettle.stop()
+                window.showDirty = true
+            } else {
+                cleanSettle.restart()
+            }
+        }
+    }
+    Timer {
+        id: cleanSettle
+        interval: 1500
+        onTriggered: if (!Mixer.dirty) window.showDirty = false
+    }
 
     // Meters are the only thing in this window that redraws by itself. When the
     // window is not on screen there is nobody to redraw for, so the model stops
     // announcing levels — it still reads them, because reading is what clears
-    // the peak on the audio side.
+    // the peak on the audio side. "On screen" is the compositor's word for
+    // it (exposed), not only Minimized: a workspace switched away under
+    // Hyprland never reports the latter.
+    ExposeWatcher {
+        id: exposeWatch
+        window: window
+    }
     Binding {
         target: Mixer
         property: "metersActive"
         value: window.visible && window.visibility !== Window.Minimized
+               && exposeWatch.exposed
     }
 
     // StandardKey.Cancel already is "Escape" on this platform - the app only
@@ -125,14 +155,25 @@ ApplicationWindow {
         ]
     }
 
-    function sourceMenu(row, label, midi, item) {
+    function sourceMenu(row, connected, midi, item) {
         return [
             { label: midi ? qsTr("Change MIDI source…") : qsTr("Change input…"),
               action: () => window.openPortPicker(midi ? "midi" : "audio",
                                                   row, item) },
             { label: qsTr("Disconnect"), danger: true,
-              enabled: label !== (midi ? qsTr("no MIDI") : qsTr("no input")),
+              enabled: connected,
               action: () => Mixer.connectSource(row, "", midi) }
+        ]
+    }
+
+    // A plugin the session names and this machine does not have: nothing to
+    // open, nothing to bypass - only the entry to keep or to let go of.
+    function missingInsertMenu(row, slot, uid) {
+        return [
+            { label: qsTr("Not installed here: %1").arg(uid), enabled: false,
+              action: () => {} },
+            { label: qsTr("Forget it"), danger: true,
+              action: () => Mixer.removeInsert(row, slot) }
         ]
     }
 
@@ -191,7 +232,7 @@ ApplicationWindow {
               enabled: row > 0,
               action: () => Mixer.moveChannel(row, -1) },
             { label: qsTr("Move right"),
-              enabled: row < Mixer.rowCount() - 1,
+              enabled: row < Mixer.count - 1,
               action: () => Mixer.moveChannel(row, 1) },
             { label: qsTr("Direct output…"),
               action: () => window.openPortPicker("channelSink", row, null) },
@@ -217,8 +258,22 @@ ApplicationWindow {
             { label: qsTr("Load session…"),
               action: () => sessionLoadDialog.open() },
             { label: qsTr("New session"), danger: true,
-              action: () => Mixer.newSession() }
+              action: () => window.confirmNewSession() }
         ]
+    }
+
+    // Asks first when there is anything to lose. Undo brings it back either
+    // way, but a slipped click on a live set should not need it to.
+    function confirmNewSession() {
+        if (!Mixer.sessionHasContent()) {
+            Mixer.newSession()
+            return
+        }
+        window.openConfirm(
+            qsTr("New session?"),
+            qsTr("Every strip and its plugins will be removed. Undo brings them back."),
+            qsTr("New session"),
+            () => Mixer.newSession())
     }
 
     function addMenu() {
@@ -338,11 +393,17 @@ ApplicationWindow {
         fileDialog.targetSlot = slot
         fileDialog.open()
     }
+
+    function openConfirm(heading, text, label, action) {
+        confirmLoader.active = true
+        confirmLoader.item.ask(heading, text, label, action)
+    }
     // qmllint enable missing-property
 
     TopBar {
         id: topBar
         width: parent.width
+        loading: Mixer.loading
         positionLeft: Mixer.masterPositionLeft
         positionRight: Mixer.masterPositionRight
         holdLeft: Mixer.masterHoldLeft
@@ -437,6 +498,8 @@ ApplicationWindow {
                     holdRight: strip.model.holdRight
                     inputLabel: strip.model.inputLabel
                     midiLabel: strip.model.midiLabel
+                    inputConnected: strip.model.inputConnected
+                    midiConnected: strip.model.midiConnected
                     outputLabel: strip.model.outputLabel
                     inserts: strip.model.insertDetails
                     accent: strip.model.accent
@@ -450,21 +513,30 @@ ApplicationWindow {
 
                     onInputMenuRequested: item => slotMenu.openAt(
                         item,
-                        window.sourceMenu(strip.index, strip.model.inputLabel,
+                        window.sourceMenu(strip.index, strip.model.inputConnected,
                                           false, item),
                         strip.model.inputLabel)
 
                     onMidiMenuRequested: item => slotMenu.openAt(
                         item,
-                        window.sourceMenu(strip.index, strip.model.midiLabel,
+                        window.sourceMenu(strip.index, strip.model.midiConnected,
                                           true, item),
                         strip.model.midiLabel)
 
-                    onInsertMenuRequested: (slot, item) => slotMenu.openAt(
-                        item,
-                        window.insertMenu(strip.index, slot,
-                                          strip.model.insertDetails),
-                        strip.model.insertDetails[slot].name)
+                    onInsertMenuRequested: (slot, item) => {
+                        const detail = strip.model.insertDetails[slot]
+                        if (detail.missing === true) {
+                            slotMenu.openAt(item,
+                                            window.missingInsertMenu(strip.index, slot,
+                                                                     detail.uid),
+                                            detail.name)
+                            return
+                        }
+                        slotMenu.openAt(item,
+                                        window.insertMenu(strip.index, slot,
+                                                          strip.model.insertDetails),
+                                        detail.name)
+                    }
 
                     onOutputSlotClicked: item => slotMenu.openAt(
                         item,
@@ -487,8 +559,17 @@ ApplicationWindow {
 
                     onInsertSlotClicked: (slot, item) => {
                         // A filled slot opens the plugin's own editor; an empty
-                        // one opens the picker to fill it.
-                        if (slot < strip.model.insertDetails.length) {
+                        // one - past the chain or a hole left by a removal -
+                        // opens the picker to fill it. A plugin this machine
+                        // does not have has no editor to open, and says so.
+                        const detail = slot < strip.model.insertDetails.length
+                                       ? strip.model.insertDetails[slot] : null
+                        if (detail && detail.missing === true) {
+                            statusToast.message = qsTr("%1 is not installed here. The slot keeps its settings for a machine that has it.").arg(detail.uid)
+                            statusToast.show()
+                            return
+                        }
+                        if (detail && detail.filled === true) {
                             window.openEditor(strip.index, slot)
                             return
                         }
@@ -676,6 +757,12 @@ ApplicationWindow {
         sourceComponent: ShortcutSheet {}
     }
 
+    Loader {
+        id: confirmLoader
+        active: false
+        sourceComponent: ConfirmDialog {}
+    }
+
     FileDialog {
         id: sessionSaveDialog
         title: qsTr("Save session as")
@@ -785,7 +872,7 @@ ApplicationWindow {
     // A session that opens empty gives nothing to look at, and AUM starts with
     // a strip on screen too.
     Component.onCompleted: {
-        if (Mixer.rowCount() === 0 && Mixer.shouldSeedSession()) {
+        if (Mixer.count === 0 && Mixer.shouldSeedSession()) {
             Mixer.addChannel("", 2)
             Mixer.addChannel("", 2)
         }

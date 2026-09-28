@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // Loads the extracted Drone - the .clap built next to the host - back through
 // the host's own CLAP backend, and plays it. What the wrapper promises to a
 // host (ports, parameters, events, state) is checked here by a host that did

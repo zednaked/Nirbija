@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #include "core/arpeggiator.h"
 
 #include <algorithm>
@@ -7,12 +9,6 @@
 
 namespace nirbija {
 namespace {
-
-// Beats per step, in quarter notes; the index is the `division` parameter.
-// Deliberately the same table and the same order as the step sequencer's, so
-// the two read alike when they sit in one strip.
-constexpr double kDivisions[] = {1.0, 0.5, 0.25, 0.125, 1.0 / 3.0, 1.0 / 6.0};
-constexpr int kDivisionCount = static_cast<int>(std::size(kDivisions));
 
 enum Params : uint32_t {
   kDivision = 0,
@@ -60,7 +56,7 @@ void ArpeggiatorInstance::deactivate() {
   sounding_count_ = 0;
   position_ = 0;
   last_step_beat_ = -1.0;
-  event_count_ = 0;
+  out_.clear();
   keys_down_count_ = 0;
   key_held_.fill(false);
   restart_on_next_ = false;
@@ -68,19 +64,13 @@ void ArpeggiatorInstance::deactivate() {
 }
 
 double ArpeggiatorInstance::beats_per_step() const {
-  return kDivisions[std::clamp(division_.load(std::memory_order_relaxed), 0,
-                               kDivisionCount - 1)];
+  return kStepDivisions[std::clamp(division_.load(std::memory_order_relaxed), 0,
+                                   kStepDivisionCount - 1)];
 }
 
 void ArpeggiatorInstance::emit(uint32_t frame, uint8_t status, uint8_t data1,
                                uint8_t data2) {
-  if (event_count_ >= kMaxEvents) return;
-  MidiEvent& event = events_[event_count_++];
-  event.frame = frame;
-  event.size = 3;
-  event.data[0] = status;
-  event.data[1] = data1;
-  event.data[2] = data2;
+  out_.emit(frame, status, data1, data2);
 }
 
 void ArpeggiatorInstance::release_all(uint32_t frame) {
@@ -115,7 +105,7 @@ void ArpeggiatorInstance::queue_midi(const MidiEvent& event) {
   if (thru_.load(std::memory_order_relaxed)) {
     // An arpeggiator normally replaces what it is given - you hold a chord and
     // hear the figure, not the chord - so passing it on is opt-in.
-    if (event_count_ < kMaxEvents) events_[event_count_++] = event;
+    out_.push(event);
   }
   if (event.size < 3) return;
 
@@ -279,22 +269,13 @@ void ArpeggiatorInstance::process(const float* const*, float* const*,
 }
 
 size_t ArpeggiatorInstance::take_midi_output(MidiEvent* out, size_t capacity) {
-  std::sort(events_.begin(), events_.begin() + event_count_,
-            [](const MidiEvent& a, const MidiEvent& b) {
-              if (a.frame != b.frame) return a.frame < b.frame;
-              // Off before on when a repeated pitch turns over on this frame.
-              return (a.data[0] & 0xf0) < (b.data[0] & 0xf0);
-            });
-  const size_t count = std::min(event_count_, capacity);
-  std::copy_n(events_.begin(), count, out);
-  event_count_ = 0;
-  return count;
+  return out_.take(out, capacity);
 }
 
 std::vector<ParameterInfo> ArpeggiatorInstance::parameters() const {
   return {
       {kDivision, "Division (0 1/4, 1 1/8, 2 1/16, 3 1/32, 4 1/4T, 5 1/8T)", 0.0,
-       kDivisionCount - 1.0, 2.0},
+       kStepDivisionCount - 1.0, 2.0},
       {kMode, "Mode (0 up, 1 down, 2 up-down, 3 down-up, 4 played, 5 random, 6 chord)",
        0.0, static_cast<double>(ModeCount) - 1.0, 0.0},
       {kOctaves, "Octaves", 1.0, 4.0, 1.0},
@@ -321,7 +302,7 @@ double ArpeggiatorInstance::parameter_value(uint32_t id) const {
 void ArpeggiatorInstance::set_parameter(uint32_t id, double value) {
   switch (id) {
     case kDivision:
-      division_.store(clamp_int(value, 0, kDivisionCount - 1),
+      division_.store(clamp_int(value, 0, kStepDivisionCount - 1),
                       std::memory_order_relaxed);
       break;
     case kMode:

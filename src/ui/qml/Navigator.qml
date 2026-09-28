@@ -1,4 +1,5 @@
 pragma ComponentBehavior: Bound
+// SPDX-License-Identifier: GPL-3.0-only
 
 import QtQuick
 import QtQuick.Controls.Basic
@@ -55,7 +56,7 @@ Popup {
 
             Text {
                 Layout.fillWidth: true
-                text: qsTr("%n strip(s)", "", Mixer.rowCount())
+                text: qsTr("%n strip(s)", "", Mixer.count)
                 color: Skin.textDim
                 font.pixelSize: Skin.fontS
             }
@@ -179,7 +180,8 @@ Popup {
                                 required property int index
                                 required property var modelData
 
-                                visible: modelData.name.length > 0
+                                visible: modelData.filled === true
+                                         && modelData.name.length > 0
                                 width: visible ? insertLabel.implicitWidth
                                                  + Skin.spacing : 0
                                 height: Px.px(16)
@@ -200,8 +202,10 @@ Popup {
                                     text: chainEntry.modelData.name
                                     color: insertHover.hovered ? Skin.onAccent
                                          : chainEntry.modelData.bypassed
+                                           || chainEntry.modelData.missing === true
                                            ? Skin.disabled : Skin.text
                                     font.pixelSize: Skin.fontXS
+                                    font.strikeout: chainEntry.modelData.missing === true
                                 }
 
                                 TapHandler {

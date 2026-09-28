@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // Manual tool: opens one plugin's editor in a host window so the embedding can
 // be looked at. Not a ctest target — it needs a real X11 display and a human.
 //

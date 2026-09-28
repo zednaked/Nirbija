@@ -1,8 +1,12 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // The autosave used to park the graph to read every plugin's state: the
 // master fell silent for a few blocks a second after every edit, which on a
 // step sequencer grid meant a pop a second after every touch. Saving a
-// session must not stop the music. Only a plugin that says its state cannot
-// be read under process() - a looper mid-take - gets to park, and only then.
+// session must not stop the music - not even for a plugin that says its
+// state cannot be read under process() (a looper mid-take): the autosave
+// waits for it instead. Only an explicit save may park, and only for the
+// asking.
 //
 // Needs an audio server for the graph to render at all; skips without one,
 // the same as the other session tests.
@@ -28,7 +32,7 @@ void fail(const std::string& what) {
 
 class StubPlugin : public nirbija::PluginInstance {
  public:
-  explicit StubPlugin(bool quiet) : quiet_(quiet) {}
+  explicit StubPlugin(bool needs_quiet) : quiet(needs_quiet) {}
   void set_channel_layout(int) override {}
   bool activate(double, uint32_t) override { return true; }
   void deactivate() override {}
@@ -41,13 +45,14 @@ class StubPlugin : public nirbija::PluginInstance {
     return {1, 2, 3};
   }
   bool load_state(const std::vector<uint8_t>&) override { return true; }
-  bool save_needs_quiet() const override { return quiet_; }
+  bool save_needs_quiet() const override { return quiet; }
   const nirbija::PluginDescriptor& descriptor() const override { return desc_; }
 
   mutable int saves = 0;
+  // Flipped by the test the way Rec going up flips a looper's answer.
+  bool quiet;
 
  private:
-  bool quiet_;
   nirbija::PluginDescriptor desc_{.format = nirbija::PluginFormat::Internal,
                                   .uid = "test.stub",
                                   .name = "Stub",
@@ -79,9 +84,10 @@ int main(int argc, char* argv[]) {
   qputenv("NIRBIJA_SESSION", (dir.path() + "/session.json").toLocal8Bit());
 
   nirbija::MixerModel mixer;
+  mixer.waitForScan();
   if (!mixer.running()) {
     std::printf("no audio server available, skipping\n");
-    return 0;
+    return 77;  // CTest marks it Skipped rather than Passed
   }
 
   nirbija::AudioGraph& graph = mixer.engineForTests().graph();
@@ -111,18 +117,44 @@ int main(int argc, char* argv[]) {
   if (graph.quiet_generation() != quiet_before)
     fail("saving a session with well-behaved plugins parked the graph");
 
-  // A plugin that says it needs quiet gets it, for that save alone.
+  // A plugin that says it needs quiet - a looper with Rec down - does not
+  // get a park from the autosave: the save waits until it no longer asks.
+  // The session stays dirty meanwhile and is written once Rec comes up,
+  // and the master never went silent in between - that was the hole in
+  // every take, one second in.
   auto needy = std::make_unique<StubPlugin>(true);
+  StubPlugin* waiting = needy.get();
   if (!strip.add_insert(std::move(needy))) {
     fail("could not add the needy insert");
     return 1;
   }
   const uint64_t quiet_mid = graph.quiet_generation();
+  const int waiting_saves = waiting->saves;
   mixer.setGain(0, 0.75);
+  pump(2500);
+  if (graph.quiet_generation() != quiet_mid)
+    fail("the autosave parked the graph for a plugin that asked for quiet");
+  if (waiting->saves != waiting_saves)
+    fail("the autosave read a state the plugin said could not be read live");
+  if (!mixer.dirty())
+    fail("the session was marked clean without having been written");
+
+  // Rec comes up: the next check passes and the save goes through.
+  waiting->quiet = false;
   pump(1500);
-  if (graph.quiet_generation() == quiet_mid)
-    fail("a plugin that asked for a quiet save did not get one");
+  if (waiting->saves == waiting_saves)
+    fail("the deferred autosave never happened once the plugin allowed it");
+  if (mixer.dirty()) fail("the deferred save did not clear the dirty flag");
+  if (graph.quiet_generation() != quiet_mid)
+    fail("the deferred save parked the graph");
   if (graph.parked()) fail("the graph was left parked after the save");
+
+  // An explicit save is allowed to park, and does so only for the asking.
+  waiting->quiet = true;
+  mixer.saveSession();
+  if (graph.quiet_generation() == quiet_mid)
+    fail("an explicit save did not park for a plugin that needs quiet");
+  if (graph.parked()) fail("the graph was left parked after the explicit save");
 
   if (failures > 0) {
     std::fprintf(stderr, "%d check(s) failed\n", failures);

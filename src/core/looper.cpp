@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #include "core/looper.h"
 
 #include <algorithm>
@@ -23,8 +25,6 @@ enum Params : uint32_t {
   kCountIn = 12,
 };
 
-constexpr float kPi = 3.14159265358979f;
-
 // The longest loop kept: a minute of stereo. Sized once, up front, because the
 // audio thread must never allocate mid-take.
 constexpr double kMaxLoopSeconds = 60.0;
@@ -33,6 +33,15 @@ constexpr double kMaxLoopSeconds = 60.0;
 // peels the last of those, not the whole Rec pass.
 constexpr float kPhraseFloor = 0.02f;
 constexpr double kPhraseGapSeconds = 0.1;
+
+// The record-edge ramps, the Play ramp and the wrap crossfade: long enough
+// that a hard edge stops clicking, short enough to be no fade to the ear.
+constexpr double kEdgeSeconds = 0.005;
+
+// Frames the shadow sweep syncs per block: 256 KB of copy, a few tens of
+// microseconds, so a minute of tape catches up within a second while the
+// block stays well inside its budget.
+constexpr uint64_t kSweepFramesPerBlock = 32768;
 
 bool input_loud(float left, float right) {
   return std::fabs(left) > kPhraseFloor || std::fabs(right) > kPhraseFloor;
@@ -54,11 +63,16 @@ PluginDescriptor LooperInstance::make_descriptor() {
   return descriptor;
 }
 
-LooperInstance::LooperInstance() : descriptor_(make_descriptor()) {}
+LooperInstance::LooperInstance() : descriptor_(make_descriptor()) {
+  gain_ramp_.reset(1.0f);
+  play_ramp_.reset(1.0f);
+  rec_ramp_.reset(0.0f);
+  click_.gain = 0.4f;
+}
 
 bool LooperInstance::activate(double sample_rate, uint32_t) {
   if (sample_rate <= 0.0) return false;
-  if (sample_rate_ == sample_rate && !buffer_.empty()) return true;
+  if (sample_rate_ == sample_rate && !tapes_[0].empty()) return true;
 
   // A later prepare() — JACK changing rate after the session has loaded
   // the tape — used to allocate a fresh silent buffer and forget the loop.
@@ -67,20 +81,38 @@ bool LooperInstance::activate(double sample_rate, uint32_t) {
   const bool closed = length_.load(std::memory_order_relaxed) > 0;
   std::vector<float> kept;
   const double old_rate = sample_rate_;
-  if (keep > 0 && buffer_.size() >= keep * 2)
-    kept.assign(buffer_.data(), buffer_.data() + keep * 2);
+  if (keep > 0 && tapes_[0].size() >= keep * 2)
+    kept.assign(tape(), tape() + keep * 2);
 
   sample_rate_ = sample_rate;
   capacity_frames_ = static_cast<uint64_t>(sample_rate * kMaxLoopSeconds);
-  buffer_.assign(capacity_frames_ * 2, 0.0f);
+  // Both tapes, the undo layer included, come from here and never grow.
+  tapes_[0].assign(capacity_frames_ * 2, 0.0f);
+  tapes_[1].assign(capacity_frames_ * 2, 0.0f);
+  live_.store(0, std::memory_order_relaxed);
+  shadow_state_.assign(capacity_frames_, kShadowSynced);
+  touched_lo_ = touched_hi_ = 0;
+  stale_pos_ = stale_hi_ = 0;
   recorded_.assign(capacity_frames_, 0);
+  recorded_hi_ = 0;
   layer_.assign(capacity_frames_, 0);
+  rec_weight_.assign(capacity_frames_, 0);
   current_layer_ = 0;
-  peels_.clear();
+  peel_count_ = 0;
   play_pos_ = 0.0;
   tone_lpf_[0] = tone_lpf_[1] = 0.0f;
-  undo_ = {};
+  undo_meta_ = {};
   stop_count_in();
+
+  edge_frames_ = std::max<uint32_t>(
+      1, static_cast<uint32_t>(sample_rate * kEdgeSeconds));
+  gain_ramp_.set_length(edge_frames_);
+  play_ramp_.set_length(edge_frames_);
+  rec_ramp_.set_length(edge_frames_);
+  gain_ramp_.reset(gain_.load(std::memory_order_relaxed));
+  play_ramp_.reset(play_request_.load(std::memory_order_relaxed) ? 1.0f : 0.0f);
+  rec_ramp_.reset(0.0f);
+  record_active_ = false;
 
   if (kept.empty()) {
     length_.store(0, std::memory_order_relaxed);
@@ -112,7 +144,7 @@ uint64_t LooperInstance::tape_frames() const {
 
 uint64_t LooperInstance::import_audio(const float* src, uint64_t src_frames,
                                       double src_rate) {
-  if (src == nullptr || src_frames == 0 || buffer_.empty() ||
+  if (src == nullptr || src_frames == 0 || tapes_[0].empty() ||
       capacity_frames_ == 0)
     return 0;
 
@@ -125,24 +157,36 @@ uint64_t LooperInstance::import_audio(const float* src, uint64_t src_frames,
   out_frames = std::min(out_frames, capacity_frames_);
   if (out_frames == 0) return 0;
 
+  float* dst = tapes_[0].data();
   if (out_frames == src_frames &&
       (src_rate <= 0.0 || std::abs(src_rate - sample_rate_) <= 0.5)) {
-    std::memcpy(buffer_.data(), src, src_frames * 2 * sizeof(float));
-    return out_frames;
+    std::memcpy(dst, src, src_frames * 2 * sizeof(float));
+  } else {
+    const double step = static_cast<double>(src_frames) /
+                        static_cast<double>(std::max<uint64_t>(out_frames, 1));
+    const int64_t last = static_cast<int64_t>(src_frames) - 1;
+    auto tap = [&](int64_t index, int ch) {
+      index = std::clamp<int64_t>(index, 0, last);
+      return src[static_cast<uint64_t>(index) * 2 + ch];
+    };
+    for (uint64_t i = 0; i < out_frames; ++i) {
+      const double at = std::min(static_cast<double>(last),
+                                 static_cast<double>(i) * step);
+      const int64_t i1 = static_cast<int64_t>(at);
+      const float frac = static_cast<float>(at - static_cast<double>(i1));
+      for (int ch = 0; ch < 2; ++ch) {
+        dst[i * 2 + ch] = dsp::hermite4(tap(i1 - 1, ch), tap(i1, ch),
+                                        tap(i1 + 1, ch), tap(i1 + 2, ch), frac);
+      }
+    }
   }
-
-  const double step = static_cast<double>(src_frames) /
-                      static_cast<double>(std::max<uint64_t>(out_frames, 1));
-  for (uint64_t i = 0; i < out_frames; ++i) {
-    const double at = std::min(static_cast<double>(src_frames - 1),
-                               static_cast<double>(i) * step);
-    const uint64_t i0 = static_cast<uint64_t>(at);
-    const uint64_t i1 = std::min(src_frames - 1, i0 + 1);
-    const float frac = static_cast<float>(at - static_cast<double>(i0));
-    buffer_[i * 2] = src[i0 * 2] + (src[i1 * 2] - src[i0 * 2]) * frac;
-    buffer_[i * 2 + 1] =
-        src[i0 * 2 + 1] + (src[i1 * 2 + 1] - src[i0 * 2 + 1]) * frac;
-  }
+  // The shadow starts equal to the tape so the first undo layer has nothing
+  // to catch up on. UI thread, graph quiet: a plain copy is fine here.
+  std::memcpy(tapes_[1].data(), dst, out_frames * 2 * sizeof(float));
+  live_.store(0, std::memory_order_relaxed);
+  std::fill(shadow_state_.begin(), shadow_state_.end(), kShadowSynced);
+  touched_lo_ = touched_hi_ = 0;
+  stale_pos_ = stale_hi_ = 0;
   return out_frames;
 }
 
@@ -213,7 +257,7 @@ void LooperInstance::start_count_in() {
   count_phase_ = 0.0;
   count_total_ = std::max(1, transport_.numerator);
   count_beats_left_.store(count_total_, std::memory_order_relaxed);
-  fire_count_click(true);
+  click_.start(sample_rate_, true);
 }
 
 void LooperInstance::stop_count_in() {
@@ -224,10 +268,10 @@ void LooperInstance::stop_count_in() {
 }
 
 void LooperInstance::begin_record() {
-  // A new Rec pass starts a new set of phrases. Leaving Rec down through
-  // the auto-close does not come through here, so the first take and the
-  // overdubs after it stay one list of islands.
-  clear_recorded();
+  // A new Rec pass is a new undo layer and a new set of phrases. Leaving
+  // Rec down through the auto-close does not come through here, so the
+  // first take and the overdubs after it stay one list of islands.
+  capture_undo();
   if (stage_ == Stage::Empty) {
     written_.store(0, std::memory_order_relaxed);
     stage_ = Stage::Defining;
@@ -251,40 +295,41 @@ void LooperInstance::begin_record() {
                     : static_cast<double>(start);
     stage_ = Stage::Overdubbing;
   }
+  // The input fades onto the tape rather than landing on it: a hard punch
+  // is a click that plays back every time round.
+  rec_ramp_.set_target(1.0f);
 }
 
-void LooperInstance::fire_count_click(bool downbeat) {
-  if (sample_rate_ <= 0.0) return;
-  click_length_ = static_cast<uint32_t>(sample_rate_ * 0.03);
-  click_remaining_ = click_length_;
-  click_phase_ = 0.0;
-  click_step_ = 2.0 * kPi * (downbeat ? 1568.0 : 1046.5) / sample_rate_;
+void LooperInstance::punch_out() {
+  const uint64_t written = written_.load(std::memory_order_relaxed);
+  if (stage_ == Stage::Defining && written > 0) {
+    // Closing snaps to the chosen grid so a phrase that ran a little
+    // long or short still lands on a number of bars you can play to.
+    const uint64_t snapped = snap_length(written);
+    if (snapped > written) {
+      snapshot_range(written, snapped);
+      std::memset(tape() + written * 2, 0,
+                  (snapped - written) * 2 * sizeof(float));
+    }
+    close_loop(snapped, Stage::Playing);
+  } else if (stage_ == Stage::Overdubbing) {
+    stage_ = Stage::Playing;
+  }
+  // The ramp down keeps writing for ~5 ms past the edge, onto the head of
+  // the loop it just closed: the tail crossfades into the start, so the
+  // wrap is seamless instead of a step from the last frame to the first.
+  rec_ramp_.set_target(0.0f);
 }
 
-float LooperInstance::tone_sample(int channel, float sample) {
-  const float tone =
-      std::clamp(tone_.load(std::memory_order_relaxed), 0.0f, 1.0f);
-  if (tone > 0.98f) return sample;
-  // 300 Hz at 0, ~18 kHz at 1: a dark loop stays musical, an open one
-  // is almost the dry buffer.
-  const float cutoff =
-      300.0f * std::pow(18000.0f / 300.0f, tone);
-  const float coeff = 1.0f - std::exp(-2.0f * 3.14159265358979f * cutoff /
-                                      static_cast<float>(sample_rate_));
-  tone_lpf_[channel] += coeff * (sample - tone_lpf_[channel]);
-  return tone_lpf_[channel];
-}
-
-// True when this block crosses the quantise line the pending action waits for.
-// The grid is live while Play is on *or* the metronome is rolling the same
-// clock with Play off. With neither, or with quantise off, every block is
-// a boundary.
+// Beats to the next quantise line, for the UI. The grid is live while Play
+// is on *or* the metronome is rolling the same clock with Play off. With
+// neither, or with quantise off, every block is a boundary.
 double LooperInstance::beats_to_boundary(const TransportInfo& transport) const {
   const int quantize = std::clamp(quantize_.load(std::memory_order_relaxed),
                                   0, kQuantizeMax);
   const bool grid = transport.rolling || transport.playing;
   if (quantize == 0 || !grid) return -1.0;
-  // The same unit at_boundary() waits on: a beat, or a bar - never the
+  // The same unit punch_frame() waits on: a beat, or a bar - never the
   // 2/4/8-bar Length.
   const double beats_per_unit =
       quantize == 1 ? 1.0 : std::max(1, transport.numerator);
@@ -292,48 +337,78 @@ double LooperInstance::beats_to_boundary(const TransportInfo& transport) const {
   return beats_per_unit - into;
 }
 
-bool LooperInstance::at_boundary(uint32_t frames) const {
+uint32_t LooperInstance::punch_frame(uint32_t frames) const {
   const int quantize = std::clamp(quantize_.load(std::memory_order_relaxed),
                                   0, kQuantizeMax);
   const bool grid = transport_.rolling || transport_.playing;
-  if (quantize == 0 || !grid) return true;
+  if (quantize == 0 || !grid) return 0;
+  if (transport_.tempo_bpm <= 0.0 || sample_rate_ <= 0.0) return 0;
+  // The transport just started: the downbeat is this frame.
+  if (transport_.beats == 0.0) return 0;
 
   // Start and stop wait on the beat or the bar, not on a 4- or 8-bar
   // downbeat: waiting that long to punch in is unplayable. Length is
   // what snaps to 2/4/8 bars, in snap_length().
-  const double beats_per_unit =
-      quantize == 1 ? 1.0 : std::max(1, transport_.numerator);
-  const double block_beats =
-      transport_.tempo_bpm / 60.0 * (static_cast<double>(frames) / sample_rate_);
+  const double unit = quantize == 1 ? 1.0 : std::max(1, transport_.numerator);
+  const double beats_per_frame = transport_.tempo_bpm / 60.0 / sample_rate_;
 
-  const double before = transport_.beats / beats_per_unit;
-  const double after = (transport_.beats + block_beats) / beats_per_unit;
-  return std::floor(before) != std::floor(after) || transport_.beats == 0.0;
+  // A line within half a frame of the block start belongs to frame 0 - the
+  // block before stopped half a frame short of it (see below), so nothing
+  // is punched twice and nothing falls between two blocks.
+  const double into = transport_.beats -
+                      std::floor(transport_.beats / unit) * unit;
+  const double half = 0.5 * beats_per_frame;
+  if (into < half || unit - into < half) return 0;
+
+  // boundary_frame() truncates the distance to the line; asking from half a
+  // frame earlier turns that into rounding to the nearest frame, which is
+  // what the rule above assumes.
+  return dsp::boundary_frame(transport_.beats - half, transport_.tempo_bpm,
+                             sample_rate_, unit, 0, frames);
 }
 
-void LooperInstance::apply_requests(uint32_t frames) {
+void LooperInstance::apply_clear() {
+  capture_undo();
+  length_.store(0, std::memory_order_relaxed);
+  written_.store(0, std::memory_order_relaxed);
+  play_pos_ = 0.0;
+  loop_beats_.store(0.0, std::memory_order_relaxed);
+  tone_lpf_[0] = tone_lpf_[1] = 0.0f;
+  stage_ = Stage::Empty;
+  current_layer_ = 0;
+  // A trim or fade shaped for the phrase that just got thrown away means
+  // nothing to whatever gets recorded next.
+  trim_start_.store(0.0, std::memory_order_relaxed);
+  trim_end_.store(1.0, std::memory_order_relaxed);
+  fade_in_.store(0.0, std::memory_order_relaxed);
+  fade_out_.store(0.0, std::memory_order_relaxed);
+  // Clear is a stop, not a punch-in: leaving Rec armed started a new
+  // take on the next block, so the button looked stuck and the empty
+  // tape began filling again.
+  record_active_ = false;
+  record_request_.store(false, std::memory_order_relaxed);
+  rec_ramp_.reset(0.0f);
+  stop_count_in();
+}
+
+uint32_t LooperInstance::apply_requests(uint32_t frames) {
   if (clear_request_.exchange(false, std::memory_order_acquire)) {
-    length_.store(0, std::memory_order_relaxed);
-    written_.store(0, std::memory_order_relaxed);
-    play_pos_ = 0.0;
-    loop_beats_.store(0.0, std::memory_order_relaxed);
-    tone_lpf_[0] = tone_lpf_[1] = 0.0f;
-    stage_ = Stage::Empty;
-    current_layer_ = 0;
-    // A trim or fade shaped for the phrase that just got thrown away means
-    // nothing to whatever gets recorded next.
-    trim_start_.store(0.0, std::memory_order_relaxed);
-    trim_end_.store(1.0, std::memory_order_relaxed);
-    fade_in_.store(0.0, std::memory_order_relaxed);
-    fade_out_.store(0.0, std::memory_order_relaxed);
-    // Clear is a stop, not a punch-in: leaving Rec armed started a new
-    // take on the next block, so the button looked stuck and the empty
-    // tape began filling again.
-    record_active_ = false;
-    record_request_.store(false, std::memory_order_relaxed);
-    stop_count_in();
-    return;
+    apply_clear();
+    return frames;
   }
+  // Undo and redo wait for the sweep: until the shadow has caught up with
+  // what the previous layer changed, swapping it in would bring back an
+  // older state than the one before the last pass. A few blocks at most.
+  if (undo_request_.load(std::memory_order_acquire) && sweep_done()) {
+    undo_request_.store(false, std::memory_order_relaxed);
+    apply_undo();
+  }
+  if (redo_request_.load(std::memory_order_acquire) && sweep_done()) {
+    redo_request_.store(false, std::memory_order_relaxed);
+    apply_redo();
+  }
+  if (multiply_request_.exchange(false, std::memory_order_acquire))
+    apply_multiply();
 
   const bool record = record_request_.load(std::memory_order_acquire);
   if (counting_) {
@@ -345,38 +420,28 @@ void LooperInstance::apply_requests(uint32_t frames) {
       record_active_ = false;
       record_request_.store(false, std::memory_order_relaxed);
     }
-    return;
+    return frames;
   }
-  if (record == record_active_) return;
+  if (record == record_active_) return frames;
 
   if (record && count_in_.load(std::memory_order_relaxed)) {
     // The count is the wait: one bar of clicks, then punch in. Skipping
-    // at_boundary so we do not wait a bar for the count and another for
-    // the grid.
+    // the grid so we do not wait a bar for the count and another for
+    // the line.
     start_count_in();
-    return;
+    return frames;
   }
 
-  if (!at_boundary(frames)) return;
+  pending_record_ = record;
+  return punch_frame(frames);
+}
 
-  record_active_ = record;
-  if (record) {
+void LooperInstance::apply_record_edge() {
+  record_active_ = pending_record_;
+  if (pending_record_)
     begin_record();
-  } else {
-    const uint64_t written = written_.load(std::memory_order_relaxed);
-    if (stage_ == Stage::Defining && written > 0) {
-      // Closing snaps to the chosen grid so a phrase that ran a little
-      // long or short still lands on a number of bars you can play to.
-      const uint64_t snapped = snap_length(written);
-      if (snapped > written) {
-        std::memset(buffer_.data() + written * 2, 0,
-                    (snapped - written) * 2 * sizeof(float));
-      }
-      close_loop(snapped, Stage::Playing);
-    } else if (stage_ == Stage::Overdubbing) {
-      stage_ = Stage::Playing;
-    }
-  }
+  else
+    punch_out();
 }
 
 bool LooperInstance::wrap_play_pos(double start, double end, bool reverse) {
@@ -397,25 +462,106 @@ bool LooperInstance::wrap_play_pos(double start, double end, bool reverse) {
   return true;
 }
 
+void LooperInstance::read_frame(const float* buffer, double position,
+                                uint64_t lo, uint64_t hi, float out[2]) const {
+  const uint64_t span = hi - lo;
+  const uint64_t i1 = static_cast<uint64_t>(position);
+  const float frac = static_cast<float>(position - static_cast<double>(i1));
+  const uint64_t i0 = i1 > lo ? i1 - 1 : hi - 1;
+  const uint64_t i2 = (i1 + 1 >= hi) ? lo : i1 + 1;
+  const uint64_t i3 = (i2 + 1 >= hi) ? lo : i2 + 1;
+  if (span < 4) {
+    out[0] = buffer[i1 * 2];
+    out[1] = buffer[i1 * 2 + 1];
+    return;
+  }
+  for (int ch = 0; ch < 2; ++ch) {
+    out[ch] = dsp::hermite4(buffer[i0 * 2 + ch], buffer[i1 * 2 + ch],
+                            buffer[i2 * 2 + ch], buffer[i3 * 2 + ch], frac);
+  }
+}
+
+void LooperInstance::write_frame(uint64_t frame, const float in[2],
+                                 float ramp) {
+  snapshot(frame);
+  float* cell = tape() + frame * 2;
+  if (stage_ == Stage::Defining) {
+    cell[0] = in[0] * ramp;
+    cell[1] = in[1] * ramp;
+    rec_weight_[frame] = 255;
+    return;
+  }
+  // Replace is feedback 0 with a different name: the old layer goes as the
+  // input comes in.
+  const float feedback =
+      replace_.load(std::memory_order_relaxed)
+          ? 0.0f
+          : std::clamp(feedback_.load(std::memory_order_relaxed), 0.0f, 1.0f);
+  // How much of a pass this frame has already had. A frame that had a whole
+  // one starts over: this is the next time round, and feedback compounds
+  // once a cycle the way a tape loop's does.
+  float before = static_cast<float>(rec_weight_[frame]) / 255.0f;
+  if (before >= 0.98f) before = 0.0f;
+  const float after = std::min(1.0f, before + ramp);
+  if (feedback < 1.0f) {
+    // The old layer is scaled by the same weight the input arrives on, so
+    // across the edges nothing steps; over a whole pass it ends at feedback.
+    // This touch supplies the ratio between where the frame was and where
+    // it should be after it.
+    const float keep_before = 1.0f - before * (1.0f - feedback);
+    const float keep_after = 1.0f - after * (1.0f - feedback);
+    const float keep = keep_before > 1e-6f ? keep_after / keep_before : 0.0f;
+    cell[0] *= keep;
+    cell[1] *= keep;
+  }
+  // Unity feedback must not scale the old layer at all: a multiply by 1
+  // every sample looks harmless until speed is below 1 and the same cell is
+  // visited twice, or a 0.999999 load turns a held Rec into a fade.
+  cell[0] += in[0] * ramp;
+  cell[1] += in[1] * ramp;
+  rec_weight_[frame] = static_cast<uint8_t>(std::lround(after * 255.0f));
+}
+
 void LooperInstance::process(const float* const* inputs, float* const* outputs,
                              uint32_t frames) {
-  apply_requests(frames);
+  const uint32_t punch = apply_requests(frames);
+  sweep_shadow();
 
+  // Everything read from a knob is read here, once a block: the per-sample
+  // loop only steps ramps and reads what this worked out.
   const bool play = play_request_.load(std::memory_order_relaxed);
-  const float gain = gain_.load(std::memory_order_relaxed);
+  play_ramp_.set_target(play ? 1.0f : 0.0f);
+  gain_ramp_.set_target(gain_.load(std::memory_order_relaxed));
   const bool reverse = reverse_.load(std::memory_order_relaxed);
-  const bool replace = replace_.load(std::memory_order_relaxed);
   const bool once = once_.load(std::memory_order_relaxed);
-  const float feedback =
-      std::clamp(feedback_.load(std::memory_order_relaxed), 0.0f, 1.0f);
   const float speed =
       std::clamp(speed_.load(std::memory_order_relaxed), 0.25f, 4.0f);
+  const float pitch = std::clamp(
+      pitch_.load(std::memory_order_relaxed), -12.0f, 12.0f);
+  rate_ = std::pow(2.0, static_cast<double>(pitch) / 12.0) *
+          static_cast<double>(speed);
+  {
+    const float tone =
+        std::clamp(tone_.load(std::memory_order_relaxed), 0.0f, 1.0f);
+    tone_bypass_ = tone > 0.98f;
+    if (!tone_bypass_) {
+      // 300 Hz at 0, ~18 kHz at 1: a dark loop stays musical, an open one
+      // is almost the dry buffer.
+      const float cutoff = 300.0f * std::pow(18000.0f / 300.0f, tone);
+      tone_coeff_ = 1.0f - std::exp(-2.0f * 3.14159265358979f * cutoff /
+                                    static_cast<float>(sample_rate_));
+    }
+  }
   const int width = std::min(channels_, 2);
   // The loop's own contribution to the output this block, dry input not
   // included - see loop_peak() above.
   float block_peak = 0.0f;
 
   for (uint32_t i = 0; i < frames; ++i) {
+    // The record edge lands on its frame inside the block, not at the
+    // block's start: a punch quantised to the block is up to a block early.
+    if (i == punch) apply_record_edge();
+
     float in[2] = {0.0f, 0.0f};
     for (int ch = 0; ch < width; ++ch) in[ch] = inputs[ch][i];
     if (width == 1) in[1] = in[0];
@@ -445,7 +591,7 @@ void LooperInstance::process(const float* const* inputs, float* const* outputs,
         if (std::floor(before) != std::floor(count_phase_)) {
           const int beat = static_cast<int>(std::floor(count_phase_));
           const int bar = std::max(1, transport_.numerator);
-          fire_count_click(beat % bar == 0);
+          click_.start(sample_rate_, beat % bar == 0);
         }
         const int left = static_cast<int>(
             std::ceil(static_cast<double>(count_total_) - count_phase_));
@@ -453,14 +599,17 @@ void LooperInstance::process(const float* const* inputs, float* const* outputs,
       }
     }
 
+    const float rec = rec_ramp_.next();
+    const float gain = gain_ramp_.next();
+    const float play_gain = play_ramp_.next();
+
     switch (stage_) {
       case Stage::Defining: {
         const uint64_t written = written_.load(std::memory_order_relaxed);
         if (written < capacity_frames_) {
-          buffer_[written * 2] = in[0];
-          buffer_[written * 2 + 1] = in[1];
-          if (written < recorded_.size() && input_loud(in[0], in[1]))
-            recorded_[written] = 1;
+          write_frame(written, in, rec);
+          if (record_active_ && input_loud(in[0], in[1]))
+            mark_recorded(written);
           if (written < layer_.size())
             layer_[written] = static_cast<uint8_t>(current_layer_);
           const uint64_t next = written + 1;
@@ -479,91 +628,116 @@ void LooperInstance::process(const float* const* inputs, float* const* outputs,
       case Stage::Overdubbing:
       case Stage::Playing: {
         const uint64_t length = length_.load(std::memory_order_relaxed);
-        if (length > 0) {
-          uint64_t start = trim_start_frames(length);
-          uint64_t end = trim_end_frames(length, start);
-          // An empty or inverted window (trim start dragged to 1, or the two
-          // handles crossed) plays the whole loop. Resetting only `end` left
-          // start == length and the next sample indexed one past the buffer.
-          if (end <= start || start >= length) {
-            start = 0;
-            end = length;
-          }
-          const double start_d = static_cast<double>(start);
-          const double end_d = static_cast<double>(end);
-          if (play_pos_ < start_d || play_pos_ >= end_d)
-            play_pos_ = reverse && end > start ? end_d - 1.0 : start_d;
-          if (play_pos_ >= static_cast<double>(length) || play_pos_ < 0.0)
-            break;
+        if (length == 0) break;
+        uint64_t start = trim_start_frames(length);
+        uint64_t end = trim_end_frames(length, start);
+        // An empty or inverted window (trim start dragged to 1, or the two
+        // handles crossed) plays the whole loop. Resetting only `end` left
+        // start == length and the next sample indexed one past the buffer.
+        if (end <= start || start >= length) {
+          start = 0;
+          end = length;
+        }
+        const double start_d = static_cast<double>(start);
+        const double end_d = static_cast<double>(end);
+        if (play_pos_ < start_d || play_pos_ >= end_d)
+          play_pos_ = reverse && end > start ? end_d - 1.0 : start_d;
+        if (play_pos_ >= static_cast<double>(length) || play_pos_ < 0.0)
+          break;
 
-          const uint64_t i0 = static_cast<uint64_t>(play_pos_);
-          const uint64_t i1 = (i0 + 1 >= end) ? start : i0 + 1;
-          const float frac = static_cast<float>(play_pos_ - static_cast<double>(i0));
+        const uint64_t i0 = static_cast<uint64_t>(play_pos_);
 
-          if (stage_ == Stage::Overdubbing) {
-            if (i0 < recorded_.size() && input_loud(in[0], in[1]))
-              recorded_[i0] = 1;
-            if (i0 < layer_.size() && input_loud(in[0], in[1]))
+        // Writing happens while Rec is down and for the ramp either side
+        // of it, so the tail of a pass fades onto the tape instead of
+        // stopping dead.
+        if (rec > 0.0f) {
+          write_frame(i0, in, rec);
+          if (stage_ == Stage::Overdubbing && input_loud(in[0], in[1])) {
+            mark_recorded(i0);
+            if (i0 < layer_.size())
               layer_[i0] = static_cast<uint8_t>(current_layer_);
-            if (replace) {
-              buffer_[i0 * 2] = in[0];
-              buffer_[i0 * 2 + 1] = in[1];
-            } else if (feedback >= 1.0f) {
-              // Unity feedback must not scale the old layer at all: a multiply
-              // by 1 every sample looks harmless until speed is below 1 and
-              // the same cell is visited twice, or a 0.999999 load turns a
-              // held Rec into a fade.
-              buffer_[i0 * 2] += in[0];
-              buffer_[i0 * 2 + 1] += in[1];
-            } else {
-              buffer_[i0 * 2] = buffer_[i0 * 2] * feedback + in[0];
-              buffer_[i0 * 2 + 1] = buffer_[i0 * 2 + 1] * feedback + in[1];
+          }
+        }
+
+        const float* buffer = tape();
+        float raw[2];
+        read_frame(buffer, play_pos_, start, end, raw);
+
+        // Wrap crossfade for a trimmed window: the last ~5 ms before the
+        // window's end blend into the material just before its start, so
+        // the jump back to the start is continuous with what precedes it.
+        // The whole, untrimmed loop has no such material - its wrap is made
+        // seamless when it is recorded, by the ramp in punch_out().
+        {
+          const uint64_t span = end - start;
+          const uint64_t fade = std::min<uint64_t>(edge_frames_, span / 2);
+          if (fade > 0) {
+            if (!reverse && start >= fade) {
+              const double remaining = end_d - play_pos_;
+              if (remaining < static_cast<double>(fade)) {
+                float pre[2];
+                read_frame(buffer, start_d - remaining, 0, length, pre);
+                const auto [fo, fi] = dsp::equal_power(
+                    1.0f - static_cast<float>(remaining) /
+                               static_cast<float>(fade));
+                raw[0] = raw[0] * fo + pre[0] * fi;
+                raw[1] = raw[1] * fo + pre[1] * fi;
+              }
+            } else if (reverse && end + fade <= length) {
+              const double remaining = play_pos_ - start_d;
+              if (remaining < static_cast<double>(fade)) {
+                float post[2];
+                read_frame(buffer, end_d + remaining, 0, length, post);
+                const auto [fo, fi] = dsp::equal_power(
+                    1.0f - static_cast<float>(remaining) /
+                               static_cast<float>(fade));
+                raw[0] = raw[0] * fo + post[0] * fi;
+                raw[1] = raw[1] * fo + post[1] * fi;
+              }
             }
           }
-          if (play) {
-            const float env = envelope_at(i0, start, end);
-            const float raw_l = buffer_[i0 * 2] +
-                                (buffer_[i1 * 2] - buffer_[i0 * 2]) * frac;
-            const float raw_r = buffer_[i0 * 2 + 1] +
-                                (buffer_[i1 * 2 + 1] - buffer_[i0 * 2 + 1]) * frac;
-            const float wet_l = tone_sample(0, raw_l * gain * env);
-            const float wet_r = tone_sample(1, raw_r * gain * env);
-            out[0] += wet_l;
-            out[1] += wet_r;
-            block_peak = std::max(block_peak, std::max(std::fabs(wet_l), std::fabs(wet_r)));
+        }
+
+        if (play || play_gain > 0.0f) {
+          const float env = envelope_at(i0, start, end) * gain;
+          float wet[2] = {raw[0] * env, raw[1] * env};
+          if (!tone_bypass_) {
+            for (int ch = 0; ch < 2; ++ch) {
+              tone_lpf_[ch] += tone_coeff_ * (wet[ch] - tone_lpf_[ch]);
+              wet[ch] = tone_lpf_[ch];
+            }
+          } else {
+            // Keep the filter primed so turning Tone down later starts
+            // from the signal, not from wherever it was last left.
+            tone_lpf_[0] = wet[0];
+            tone_lpf_[1] = wet[1];
           }
-          const float pitch = std::clamp(
-              pitch_.load(std::memory_order_relaxed), -12.0f, 12.0f);
-          const double rate =
-              std::pow(2.0, static_cast<double>(pitch) / 12.0) *
-              static_cast<double>(speed);
-          play_pos_ += reverse ? -rate : rate;
-          if (wrap_play_pos(start_d, end_d, reverse) && once) {
-            play_request_.store(false, std::memory_order_relaxed);
-            play_pos_ = reverse && end > start ? end_d - 1.0 : start_d;
-          }
+          wet[0] *= play_gain;
+          wet[1] *= play_gain;
+          out[0] += wet[0];
+          out[1] += wet[1];
+          block_peak = std::max(block_peak,
+                                std::max(std::fabs(wet[0]), std::fabs(wet[1])));
+        }
+        play_pos_ += reverse ? -rate_ : rate_;
+        if (wrap_play_pos(start_d, end_d, reverse) && once) {
+          play_request_.store(false, std::memory_order_relaxed);
+          play_ramp_.set_target(0.0f);
+          play_pos_ = reverse && end > start ? end_d - 1.0 : start_d;
         }
         break;
       }
 
       case Stage::Empty:
-      case Stage::Stopped:
         break;
     }
 
-    if (click_remaining_ > 0 && click_length_ > 0) {
-      const float envelope = static_cast<float>(click_remaining_) /
-                             static_cast<float>(click_length_);
-      const float tick =
-          static_cast<float>(std::sin(click_phase_)) * envelope * envelope * 0.4f;
-      click_phase_ += click_step_;
-      --click_remaining_;
-      out[0] += tick;
-      out[1] += tick;
-    }
+    if (click_.active()) click_.render(&out[0], &out[1], 1, sample_rate_);
 
     for (int ch = 0; ch < width; ++ch) outputs[ch][i] = out[ch];
   }
+  // A record edge exactly at the block's end belongs to the next block's
+  // frame 0; punch_frame() only ever returns `frames` for "not here".
 
   loop_peak_.store(block_peak, std::memory_order_relaxed);
 
@@ -590,6 +764,8 @@ void LooperInstance::process(const float* const* inputs, float* const* outputs,
                  std::memory_order_relaxed);
   beats_to_boundary_.store(beats_to_boundary(transport_),
                            std::memory_order_relaxed);
+  can_undo_.store(undo_possible(), std::memory_order_relaxed);
+  can_redo_.store(redo_possible(), std::memory_order_relaxed);
 }
 
 uint64_t LooperInstance::trim_start_frames(uint64_t length) const {
@@ -665,16 +841,17 @@ std::vector<float> LooperInstance::waveform(int buckets) const {
     const uint64_t grid = grid_frames();
     len = grid > 0 ? grid : written;
   }
-  if (len == 0) return out;
+  if (len == 0 || tapes_[0].empty()) return out;
   // How far into `len` real audio reaches; buckets past this stay at 0 so
   // the untouched part of the grid reads as empty space, not a guess.
   const uint64_t recorded_span = closed_len > 0 ? len : std::min(written, len);
 
-  // buffer_ itself is not atomic - the audio thread can still be writing
-  // into it here, during Defining or Overdubbing. Reading it unguarded is
-  // the accepted tradeoff for a waveform overview: worst case this draws one
-  // stray peak from a torn sample, corrected on the next refresh, never a
-  // crash.
+  // The tape itself is not atomic - the audio thread can still be writing
+  // into it here, during Defining or Overdubbing, or flip which buffer is
+  // live under an undo. Reading it unguarded is the accepted tradeoff for a
+  // waveform overview: worst case this draws one stray peak from a torn
+  // sample, corrected on the next refresh, never a crash.
+  const float* buffer = tape();
 
   for (size_t b = 0; b < out.size(); ++b) {
     const uint64_t from = len * b / out.size();
@@ -682,8 +859,8 @@ std::vector<float> LooperInstance::waveform(int buckets) const {
     const uint64_t to = std::max(from + 1, len * (b + 1) / out.size());
     float peak = 0.0f;
     for (uint64_t i = from; i < to && i < recorded_span; ++i) {
-      peak = std::max(peak, std::fabs(buffer_[i * 2]));
-      peak = std::max(peak, std::fabs(buffer_[i * 2 + 1]));
+      peak = std::max(peak, std::fabs(buffer[i * 2]));
+      peak = std::max(peak, std::fabs(buffer[i * 2 + 1]));
     }
     out[b] = peak;
   }
@@ -873,10 +1050,10 @@ std::vector<uint8_t> LooperInstance::save_state() const {
   append_pod(out, replace);
   append_pod(out, speed_.load(std::memory_order_relaxed));
   append_pod(out, feedback_.load(std::memory_order_relaxed));
-  if (frames > 0 && buffer_.size() >= 2) {
+  if (frames > 0 && !tapes_[0].empty()) {
     const uint64_t copied = std::min(have, frames);
-    if (copied > 0 && buffer_.size() >= copied * 2) {
-      const auto* samples = reinterpret_cast<const uint8_t*>(buffer_.data());
+    if (copied > 0 && tapes_[0].size() >= copied * 2) {
+      const auto* samples = reinterpret_cast<const uint8_t*>(tape());
       out.insert(out.end(), samples, samples + copied * 2 * sizeof(float));
     }
     if (frames > copied) {
@@ -936,11 +1113,11 @@ bool LooperInstance::load_state(const std::vector<uint8_t>& blob) {
     set_parameter(kSpeed, speed);
     set_parameter(kFeedback, feedback);
 
-    if (buffer_.empty())
+    if (tapes_[0].empty())
       activate(sample_rate_ > 0.0 ? sample_rate_ : (saved_rate > 0.0 ? saved_rate
                                                                     : 48000.0),
                256);
-    if (buffer_.empty() || capacity_frames_ == 0) return true;
+    if (tapes_[0].empty() || capacity_frames_ == 0) return true;
 
     const uint64_t available =
         static_cast<uint64_t>(end - cursor) / (2 * sizeof(float));
@@ -966,10 +1143,11 @@ bool LooperInstance::load_state(const std::vector<uint8_t>& blob) {
     stage_ = Stage::Playing;
     record_active_ = false;
     record_request_.store(false, std::memory_order_relaxed);
+    rec_ramp_.reset(0.0f);
     loop_beats_.store(beats, std::memory_order_relaxed);
-    peels_.clear();
+    peel_count_ = 0;
     clear_recorded();
-    undo_ = {};
+    undo_meta_ = {};
     stop_count_in();
     const uint8_t* after_audio =
         cursor + saved_frames * 2 * sizeof(float);
@@ -1028,81 +1206,136 @@ bool LooperInstance::load_state(const std::vector<uint8_t>& blob) {
   return true;
 }
 
+// --- undo machinery ----------------------------------------------------------
+
+void LooperInstance::mark_recorded(uint64_t frame) {
+  if (frame >= recorded_.size()) return;
+  if (recorded_[frame] == 0) ++recorded_count_;
+  recorded_[frame] = 1;
+  recorded_hi_ = std::max(recorded_hi_, frame + 1);
+}
+
 void LooperInstance::clear_recorded() {
-  if (!recorded_.empty())
-    std::fill(recorded_.begin(), recorded_.end(), static_cast<uint8_t>(0));
+  const uint64_t n = std::min<uint64_t>(recorded_hi_, recorded_.size());
+  if (n > 0) std::memset(recorded_.data(), 0, n);
+  recorded_hi_ = 0;
+  recorded_count_ = 0;
+}
+
+void LooperInstance::snapshot(uint64_t frame) {
+  if (frame >= shadow_state_.size()) return;
+  if (shadow_state_[frame] == kShadowSnapped) return;
+  float* dst = shadow() + frame * 2;
+  if (frame < undo_meta_.length) {
+    const float* src = tape() + frame * 2;
+    dst[0] = src[0];
+    dst[1] = src[1];
+  } else {
+    dst[0] = dst[1] = 0.0f;
+  }
+  shadow_state_[frame] = kShadowSnapped;
+  rec_weight_[frame] = 0;
+  if (touched_lo_ >= touched_hi_) {
+    touched_lo_ = frame;
+    touched_hi_ = frame + 1;
+  } else {
+    touched_lo_ = std::min(touched_lo_, frame);
+    touched_hi_ = std::max(touched_hi_, frame + 1);
+  }
+}
+
+void LooperInstance::snapshot_range(uint64_t lo, uint64_t hi) {
+  hi = std::min<uint64_t>(hi, shadow_state_.size());
+  for (uint64_t i = lo; i < hi; ++i) snapshot(i);
+}
+
+void LooperInstance::sweep_shadow() {
+  if (sweep_done()) return;
+  const uint64_t stop = std::min(stale_hi_, stale_pos_ + kSweepFramesPerBlock);
+  const float* src = tape();
+  float* dst = shadow();
+  for (uint64_t i = stale_pos_; i < stop; ++i) {
+    if (shadow_state_[i] != kShadowStale) continue;
+    dst[i * 2] = src[i * 2];
+    dst[i * 2 + 1] = src[i * 2 + 1];
+    shadow_state_[i] = kShadowSynced;
+  }
+  stale_pos_ = stop;
+  if (sweep_done()) stale_pos_ = stale_hi_ = 0;
 }
 
 void LooperInstance::capture_undo() {
-  const uint64_t length = length_.load(std::memory_order_relaxed);
-  undo_.length = length;
-  undo_.beats = loop_beats_.load(std::memory_order_relaxed);
-  undo_.trim_start = trim_start_.load(std::memory_order_relaxed);
-  undo_.trim_end = trim_end_.load(std::memory_order_relaxed);
-  undo_.fade_in = fade_in_.load(std::memory_order_relaxed);
-  undo_.fade_out = fade_out_.load(std::memory_order_relaxed);
-  undo_.audio.assign(length * 2, 0.0f);
-  if (length > 0 && buffer_.size() >= length * 2)
-    std::memcpy(undo_.audio.data(), buffer_.data(), length * 2 * sizeof(float));
-  undo_.valid = true;
-  undo_.undone = false;
-  peels_.clear();
-  clear_recorded();
-}
+  // Whatever the layer being replaced still differs from the tape on is
+  // now permanent, so the shadow has to catch up there before the next
+  // undo can swap it in. Queue that for the sweep rather than doing it
+  // here: it can be the whole loop, and this runs inside a block.
+  if (touched_lo_ < touched_hi_) {
+    uint64_t lo = touched_lo_;
+    uint64_t hi = touched_hi_;
+    if (!sweep_done()) {
+      lo = std::min(lo, stale_pos_);
+      hi = std::max(hi, stale_hi_);
+    }
+    hi = std::min<uint64_t>(hi, shadow_state_.size());
+    if (hi > lo) std::memset(shadow_state_.data() + lo, kShadowStale, hi - lo);
+    stale_pos_ = lo;
+    stale_hi_ = hi;
+  }
+  touched_lo_ = touched_hi_ = 0;
 
-void LooperInstance::capture_undo_empty() {
-  undo_.audio.clear();
-  undo_.length = 0;
-  undo_.beats = 0.0;
-  undo_.trim_start = 0.0;
-  undo_.trim_end = 1.0;
-  undo_.fade_in = 0.0;
-  undo_.fade_out = 0.0;
-  undo_.valid = true;
-  undo_.undone = false;
-  peels_.clear();
+  undo_meta_.length = length_.load(std::memory_order_relaxed);
+  undo_meta_.beats = loop_beats_.load(std::memory_order_relaxed);
+  undo_meta_.trim_start = trim_start_.load(std::memory_order_relaxed);
+  undo_meta_.trim_end = trim_end_.load(std::memory_order_relaxed);
+  undo_meta_.fade_in = fade_in_.load(std::memory_order_relaxed);
+  undo_meta_.fade_out = fade_out_.load(std::memory_order_relaxed);
+  undo_meta_.valid = true;
+  undo_meta_.undone = false;
+  peel_count_ = 0;
   clear_recorded();
 }
 
 void LooperInstance::swap_undo() {
-  if (!undo_.valid) return;
+  if (!undo_meta_.valid) return;
 
-  UndoLayer current;
+  UndoMeta current;
   current.length = length_.load(std::memory_order_relaxed);
   current.beats = loop_beats_.load(std::memory_order_relaxed);
   current.trim_start = trim_start_.load(std::memory_order_relaxed);
   current.trim_end = trim_end_.load(std::memory_order_relaxed);
   current.fade_in = fade_in_.load(std::memory_order_relaxed);
   current.fade_out = fade_out_.load(std::memory_order_relaxed);
-  current.audio.assign(current.length * 2, 0.0f);
-  if (current.length > 0 && buffer_.size() >= current.length * 2)
-    std::memcpy(current.audio.data(), buffer_.data(),
-                current.length * 2 * sizeof(float));
   current.valid = true;
-  current.undone = !undo_.undone;
+  current.undone = !undo_meta_.undone;
 
-  const uint64_t n = std::min(undo_.length, capacity_frames_);
-  if (n > 0 && buffer_.size() >= n * 2)
-    std::memcpy(buffer_.data(), undo_.audio.data(), n * 2 * sizeof(float));
+  // The audio half of the swap is one store: the shadow becomes the tape.
+  // Frames the layer never touched are identical in both (the sweep saw to
+  // that), frames it did touch hold the old value in the shadow.
+  live_.store(live_.load(std::memory_order_relaxed) ^ 1,
+              std::memory_order_relaxed);
+
+  const uint64_t n = std::min(undo_meta_.length, capacity_frames_);
   length_.store(n, std::memory_order_relaxed);
   written_.store(0, std::memory_order_relaxed);
   play_pos_ = 0.0;
-  loop_beats_.store(undo_.beats, std::memory_order_relaxed);
-  set_trim(undo_.trim_start, undo_.trim_end);
-  set_fades(undo_.fade_in, undo_.fade_out);
+  loop_beats_.store(undo_meta_.beats, std::memory_order_relaxed);
+  set_trim(undo_meta_.trim_start, undo_meta_.trim_end);
+  set_fades(undo_meta_.fade_in, undo_meta_.fade_out);
   stage_ = n > 0 ? Stage::Playing : Stage::Empty;
   record_active_ = false;
   record_request_.store(false, std::memory_order_relaxed);
   clear_request_.store(false, std::memory_order_relaxed);
+  rec_ramp_.reset(0.0f);
 
-  undo_ = std::move(current);
-  peels_.clear();
+  undo_meta_ = current;
+  peel_count_ = 0;
   clear_recorded();
 }
 
 bool LooperInstance::last_burst(uint64_t* start, uint64_t* end) const {
-  const uint64_t n = tape_frames();
-  if (n == 0 || recorded_.size() < n) return false;
+  const uint64_t n = std::min({tape_frames(), recorded_hi_,
+                               static_cast<uint64_t>(recorded_.size())});
+  if (n == 0) return false;
   const uint64_t gap = std::max<uint64_t>(
       1, static_cast<uint64_t>(sample_rate_ * kPhraseGapSeconds));
 
@@ -1129,43 +1362,45 @@ bool LooperInstance::last_burst(uint64_t* start, uint64_t* end) const {
   return true;
 }
 
-bool LooperInstance::can_undo() const {
-  if (last_burst(nullptr, nullptr)) return true;
-  return undo_.valid && !undo_.undone && peels_.empty();
+bool LooperInstance::undo_possible() const {
+  if (has_burst()) return true;
+  return undo_meta_.valid && !undo_meta_.undone && peel_count_ == 0;
 }
 
-bool LooperInstance::can_redo() const {
-  return !peels_.empty() || (undo_.valid && undo_.undone);
+bool LooperInstance::redo_possible() const {
+  return peel_count_ > 0 || (undo_meta_.valid && undo_meta_.undone);
+}
+
+void LooperInstance::swap_range(uint64_t lo, uint64_t hi) {
+  hi = std::min<uint64_t>(hi, capacity_frames_);
+  float* a = tape();
+  float* b = shadow();
+  for (uint64_t i = lo * 2; i < hi * 2; ++i) std::swap(a[i], b[i]);
 }
 
 bool LooperInstance::peel_last_burst() {
+  if (peel_count_ >= kMaxPeels) return false;
   uint64_t start = 0;
   uint64_t stop = 0;
   if (!last_burst(&start, &stop)) return false;
-  if (stop <= start || buffer_.size() < stop * 2) return false;
+  if (stop <= start || stop > capacity_frames_) return false;
 
+  // The phrase's frames were all written this pass, so the shadow holds
+  // what was there before it; swapping the range puts that back and parks
+  // the phrase in the shadow for redo. Bounded by the phrase, not the tape.
   Peel peel;
   peel.start = start;
   peel.end = stop;
-  peel.audio.assign((stop - start) * 2, 0.0f);
-  std::memcpy(peel.audio.data(), buffer_.data() + start * 2,
-              (stop - start) * 2 * sizeof(float));
-
+  swap_range(start, stop);
   for (uint64_t i = start; i < stop; ++i) {
-    if (i < undo_.length && undo_.audio.size() >= (i + 1) * 2) {
-      buffer_[i * 2] = undo_.audio[i * 2];
-      buffer_[i * 2 + 1] = undo_.audio[i * 2 + 1];
-    } else {
-      buffer_[i * 2] = 0.0f;
-      buffer_[i * 2 + 1] = 0.0f;
-    }
-    if (i < recorded_.size()) recorded_[i] = 0;
+    if (recorded_[i] != 0) --recorded_count_;
+    recorded_[i] = 0;
   }
 
   // Last island of a first take: the tape is now empty against an empty
   // snapshot, so drop the loop. Leaving a silent closed take made Undo
   // look like it had done nothing.
-  if (undo_.length == 0 && !last_burst(nullptr, nullptr)) {
+  if (undo_meta_.length == 0 && !has_burst()) {
     peel.dropped_length = length_.load(std::memory_order_relaxed);
     peel.dropped_beats = loop_beats_.load(std::memory_order_relaxed);
     length_.store(0, std::memory_order_relaxed);
@@ -1178,43 +1413,44 @@ bool LooperInstance::peel_last_burst() {
       stage_ = Stage::Empty;
       record_active_ = false;
       record_request_.store(false, std::memory_order_relaxed);
+      rec_ramp_.reset(0.0f);
     }
   }
 
-  peels_.push_back(std::move(peel));
+  peels_[peel_count_++] = peel;
   return true;
 }
 
 void LooperInstance::restore_peel() {
-  if (peels_.empty()) return;
-  Peel peel = std::move(peels_.back());
-  peels_.pop_back();
+  if (peel_count_ == 0) return;
+  const Peel peel = peels_[--peel_count_];
   if (peel.dropped_length > 0) {
     length_.store(peel.dropped_length, std::memory_order_relaxed);
     loop_beats_.store(peel.dropped_beats, std::memory_order_relaxed);
     if (stage_ == Stage::Empty || stage_ == Stage::Defining)
       stage_ = Stage::Playing;
   }
-  const uint64_t n = peel.end - peel.start;
-  if (n > 0 && buffer_.size() >= peel.end * 2 && peel.audio.size() >= n * 2) {
-    std::memcpy(buffer_.data() + peel.start * 2, peel.audio.data(),
-                n * 2 * sizeof(float));
+  if (peel.end > peel.start && peel.end <= capacity_frames_) {
+    swap_range(peel.start, peel.end);
+    for (uint64_t i = peel.start; i < peel.end; ++i) {
+      if (recorded_[i] == 0) ++recorded_count_;
+      recorded_[i] = 1;
+    }
+    recorded_hi_ = std::max(recorded_hi_, peel.end);
   }
-  for (uint64_t i = peel.start; i < peel.end && i < recorded_.size(); ++i)
-    recorded_[i] = 1;
 }
 
-void LooperInstance::undo() {
+void LooperInstance::apply_undo() {
   if (peel_last_burst()) return;
-  if (can_undo()) swap_undo();
+  if (undo_possible()) swap_undo();
 }
 
-void LooperInstance::redo() {
-  if (!peels_.empty()) {
+void LooperInstance::apply_redo() {
+  if (peel_count_ > 0) {
     restore_peel();
     return;
   }
-  if (can_redo()) swap_undo();
+  if (redo_possible()) swap_undo();
 }
 
 bool LooperInstance::can_multiply() const {
@@ -1222,11 +1458,15 @@ bool LooperInstance::can_multiply() const {
   return n > 0 && n <= capacity_frames_ / 2;
 }
 
-void LooperInstance::multiply() {
+void LooperInstance::apply_multiply() {
   const uint64_t n = length_.load(std::memory_order_relaxed);
   if (n == 0 || n > capacity_frames_ / 2) return;
-  if (buffer_.size() < n * 4) return;
-  std::memcpy(buffer_.data() + n * 2, buffer_.data(), n * 2 * sizeof(float));
+  // Its own undo layer, like a Rec pass: the new half is written through
+  // the snapshot so undo knows it was silent (and short) before.
+  capture_undo();
+  snapshot_range(n, n * 2);
+  float* buffer = tape();
+  std::memcpy(buffer + n * 2, buffer, n * 2 * sizeof(float));
   if (layer_.size() >= n * 2)
     std::memcpy(layer_.data() + n, layer_.data(), n * sizeof(uint8_t));
   length_.store(n * 2, std::memory_order_relaxed);

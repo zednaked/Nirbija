@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #pragma once
 
 #include <array>
@@ -23,6 +25,42 @@ inline constexpr size_t kMaxSends = 4;
 // bus and the pan law are all two channels wide. Anything wider arriving from
 // a session file or a caller is clamped here rather than indexing past them.
 inline constexpr int kMaxStripChannels = 2;
+
+// Fixed channel capacity. Slots are pre-allocated so adding a channel never
+// resizes anything the audio thread is walking; the audio thread only reads
+// `active_` and stops there.
+inline constexpr size_t kMaxChannels = 64;
+
+// Mix buses. A bus is a strip like any other, fed by whatever channels point at
+// it rather than by a port.
+inline constexpr size_t kMaxBuses = 16;
+
+// How a strip names where it sends: -1 is the master, anything below
+// kChannelDestination is a bus index, and above it a channel slot. One number
+// so it can live in a single atomic the audio thread reads per block. They
+// live here rather than in the graph's header because the strip validates a
+// destination before publishing it, so the graph never indexes with a number
+// a session file made up.
+inline constexpr int kMasterDestination = -1;
+inline constexpr int kChannelDestination = 1000;
+
+inline int channel_destination(size_t slot) {
+  return kChannelDestination + static_cast<int>(slot);
+}
+
+// A destination the graph can index without a bounds check on the audio
+// thread: the master, a bus below kMaxBuses, or a channel slot below
+// kMaxChannels. Anything else - a bus that never existed, a slot past the
+// end - is the master, which is audible and harmless rather than a read off
+// the end of the bus array.
+inline int sanitise_destination(int destination) {
+  if (destination == kMasterDestination) return destination;
+  if (destination >= 0 && destination < static_cast<int>(kMaxBuses)) return destination;
+  if (destination >= kChannelDestination &&
+      destination < kChannelDestination + static_cast<int>(kMaxChannels))
+    return destination;
+  return kMasterDestination;
+}
 
 // One mixer channel: input -> insert chain -> gain/pan -> destination bus.
 // Owned by the graph and only ever touched by the audio thread once attached;
@@ -62,7 +100,7 @@ class ChannelStrip {
   // Where this strip sends its output: -1 is the master bus, anything else is
   // the index of a mix bus.
   void set_destination(int destination) {
-    destination_.store(destination, std::memory_order_relaxed);
+    destination_.store(sanitise_destination(destination), std::memory_order_relaxed);
   }
   int destination() const { return destination_.load(std::memory_order_relaxed); }
 
@@ -136,15 +174,36 @@ class ChannelStrip {
   // Last processed audio, after fader and mute, for hardware outs / sidechain.
   const float* output_cache(int channel) const;
 
+  // The delay the graph wants this strip to add so it lines up with the
+  // slowest one. A change is not a jump: apply_pdc() crossfades from the old
+  // read position to the new one (see kPdcFadeSeconds), and a change that
+  // lands mid-fade waits for that fade to finish.
   void set_pdc_delay(uint32_t samples) {
     pdc_delay_.store(samples, std::memory_order_relaxed);
   }
   void apply_pdc(float* const* buffers, uint32_t frames);
   void feed_sidechain(const float* const* buffers, int channels, uint32_t frames);
 
+  // The largest block the inserts were last activated with. Tests use it to
+  // check that a period growing past it re-activates them.
+  uint32_t activated_block_frames() const { return activated_block_frames_; }
+
+  // Tests only. Holds the chain's sequence counter odd, which is what the
+  // audio thread sees while the UI thread is in the middle of an edit, so the
+  // fallback to the last good snapshot can be exercised on purpose.
+  void begin_chain_edit_for_test() { begin_chain_edit(); }
+  void end_chain_edit_for_test() { end_chain_edit(); }
+
  private:
   void run_insert(PluginInstance* insert, float* const* buffers, uint32_t frames,
-                  const TransportInfo* transport, bool filter_midi);
+                  const TransportInfo* transport);
+  // Hands the chain's MIDI to an insert in time order. The buffer is appended
+  // to out of order - port events, then injected ones, then whatever each
+  // insert upstream produced - and LV2 atom sequences and CLAP both require
+  // non-decreasing time, so it is sorted here, once, whenever something was
+  // added since the last sort.
+  void queue_chain_midi(PluginInstance* insert);
+  void append_insert_midi(PluginInstance* insert);
   // Runs the plugin so it can consume MIDI (and not hang a voice) but puts
   // the dry audio back and drops anything it emitted.
   void run_bypassed(PluginInstance* insert, float* const* buffers,
@@ -163,13 +222,19 @@ class ChannelStrip {
   struct ChainSnapshot {
     PluginInstance* inserts[kMaxInserts] = {};
     uint8_t flags[kMaxInserts] = {};
+    uint32_t tags[kMaxInserts] = {};
     size_t count = 0;
   };
   // Reads the chain under the sequence counter so the pointers and their flags
   // all belong to the same instant. False when the UI thread was mid-edit for
-  // every attempt, which costs this block its inserts rather than risking a
-  // chain that runs one plugin twice.
+  // every attempt; process() then falls back on last_good_ (see there) rather
+  // than risking a chain that runs one plugin twice.
   bool snapshot_chain(ChainSnapshot* out) const;
+  // Brings bypass_mix_ in line with a chain that changed shape since the
+  // last block: a plugin that moved slots takes its mix with it, a new one
+  // starts where its flags say. Audio thread only, which is what lets the UI
+  // side never write bypass_mix_ at all.
+  void reconcile_bypass_mix(const ChainSnapshot& chain);
 
   // Brackets a chain edit. The odd value in between is what tells a reader its
   // snapshot is torn.
@@ -180,6 +245,10 @@ class ChannelStrip {
   int channel_count_;
   double sample_rate_ = 0.0;
   uint32_t max_block_frames_ = 0;
+  // What the inserts were activated with. A period that grows past it means
+  // every insert has to be activated again with the new maximum: CLAP and
+  // VST3 plugins size their own buffers from it and would overflow.
+  uint32_t activated_block_frames_ = 0;
 
   std::atomic<float> gain_{1.0f};
   std::atomic<float> pan_{0.0f};   // -1 left, +1 right
@@ -208,17 +277,42 @@ class ChannelStrip {
   // separate from the fader's own smoothing so it feels like a switch.
   float mute_gain_ = 1.0f;
   float mute_step_ = 1.0f;
-  // How much dry each slot is putting out, 0 wet to 1 bypassed. Owned by the
-  // audio thread except that add_insert() zeroes the slot it fills, so a new
-  // plugin starts wet like its flags say.
-  std::array<std::atomic<float>, kMaxInserts> bypass_mix_{};
+  // How much dry each slot is putting out, 0 wet to 1 bypassed. Audio thread
+  // only: the UI publishes the chain and reconcile_bypass_mix() works out
+  // from the published tags which slot's mix belongs to which plugin.
+  // `bypass_mix_tag_` is the tag each mix was last computed for, so a swap
+  // is recognised as the same plugin in a new slot.
+  std::array<float, kMaxInserts> bypass_mix_{};
+  std::array<uint32_t, kMaxInserts> bypass_mix_tag_{};
+
+  // The last chain snapshot that was read whole, and how many blocks in a row
+  // have had to fall back on it. Audio thread only. A torn read means the UI
+  // thread was descheduled mid-edit for a whole block; running the previous
+  // chain for that block keeps the sound rather than dropping every insert.
+  // It is only safe for one block: a plugin removed after that snapshot is
+  // reclaimed two generations after its removal, and a snapshot two blocks
+  // old could name one already freed. Past that the block runs dry.
+  ChainSnapshot last_good_;
+  int stale_snapshot_blocks_ = 0;
 
   std::vector<std::atomic<float>> peaks_;
+
+  // The fader's per-sample gain per output channel for this block, filled
+  // first so the multiply over the audio is a plain loop the compiler can
+  // vectorise; sized in prepare().
+  std::array<std::vector<float>, kMaxStripChannels> gain_curve_;
 
   // Published to the audio thread. A null slot is a hole left by a removal and
   // is skipped, which keeps the indices of the surviving inserts stable.
   std::array<std::atomic<PluginInstance*>, kMaxInserts> insert_slots_{};
   std::atomic<size_t> insert_count_{0};
+  // One tag per add_insert(), never reused, travelling with the plugin on a
+  // swap and zero for a hole. The audio thread tells plugins apart by it and
+  // not by their address: a plugin freed by reclaim() and a new one from the
+  // same heap block share an address, and the new one would inherit the old
+  // one's bypass mix.
+  std::array<std::atomic<uint32_t>, kMaxInserts> insert_tags_{};
+  uint32_t next_insert_tag_ = 1;  // UI thread only
 
   // Even while the chain is settled, odd while the UI thread is rewriting it.
   std::atomic<uint32_t> chain_seq_{0};
@@ -244,11 +338,22 @@ class ChannelStrip {
   // every head in one period.
   std::array<MidiEvent, 1024> midi_chain_{};
   size_t midi_chain_count_ = 0;
+  // Something was appended since the last sort.
+  bool midi_chain_unsorted_ = false;
 
   std::vector<std::vector<float>> output_cache_;
+  // The compensation delay: one ring per channel, always written so a change
+  // of delay finds real audio at the new read position. Grown in prepare(),
+  // never reallocated for a period that did not grow.
   std::vector<std::vector<float>> delay_line_;
   std::vector<size_t> delay_write_;
   std::atomic<uint32_t> pdc_delay_{0};
+  // The crossfade between read positions, audio thread only: the delay being
+  // faded out of, the one in force, and how far the fade has got.
+  uint32_t pdc_current_ = 0;
+  uint32_t pdc_previous_ = 0;
+  uint32_t pdc_fade_left_ = 0;
+  uint32_t pdc_fade_length_ = 0;
 };
 
 }  // namespace nirbija

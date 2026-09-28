@@ -1,34 +1,22 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #pragma once
 
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
 #include "core/audio_source.h"
 #include "core/channel_strip.h"
+#include "core/dsp.h"
 #include "core/recorder.h"
 
 namespace nirbija {
 
-// Fixed channel capacity. Slots are pre-allocated so adding a channel never
-// resizes anything the audio thread is walking; the audio thread only reads
-// `active_` and stops there.
-inline constexpr size_t kMaxChannels = 64;
-
-// Mix buses. A bus is a strip like any other, fed by whatever channels point at
-// it rather than by a port.
-inline constexpr size_t kMaxBuses = 16;
-
-// How a strip names where it sends: -1 is the master, anything below
-// kChannelDestination is a bus index, and above it a channel slot. One number
-// so it can live in a single atomic the audio thread reads per block.
-inline constexpr int kMasterDestination = -1;
-inline constexpr int kChannelDestination = 1000;
-
-inline int channel_destination(size_t slot) {
-  return kChannelDestination + static_cast<int>(slot);
-}
+// kMaxChannels, kMaxBuses and the destination constants live in
+// channel_strip.h, where a destination is validated before it is published.
 
 class AudioGraph {
  public:
@@ -86,6 +74,18 @@ class AudioGraph {
     return limiter_floor_.exchange(1.0f, std::memory_order_relaxed);
   }
   uint32_t master_latency_samples() const;
+  // Everything this box adds between its inputs and its outputs: the deepest
+  // insert chain (every other strip is delayed to match it) plus the
+  // limiter's lookahead. What the JACK latency callback reports. Any thread.
+  uint32_t internal_latency_samples() const;
+
+  // The metronome click, rendered inside the graph so it goes through the
+  // limiter and the park fade like everything else that reaches the master,
+  // while still sitting after the master fader: pulling the mix down for a
+  // break should not take the count with it. Realtime thread, before
+  // render(): a click starting at `frame` of the coming block. A block is
+  // assumed shorter than a beat, so one click per block is enough.
+  void schedule_click(uint32_t frame, bool accent);
 
   // UI thread. Drops retired strips the audio thread has now left.
   // Frees strips and sources retired by removal, once the audio thread can no
@@ -117,7 +117,16 @@ class AudioGraph {
   // removal never renumbers the channels around it.
   size_t channel_count() const { return active_.load(std::memory_order_acquire); }
   bool channel_alive(size_t index) const;
+  // UI thread only: dereferences the owning pointer, which add_channel and
+  // remove_channel move under it.
   ChannelStrip& channel(size_t index) { return *channels_[index]; }
+  // Realtime thread. The published pointer, null for a removed or never
+  // used slot. The only way the audio thread may reach a strip: the owning
+  // pointers above are moved by the UI thread without any coordination.
+  ChannelStrip* live_channel(size_t index) const {
+    return index < kMaxChannels ? live_[index].load(std::memory_order_acquire)
+                                : nullptr;
+  }
 
   // UI thread. The strip stops being rendered immediately, but is kept alive:
   // the audio thread may be inside it at this very moment.
@@ -128,7 +137,13 @@ class AudioGraph {
   size_t add_bus(std::string name);
   size_t bus_count() const { return bus_active_.load(std::memory_order_acquire); }
   bool bus_alive(size_t index) const;
+  // UI thread only, like channel().
   ChannelStrip& bus(size_t index) { return *buses_[index]; }
+  // Realtime thread, like live_channel().
+  ChannelStrip* live_bus(size_t index) const {
+    return index < kMaxBuses ? live_buses_[index].load(std::memory_order_acquire)
+                             : nullptr;
+  }
   void remove_bus(size_t index);
 
   void set_master_gain(float linear) {
@@ -181,6 +196,11 @@ class AudioGraph {
   void apply_sends(const ChannelStrip& strip, int width, uint32_t frames,
                    long long rendered_buses, size_t slot, bool audible);
   void run_limiter(float* const* master, uint32_t frames);
+  void render_click(float* const* master, uint32_t frames);
+  // Zeroes the channel and bus scratch that was written last block, and only
+  // that: with 64 channels and 16 buses, clearing them all every block was
+  // most of an idle graph's work.
+  void clear_dirty_scratch();
 
 
   std::array<std::unique_ptr<ChannelStrip>, kMaxChannels> channels_;
@@ -212,6 +232,16 @@ class AudioGraph {
   // it needs somewhere for that to land before it renders.
   std::array<std::vector<std::vector<float>>, kMaxChannels> channel_buffers_;
   std::array<std::vector<float*>, kMaxChannels> channel_ptrs_;
+
+  // Which of the buffers above something was mixed into this block, so the
+  // next block zeroes only those. Audio thread only.
+  std::array<bool, kMaxBuses> bus_dirty_{};
+  std::array<bool, kMaxChannels> channel_dirty_{};
+
+  // Each strip's latency this block, read once per block: latency_samples()
+  // walks the insert chain, and it used to be asked three times per strip.
+  std::array<uint32_t, kMaxChannels> channel_latency_{};
+  std::array<uint32_t, kMaxBuses> bus_latency_{};
 
   // UI thread only. Removed strips wait here: freeing one while the audio
   // thread is inside it would be a use-after-free. Tagged with the render
@@ -290,6 +320,12 @@ class AudioGraph {
     float blend = 0.0f;
   };
   Limiter limiter_;
+
+  // The click, audio thread only. `click_at_` is the frame of the coming
+  // block a click starts on, or UINT32_MAX for none.
+  dsp::ClickTone click_;
+  uint32_t click_at_ = UINT32_MAX;
+  bool click_accent_ = false;
 
   static constexpr int kMaxTapPairs = 8;
   std::array<std::array<std::vector<float>, kMaxTapPairs>, kMaxChannels> tap_l_{};

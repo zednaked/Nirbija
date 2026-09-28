@@ -7,14 +7,14 @@ Three places, three jobs:
 
 | where | what |
 |---|---|
-| this repo (private) | source, working tree |
+| this repo | source, working tree |
 | `zednaked/nirbija-site` (public) | **only** this page (GitHub Pages) |
 | itch.io | the download — binary + source tarball |
 
 Live at <https://zednaked.github.io/nirbija-site/>.
 
-Do not publish binaries from git. Do not point this page at the
-private repository.
+Do not publish binaries from git: releases come from `packaging/dist.sh`, or
+from the tag-triggered job in `.github/workflows/ci.yml`.
 
 ## publish the page
 

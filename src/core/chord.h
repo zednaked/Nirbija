@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #pragma once
 
 #include <array>
@@ -5,6 +7,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "core/midi_out.h"
 #include "core/plugin.h"
 
 namespace nirbija {
@@ -92,9 +95,13 @@ class ChordInstance : public PluginInstance {
   std::array<std::array<uint8_t, kMaxVoices>, 128> trigger_voices_{};
   std::array<uint8_t, 128> trigger_voice_count_{};
   std::array<int16_t, 128> passthrough_pitch_{};
+  // The channel each key's notes went out on. The off must use that one,
+  // not the knob as it stands now: a channel change with a key held would
+  // otherwise close the chord on a channel where nothing is sounding.
+  std::array<uint8_t, 128> trigger_channel_{};
+  std::array<uint8_t, 128> passthrough_channel_{};
 
-  std::array<MidiEvent, kMaxEvents> events_{};
-  size_t event_count_ = 0;
+  MidiOutBlock<kMaxEvents> out_;
 };
 
 }  // namespace nirbija

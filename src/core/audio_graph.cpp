@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #include "core/audio_graph.h"
 
 #include <algorithm>
@@ -91,6 +93,56 @@ void AudioGraph::prepare(double sample_rate, uint32_t max_block_frames) {
 
 uint32_t AudioGraph::master_latency_samples() const {
   return master_limiter() ? static_cast<uint32_t>(limiter_.lookahead) : 0;
+}
+
+uint32_t AudioGraph::internal_latency_samples() const {
+  uint32_t deepest = 0;
+  const size_t count = active_.load(std::memory_order_acquire);
+  for (size_t i = 0; i < count; ++i) {
+    const ChannelStrip* strip = live_[i].load(std::memory_order_acquire);
+    if (strip != nullptr) deepest = std::max(deepest, strip->latency_samples());
+  }
+  const size_t buses = bus_active_.load(std::memory_order_acquire);
+  for (size_t i = 0; i < buses; ++i) {
+    const ChannelStrip* strip = live_buses_[i].load(std::memory_order_acquire);
+    if (strip != nullptr) deepest = std::max(deepest, strip->latency_samples());
+  }
+  return deepest + master_latency_samples();
+}
+
+void AudioGraph::schedule_click(uint32_t frame, bool accent) {
+  click_at_ = frame;
+  click_accent_ = accent;
+}
+
+void AudioGraph::render_click(float* const* master, uint32_t frames) {
+  const uint32_t at = click_at_;
+  click_at_ = UINT32_MAX;
+  if (at < frames) {
+    // The tail of the last click up to the new one, then the new one.
+    click_.render(master[0], master[1], at, sample_rate_);
+    click_.start(sample_rate_, click_accent_);
+    click_.render(master[0] + at, master[1] + at, frames - at, sample_rate_);
+    return;
+  }
+  click_.render(master[0], master[1], frames, sample_rate_);
+}
+
+void AudioGraph::clear_dirty_scratch() {
+  for (size_t i = 0; i < kMaxBuses; ++i) {
+    if (!bus_dirty_[i]) continue;
+    bus_dirty_[i] = false;
+    // The whole buffer, not this block's length: a longer block later would
+    // otherwise read a tail a shorter one never cleared.
+    for (auto& buffer : bus_buffers_[i])
+      std::fill(buffer.begin(), buffer.end(), 0.0f);
+  }
+  for (size_t i = 0; i < kMaxChannels; ++i) {
+    if (!channel_dirty_[i]) continue;
+    channel_dirty_[i] = false;
+    for (auto& buffer : channel_buffers_[i])
+      std::fill(buffer.begin(), buffer.end(), 0.0f);
+  }
 }
 
 float AudioGraph::slew(float from, float to, uint32_t frames) const {
@@ -342,6 +394,7 @@ void AudioGraph::apply_sends(const ChannelStrip& strip, int width,
     }
     if (level <= 0.0f && state[0] == 0.0f && state[1] == 0.0f) continue;
 
+    bus_dirty_[static_cast<size_t>(index)] = true;
     mix_into(bus_ptrs_[index].data(), strip, width, frames, level, state);
   }
 }
@@ -358,13 +411,16 @@ float* const* AudioGraph::destination_for(int destination, float* const* master,
     if (slot <= rendered_channels) return master;
     if (slot >= static_cast<long long>(kMaxChannels)) return master;
     if (live_[slot].load(std::memory_order_acquire) == nullptr) return master;
+    channel_dirty_[static_cast<size_t>(slot)] = true;
     return channel_ptrs_[slot].data();
   }
 
   const long long index = destination;
+  if (index < 0 || index >= static_cast<long long>(kMaxBuses)) return master;
   if (index >= static_cast<long long>(bus_count())) return master;
   if (index <= rendered_buses) return master;
   if (live_buses_[index].load(std::memory_order_acquire) == nullptr) return master;
+  bus_dirty_[static_cast<size_t>(index)] = true;
   return bus_ptrs_[index].data();
 }
 
@@ -382,6 +438,8 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
   if (parked && park_gain_ <= 0.0f) {
     last_render_quiet_ = true;
     park_ramp_active_ = false;
+    // A click that would have landed in a quiet block is not owed later.
+    click_at_ = UINT32_MAX;
     quiet_generation_.fetch_add(1, std::memory_order_release);
     render_generation_.fetch_add(1, std::memory_order_release);
     return;
@@ -406,12 +464,7 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
   }
 
   const size_t buses = bus_active_.load(std::memory_order_acquire);
-  for (size_t i = 0; i < buses; ++i)
-    for (int ch = 0; ch < 2; ++ch) std::fill_n(bus_ptrs_[i][ch], frames, 0.0f);
-
-  const size_t channel_slots = active_.load(std::memory_order_acquire);
-  for (size_t i = 0; i < channel_slots; ++i)
-    for (int ch = 0; ch < 2; ++ch) std::fill_n(channel_ptrs_[i][ch], frames, 0.0f);
+  clear_dirty_scratch();
 
   Recorder* recorder = recorder_.load(std::memory_order_acquire);
 
@@ -419,14 +472,18 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
   const bool channel_solo = any_channel_soloed(count);
   const bool bus_solo = any_bus_soloed(buses);
 
+  // Each strip's latency once, for the deepest and for its own compensation
+  // below: latency_samples() walks the insert chain every time it is asked.
   uint32_t max_lat = 0;
   for (size_t s = 0; s < count; ++s) {
     ChannelStrip* other = live_[s].load(std::memory_order_acquire);
-    if (other != nullptr) max_lat = std::max(max_lat, other->latency_samples());
+    channel_latency_[s] = other != nullptr ? other->latency_samples() : 0;
+    max_lat = std::max(max_lat, channel_latency_[s]);
   }
   for (size_t b = 0; b < buses; ++b) {
     ChannelStrip* other = live_buses_[b].load(std::memory_order_acquire);
-    if (other != nullptr) max_lat = std::max(max_lat, other->latency_samples());
+    bus_latency_[b] = other != nullptr ? other->latency_samples() : 0;
+    max_lat = std::max(max_lat, bus_latency_[b]);
   }
 
   for (size_t i = 0; i < count; ++i) {
@@ -488,9 +545,7 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
       }
     }
 
-    strip.set_pdc_delay(max_lat > strip.latency_samples()
-                            ? max_lat - strip.latency_samples()
-                            : 0);
+    strip.set_pdc_delay(max_lat - channel_latency_[i]);
 
     strip.process(scratch_ptrs_.data(), frames, midi_scratch_.data(), midi_count,
                   &transport_);
@@ -505,15 +560,22 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
     }
     tap_written_[i] = pairs;
 
+    // The destination is read once for the block: the UI can change it
+    // between two reads. A bus index is bounded by what exists, not only by
+    // kChannelDestination, or a session file naming bus 40 read past the
+    // bus array.
+    const int destination = strip.destination();
+    const bool feeds_bus =
+        destination >= 0 && destination < static_cast<int>(kMaxBuses);
+    const ChannelStrip* dest_bus =
+        feeds_bus && static_cast<size_t>(destination) < buses
+            ? live_buses_[static_cast<size_t>(destination)].load(
+                  std::memory_order_acquire)
+            : nullptr;
     const bool mix_channel =
         (!channel_solo && !bus_solo) ||
         (channel_solo && strip.soloed()) ||
-        (!channel_solo && bus_solo &&
-         (strip.destination() >= 0 && strip.destination() < kChannelDestination &&
-          live_buses_[strip.destination()].load(std::memory_order_acquire) !=
-              nullptr &&
-          live_buses_[strip.destination()].load(std::memory_order_acquire)
-              ->soloed()));
+        (!channel_solo && bus_solo && dest_bus != nullptr && dest_bus->soloed());
 
     // Recorded post-fader: a silent (non-soloed) armed track still writes so
     // the take files stay the same length.
@@ -532,9 +594,6 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
     // nothing at its destination and comes back the same way. With only a
     // bus soloed, a strip still feeds that bus (as its destination or over
     // a send).
-    const int destination = strip.destination();
-    const bool feeds_bus =
-        destination >= 0 && destination < kChannelDestination;
     const bool sends_audible = mix_channel || (!channel_solo && bus_solo);
     const bool dest_audible =
         mix_channel || (!channel_solo && bus_solo && feeds_bus);
@@ -561,9 +620,7 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
     for (int ch = 0; ch < 2; ++ch)
       std::copy_n(bus_ptrs_[i][ch], frames, scratch_ptrs_[ch]);
 
-    live->set_pdc_delay(max_lat > live->latency_samples()
-                            ? max_lat - live->latency_samples()
-                            : 0);
+    live->set_pdc_delay(max_lat - bus_latency_[i]);
     live->process(scratch_ptrs_.data(), frames, nullptr, 0, &transport_);
 
     const bool mix_bus = !bus_solo || live->soloed() || channel_solo;
@@ -623,6 +680,7 @@ void AudioGraph::render(float* const* master, uint32_t frames) {
     }
   }
 
+  render_click(master, frames);
   run_limiter(master, frames);
 
   for (int ch = 0; ch < 2; ++ch) {

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // Session persistence for MixerModel. There is no save dialog and no file
 // picker: the session is written continuously and restored on the next start,
 // so closing the app and opening it again lands you where you left off.
@@ -91,6 +93,21 @@ void MixerModel::saveSession() const {
   emit self->dirtyChanged();
 }
 
+// The timer's end of the autosave. It never parks: a looper with Rec down
+// says its state cannot be read under process(), and the old answer - fade
+// the master out for a block - put a hole in the music one second into
+// every take. Now the save simply waits and asks again a second later; Rec
+// comes up, the next check passes, the session is written. Only an explicit
+// save or quitting may park, and quitting can wait.
+void MixerModel::autosave() {
+  if (!dirty_flag_) return;
+  if (anyInsertNeedsQuietSave()) {
+    autosave_timer_.start();
+    return;
+  }
+  saveSession();
+}
+
 // Every plugin's state, read with process() running. Every hosted format
 // allows that - LV2's save() may run alongside run() and the plugin locks for
 // itself, CLAP and VST3 save on the main thread with the plugin active - and
@@ -111,24 +128,31 @@ bool MixerModel::anyInsertNeedsQuietSave() const {
   return false;
 }
 
-QVector<QVector<QByteArray>> MixerModel::collectInsertStates() const {
-  QVector<QVector<QByteArray>> states;
+QVector<QVector<MixerModel::InsertState>> MixerModel::collectInsertStates(
+    bool allow_park) const {
+  QVector<QVector<InsertState>> states;
   states.resize(static_cast<qsizetype>(channels_.size()));
 
   auto* self = const_cast<MixerModel*>(this);
-  const bool park = anyInsertNeedsQuietSave();
-  if (!park || self->engine_.park_graph()) {
-    for (size_t row = 0; row < channels_.size(); ++row) {
-      ChannelStrip* strip = stripFor(static_cast<int>(row));
-      if (strip == nullptr) continue;
-      for (size_t slot = 0; slot < strip->insert_count(); ++slot) {
-        PluginInstance* insert = strip->insert_at(slot);
-        if (insert == nullptr) continue;  // a hole left by a removal
+  const bool park = allow_park && anyInsertNeedsQuietSave();
+  const bool quiet = park && self->engine_.park_graph();
+  for (size_t row = 0; row < channels_.size(); ++row) {
+    ChannelStrip* strip = stripFor(static_cast<int>(row));
+    if (strip == nullptr) continue;
+    for (size_t slot = 0; slot < strip->insert_count(); ++slot) {
+      PluginInstance* insert = strip->insert_at(slot);
+      if (insert == nullptr) continue;  // a hole left by a removal
+      InsertState state;
+      // Read only when that is safe: with the graph parked, or from a
+      // plugin that never minds. The rest are marked, not guessed at.
+      if (quiet || !insert->save_needs_quiet()) {
         const std::vector<uint8_t> blob = insert->save_state();
-        states[static_cast<qsizetype>(row)].append(
-            QByteArray(reinterpret_cast<const char*>(blob.data()),
-                       static_cast<qsizetype>(blob.size())));
+        state.blob = QByteArray(reinterpret_cast<const char*>(blob.data()),
+                                static_cast<qsizetype>(blob.size()));
+      } else {
+        state.skipped = true;
       }
+      states[static_cast<qsizetype>(row)].append(std::move(state));
     }
   }
   if (park) self->engine_.unpark_graph();
@@ -140,11 +164,16 @@ QVector<QVector<QByteArray>> MixerModel::collectInsertStates() const {
 // strip preset is a session holding one channel, which is what keeps the two
 // from drifting apart as either grows.
 QJsonObject MixerModel::writeChannel(const ChannelUi& channel, size_t row,
-                                     const QVector<QByteArray>& row_states) const {
+                                     const QVector<InsertState>& row_states) const {
 
   QJsonObject entry;
   entry[QStringLiteral("name")] = channel.name;
   entry[QStringLiteral("isBus")] = channel.is_bus;
+  // Which graph strip this row is, for an undo snapshot taken and restored
+  // within one run: slots are never reused, so it names the strip exactly
+  // where a name or a position could not. Meaningless across a restart and
+  // ignored by readSession.
+  entry[QStringLiteral("graphSlot")] = static_cast<int>(channel.slot);
   entry[QStringLiteral("destination")] = channel.destination;
   if (channel.destination < 0) {
     entry[QStringLiteral("destinationKind")] = QStringLiteral("master");
@@ -204,14 +233,30 @@ QJsonObject MixerModel::writeChannel(const ChannelUi& channel, size_t row,
     saved[QStringLiteral("bypassed")] = strip.insert_bypassed(slot);
     saved[QStringLiteral("postFader")] = strip.insert_post_fader(slot);
 
-    // The blob is whatever the plugin said its state was while the graph was
-    // parked, stored verbatim.
+    // The blob is whatever the plugin said its state was, stored verbatim. A
+    // skipped one (see collectInsertStates) is left out, and says so, rather
+    // than written as "no state".
     if (state_index < row_states.size()) {
-      const QByteArray& bytes = row_states[state_index];
-      if (!bytes.isEmpty())
-        saved[QStringLiteral("state")] = QString::fromLatin1(bytes.toBase64());
+      const InsertState& state = row_states[state_index];
+      if (state.skipped)
+        saved[QStringLiteral("stateSkipped")] = true;
+      else if (!state.blob.isEmpty())
+        saved[QStringLiteral("state")] =
+            QString::fromLatin1(state.blob.toBase64());
     }
     ++state_index;
+    inserts.append(saved);
+  }
+  // The plugins this machine could not make, written back exactly as they
+  // were read, so a session that travelled through a box without them still
+  // has them - blob and all - when it comes home.
+  for (const ChannelUi::MissingInsert& ghost : channel.missing) {
+    QJsonObject saved;
+    saved[QStringLiteral("format")] = ghost.format;
+    saved[QStringLiteral("uid")] = ghost.uid;
+    saved[QStringLiteral("bypassed")] = ghost.bypassed;
+    saved[QStringLiteral("postFader")] = ghost.post_fader;
+    if (!ghost.state.isEmpty()) saved[QStringLiteral("state")] = ghost.state;
     inserts.append(saved);
   }
   entry[QStringLiteral("inserts")] = inserts;
@@ -274,12 +319,10 @@ void MixerModel::applyMapsJson(int row, const QJsonArray& maps) {
   }
 }
 
-void MixerModel::writeSession(const QString& target) const {
-  if (!engine_.running()) return;
-
+QJsonObject MixerModel::buildSession(bool allow_park) const {
   // Taken before anything else, and the graph is running again by the time the
   // JSON below is built.
-  const QVector<QVector<QByteArray>> states = collectInsertStates();
+  const QVector<QVector<InsertState>> states = collectInsertStates(allow_park);
 
   QJsonArray channels;
   for (size_t row = 0; row < channels_.size(); ++row) {
@@ -325,14 +368,22 @@ void MixerModel::writeSession(const QString& target) const {
   root[QStringLiteral("midiMaps")] = maps;
   root[QStringLiteral("master")] = master;
   root[QStringLiteral("channels")] = channels;
+  return root;
+}
 
-  const QString path = target;
+void MixerModel::writeSession(const QString& target) const {
+  if (!engine_.running()) return;
+  // An explicit save: allowed to park for the one plugin that asks.
+  writeJson(target, buildSession(true));
+}
+
+bool MixerModel::writeJson(const QString& path, const QJsonObject& root) {
   QDir().mkpath(QFileInfo(path).absolutePath());
 
   // Written to a temporary first, then renamed over the old file. Rename on
   // the same filesystem is atomic; removing the old file first is not.
   QFile file(path + QStringLiteral(".tmp"));
-  if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
+  if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
   const QByteArray payload = QJsonDocument(root).toJson(QJsonDocument::Indented);
   if (file.write(payload) != payload.size()) {
     qWarning("session: short write to %s (%lld bytes)",
@@ -340,7 +391,7 @@ void MixerModel::writeSession(const QString& target) const {
              static_cast<long long>(payload.size()));
     file.close();
     QFile::remove(file.fileName());
-    return;
+    return false;
   }
   file.flush();
   file.close();
@@ -354,7 +405,9 @@ void MixerModel::writeSession(const QString& target) const {
   if (::rename(from.constData(), to.constData()) != 0) {
     qWarning("session: could not replace %s", to.constData());
     QFile::remove(file.fileName());
+    return false;
   }
+  return true;
 }
 
 void MixerModel::loadSession() { readSession(sessionPath()); }
@@ -386,9 +439,25 @@ bool MixerModel::loadSessionFrom(const QUrl& file) {
     return false;
   }
 
-  newSession();
+  // The autosave on disk is not touched here: the old flow called
+  // newSession(), which wrote an empty session over it before the file was
+  // even read, so a load that then failed had already destroyed the last
+  // good state. The mixer is cleared without saving, and a copy of the
+  // autosave is kept beside it; only the next autosave, of a session that
+  // did load, replaces it.
+  const QString autosave = sessionPath();
+  if (QFile::exists(autosave)) {
+    const QString backup = autosave + QStringLiteral(".bak");
+    QFile::remove(backup);
+    QFile::copy(autosave, backup);
+  }
+
+  pushUndo();
+  clearMixer();
   if (!readSession(path)) {
     emit errorOccurred(tr("Session could not be restored"));
+    // Back to what was playing a moment ago, from the file that still holds it.
+    readSession(autosave);
     return false;
   }
   markDirty();
@@ -446,43 +515,36 @@ int MixerModel::restoreChannel(const QJsonObject& entry, QStringList* missing,
         saved[QStringLiteral("uid")].toString().toStdString();
     const int plugin_row = plugins_->rowFor(format, uid);
     if (plugin_row < 0) {
-      // The plugin was uninstalled since the session was written. Skipping it
-      // keeps the rest of the channel rather than losing the whole session.
+      // The plugin was uninstalled since the session was written. Skipping
+      // it keeps the rest of the channel rather than losing the whole
+      // session; the entry itself is kept on the row so the slot can show
+      // the gap and the next save writes it back untouched.
       qWarning("session: plugin no longer installed: %s", uid.c_str());
       if (missing != nullptr) missing->append(QString::fromStdString(uid));
+      channels_[row].missing.append(
+          {saved[QStringLiteral("format")].toString(),
+           QString::fromStdString(uid), saved[QStringLiteral("state")].toString(),
+           saved[QStringLiteral("bypassed")].toBool(),
+           saved[QStringLiteral("postFader")].toBool()});
       continue;
     }
+
+    // The state goes in before the plugin reaches the audio thread - see
+    // placeInsert - so nothing here needs the graph parked.
+    const QByteArray bytes =
+        QByteArray::fromBase64(saved[QStringLiteral("state")].toString().toLatin1());
+    const std::vector<uint8_t> blob(bytes.begin(), bytes.end());
     // The slot the engine chose, not "the last one": add_insert fills the
     // first hole in the chain, so the two are not the same thing.
-    insert_slot = placeInsert(row, plugin_row, -1);
+    insert_slot = placeInsert(row, plugin_row, -1, &blob, sample_dir);
     if (insert_slot < 0) continue;
 
     setInsertBypassed(row, insert_slot,
                       saved[QStringLiteral("bypassed")].toBool());
     setInsertPostFader(row, insert_slot,
                        saved[QStringLiteral("postFader")].toBool());
-
-    const QString state = saved[QStringLiteral("state")].toString();
-    if (state.isEmpty()) continue;
-
-    const QByteArray bytes = QByteArray::fromBase64(state.toLatin1());
-    // Through stripFor, which knows a bus from a channel: reaching into the
-    // channel list with a bus slot lands on whatever channel shares the
-    // number — or, after a load has cleared the old session, on a null
-    // pointer, which is exactly the crash loading a session used to be.
-    ChannelStrip* strip = stripFor(row);
-    if (strip == nullptr) continue;
-    PluginInstance* insert = strip->insert_at(static_cast<size_t>(insert_slot));
-    if (insert == nullptr) continue;
-
-    const std::vector<uint8_t> blob(bytes.begin(), bytes.end());
-    if (!insert->load_state(blob))
-      qWarning("session: %s refused its own saved state", uid.c_str());
-    if (auto* sampler = dynamic_cast<SamplerInstance*>(insert)) {
-      if (!sample_dir.isEmpty())
-        sampler->resolve_paths(sample_dir.toStdString());
-    }
   }
+  refreshInsertDetails(row);
   return row;
 }
 
@@ -553,9 +615,9 @@ bool MixerModel::saveChannelTo(int row, const QUrl& file) {
   const QString path = file.isLocalFile() ? file.toLocalFile() : file.toString();
   if (path.isEmpty()) return false;
 
-  // Every plugin's state, read with the graph parked, exactly as a session save
-  // does and for the reason the LV2 spec gives.
-  const QVector<QVector<QByteArray>> states = collectInsertStates();
+  // Every plugin's state, read the way an explicit session save reads them:
+  // live, unless one plugin says it needs quiet.
+  const QVector<QVector<InsertState>> states = collectInsertStates(true);
 
   QJsonArray channels;
   channels.append(writeChannel(channels_[row], static_cast<size_t>(row),
@@ -603,16 +665,12 @@ bool MixerModel::loadChannelFrom(const QUrl& file) {
   pushUndo();
   const QJsonObject entry = channels.first().toObject();
 
+  // Nothing parked: each plugin is loaded with its state before the audio
+  // thread can see it (see placeInsert), so a strip arrives mid-song without
+  // a hole in the master.
   QStringList missing;
-  const bool parked = engine_.park_graph();
-  const int row = parked ? restoreChannel(entry, &missing,
-                                          QFileInfo(path).absolutePath())
-                         : -1;
-  engine_.unpark_graph();
-  if (!parked) {
-    emit errorOccurred(tr("The audio graph would not settle; try again"));
-    return false;
-  }
+  const int row =
+      restoreChannel(entry, &missing, QFileInfo(path).absolutePath());
   if (row < 0) {
     emit errorOccurred(tr("There is no room for another strip"));
     return false;
@@ -723,31 +781,21 @@ bool MixerModel::loadSamplerPackFrom(int row, int slot, const QUrl& file) {
   return true;
 }
 
+// Reads a session file onto a mixer that is expected to be empty. Nothing is
+// parked: every plugin gets its state before it is published (placeInsert),
+// and everything else here is a setter the UI calls with the music running.
 bool MixerModel::readSession(const QString& target) {
   if (!engine_.running()) return false;
-  if (!engine_.park_graph()) {
-    engine_.unpark_graph();
-    return false;
-  }
 
   QFile file(target);
-  if (!file.open(QIODevice::ReadOnly)) {
-    engine_.unpark_graph();
-    return false;
-  }
+  if (!file.open(QIODevice::ReadOnly)) return false;
 
   const QJsonDocument document = QJsonDocument::fromJson(file.readAll());
   file.close();
-  if (!document.isObject()) {
-    engine_.unpark_graph();
-    return false;
-  }
+  if (!document.isObject()) return false;
 
   const QJsonObject root = document.object();
-  if (root[QStringLiteral("version")].toInt() != kSessionVersion) {
-    engine_.unpark_graph();
-    return false;
-  }
+  if (root[QStringLiteral("version")].toInt() != kSessionVersion) return false;
 
   // Restoring drives the same setters the UI does, and each of those would
   // otherwise queue a save of what is only half restored.
@@ -757,8 +805,9 @@ bool MixerModel::readSession(const QString& target) {
   std::vector<int> rows;
   rows.reserve(static_cast<size_t>(channels.size()));
   const QString sample_dir = QFileInfo(target).absolutePath();
+  QStringList missing;
   for (const QJsonValue& value : channels)
-    rows.push_back(restoreChannel(value.toObject(), nullptr, sample_dir));
+    rows.push_back(restoreChannel(value.toObject(), &missing, sample_dir));
 
   // Destinations and sends last: both can name a bus that appears later in the
   // list, and only now is every row in place. An entry that found no room
@@ -768,16 +817,7 @@ bool MixerModel::readSession(const QString& target) {
     restoreChannelLinks(rows[static_cast<size_t>(i)], channels[i].toObject());
   }
 
-  const double tempo = root[QStringLiteral("tempo")].toDouble(120.0);
-  if (tempo > 0.0) setTempo(tempo);
-  if (root[QStringLiteral("metronome")].toBool() != engine_.metronome())
-    toggleMetronome();
-  if (root[QStringLiteral("midiClock")].toBool() != engine_.midi_clock())
-    toggleMidiClock();
-  if (root[QStringLiteral("followMidiClock")].toBool() != engine_.follow_midi_clock())
-    toggleFollowMidiClock();
-  setTimeSignature(root[QStringLiteral("timeNumerator")].toInt(4),
-                   root[QStringLiteral("timeDenominator")].toInt(4));
+  applySessionGlobals(root);
 
   midi_maps_.clear();
   bool from_channels = false;
@@ -819,6 +859,31 @@ bool MixerModel::readSession(const QString& target) {
   }
   if (!midi_maps_.empty()) engine_.connect_all_midi_to_control();
 
+  restoring_ = false;
+
+  // Named, not just logged: a strip that plays without its synth is the
+  // first thing to explain when a session comes up wrong. The entries stay
+  // on their rows, struck through, and the next save keeps them.
+  if (!missing.isEmpty()) {
+    missing.removeDuplicates();
+    emit errorOccurred(
+        tr("Not installed here, kept in the session: %1").arg(missing.join(", ")));
+  }
+  return true;
+}
+
+void MixerModel::applySessionGlobals(const QJsonObject& root) {
+  const double tempo = root[QStringLiteral("tempo")].toDouble(120.0);
+  if (tempo > 0.0) setTempo(tempo);
+  if (root[QStringLiteral("metronome")].toBool() != engine_.metronome())
+    toggleMetronome();
+  if (root[QStringLiteral("midiClock")].toBool() != engine_.midi_clock())
+    toggleMidiClock();
+  if (root[QStringLiteral("followMidiClock")].toBool() != engine_.follow_midi_clock())
+    toggleFollowMidiClock();
+  setTimeSignature(root[QStringLiteral("timeNumerator")].toInt(4),
+                   root[QStringLiteral("timeDenominator")].toInt(4));
+
   const QJsonObject master = root[QStringLiteral("master")].toObject();
   setMasterGain(master[QStringLiteral("gain")].toDouble(1.0));
   const QString sink = master[QStringLiteral("sink")].toString();
@@ -828,10 +893,285 @@ bool MixerModel::readSession(const QString& target) {
   if (master[QStringLiteral("mono")].toBool() != masterMono()) toggleMasterMono();
   if (master[QStringLiteral("limiter")].toBool(true) != masterLimiter())
     toggleMasterLimiter();
+}
+
+// --- undo and redo -----------------------------------------------------------
+//
+// An undo used to write the snapshot to disk, throw every strip away, park
+// the graph and read the file back - every plugin re-instantiated, a hole in
+// the master, for "put that channel back". This brings the mixer to the
+// snapshot by difference instead. Strips are matched by graph slot (never
+// reused within a run) and inserts by plugin, so anything that is already
+// where the snapshot wants it is left as the very same object; only what the
+// snapshot lacks is removed, only what it adds is made - loaded with its
+// state before the audio thread sees it, so nothing is parked.
+//
+// Deliberately not compared: a kept plugin's state blob. The undo stack
+// records structural edits (strips, inserts, order), not knob turns, and a
+// sequencer whose pattern was edited for ten minutes must not snap back
+// because a channel added before that is being taken away.
+
+namespace {
+
+bool same_kind(const QJsonObject& entry, PluginFormat format,
+               const std::string& uid) {
+  PluginFormat saved_format = PluginFormat::Lv2;
+  if (!format_from_name(entry[QStringLiteral("format")].toString(),
+                        &saved_format))
+    return false;
+  return saved_format == format &&
+         entry[QStringLiteral("uid")].toString().toStdString() == uid;
+}
+
+}  // namespace
+
+void MixerModel::applySnapshot(const QJsonObject& root) {
+  if (!engine_.running()) return;
+  const QJsonArray entries = root[QStringLiteral("channels")].toArray();
+  const int wanted = static_cast<int>(entries.size());
+  const QString sample_dir = QFileInfo(sessionPath()).absolutePath();
+
+  restoring_ = true;
+
+  // 1. Which live row each wanted strip is. By graph slot first - the exact
+  //    identity within a run - then by name and kind for a snapshot that
+  //    came from somewhere else.
+  std::vector<int> row_for(static_cast<size_t>(wanted), -1);
+  std::vector<bool> used(channels_.size(), false);
+  for (int j = 0; j < wanted; ++j) {
+    const QJsonObject entry = entries[j].toObject();
+    const int slot = entry[QStringLiteral("graphSlot")].toInt(-1);
+    const bool is_bus = entry[QStringLiteral("isBus")].toBool();
+    if (slot < 0) continue;
+    for (size_t r = 0; r < channels_.size(); ++r) {
+      if (used[r] || channels_[r].is_bus != is_bus ||
+          static_cast<int>(channels_[r].slot) != slot)
+        continue;
+      row_for[static_cast<size_t>(j)] = static_cast<int>(r);
+      used[r] = true;
+      break;
+    }
+  }
+  for (int j = 0; j < wanted; ++j) {
+    if (row_for[static_cast<size_t>(j)] >= 0) continue;
+    const QJsonObject entry = entries[j].toObject();
+    const bool is_bus = entry[QStringLiteral("isBus")].toBool();
+    const int width = entry[QStringLiteral("width")].toInt(2);
+    const QString name = entry[QStringLiteral("name")].toString();
+    for (size_t r = 0; r < channels_.size(); ++r) {
+      if (used[r] || channels_[r].is_bus != is_bus ||
+          channels_[r].width != width || channels_[r].name != name)
+        continue;
+      row_for[static_cast<size_t>(j)] = static_cast<int>(r);
+      used[r] = true;
+      break;
+    }
+  }
+
+  // 2. Strips the snapshot has no place for go, highest row first so the
+  //    lower indices stay meaningful. Remembered by identity across the
+  //    removals, since rows shift.
+  std::vector<std::pair<size_t, bool>> keep(static_cast<size_t>(wanted),
+                                            {0, false});
+  std::vector<bool> kept(static_cast<size_t>(wanted), false);
+  for (int j = 0; j < wanted; ++j) {
+    const int r = row_for[static_cast<size_t>(j)];
+    if (r < 0) continue;
+    keep[static_cast<size_t>(j)] = {channels_[r].slot, channels_[r].is_bus};
+    kept[static_cast<size_t>(j)] = true;
+  }
+  for (int r = static_cast<int>(channels_.size()) - 1; r >= 0; --r)
+    if (!used[static_cast<size_t>(r)]) removeChannel(r);
+
+  auto find_row = [this](size_t slot, bool is_bus) {
+    for (size_t r = 0; r < channels_.size(); ++r)
+      if (channels_[r].slot == slot && channels_[r].is_bus == is_bus)
+        return static_cast<int>(r);
+    return -1;
+  };
+
+  // 3. Strips the snapshot has and the mixer does not are made whole, chain
+  //    and all. Kept strips are brought up to date one setting at a time.
+  QStringList missing;
+  for (int j = 0; j < wanted; ++j) {
+    const QJsonObject entry = entries[j].toObject();
+    int row = -1;
+    if (kept[static_cast<size_t>(j)]) {
+      row = find_row(keep[static_cast<size_t>(j)].first,
+                     keep[static_cast<size_t>(j)].second);
+    }
+    if (row < 0) {
+      row = restoreChannel(entry, &missing, sample_dir);
+      if (row < 0) continue;
+      keep[static_cast<size_t>(j)] = {channels_[row].slot, channels_[row].is_bus};
+      kept[static_cast<size_t>(j)] = true;
+      continue;
+    }
+
+    ChannelUi& channel = channels_[row];
+    const QString name = entry[QStringLiteral("name")].toString();
+    if (!name.isEmpty() && name != channel.name) renameChannel(row, name);
+    setGain(row, entry[QStringLiteral("gain")].toDouble(1.0));
+    setPan(row, entry[QStringLiteral("pan")].toDouble(0.0));
+    if (entry[QStringLiteral("muted")].toBool() != channel.muted) toggleMute(row);
+    if (entry[QStringLiteral("soloed")].toBool() != channel.soloed) toggleSolo(row);
+    if (entry[QStringLiteral("armed")].toBool() != channel.armed) toggleArm(row);
+    setMidiMask(row, entry[QStringLiteral("midiMask")].toInt(0xFFFF));
+    const QString sink = entry[QStringLiteral("channelSink")].toString();
+    if (sink != QString::fromStdString(engine_.current_channel_sink(channel.slot)))
+      connectChannelSink(row, sink);
+    if (!channel.is_bus) {
+      const QString audio = entry[QStringLiteral("audioSource")].toString();
+      if (audio != QString::fromStdString(engine_.current_source(channel.slot, false)))
+        connectSource(row, audio, false);
+      QStringList wanted_midi;
+      for (const QJsonValue& source : entry[QStringLiteral("midiSources")].toArray())
+        wanted_midi.append(source.toString());
+      QStringList current_midi;
+      for (const std::string& source : engine_.current_sources(channel.slot, true))
+        current_midi.append(QString::fromStdString(source));
+      for (const QString& port : current_midi)
+        if (!wanted_midi.contains(port)) setMidiLink(row, port, false);
+      for (const QString& port : wanted_midi)
+        if (!current_midi.contains(port)) setMidiLink(row, port, true);
+    }
+
+    // The chain. Each wanted insert claims the first live insert of the same
+    // plugin not yet claimed; the unclaimed are removed, the unmatched made,
+    // and the survivors swapped into the snapshot's order.
+    ChannelStrip* strip = stripFor(row);
+    if (strip == nullptr) continue;
+    const QJsonArray saved_inserts = entry[QStringLiteral("inserts")].toArray();
+    struct Wanted {
+      QJsonObject saved;
+      int plugin_row = -1;
+      int slot = -1;
+    };
+    std::vector<Wanted> targets;
+    channel.missing.clear();
+    for (const QJsonValue& value : saved_inserts) {
+      const QJsonObject saved = value.toObject();
+      PluginFormat format = PluginFormat::Lv2;
+      if (!format_from_name(saved[QStringLiteral("format")].toString(), &format))
+        continue;
+      const std::string uid = saved[QStringLiteral("uid")].toString().toStdString();
+      const int plugin_row = plugins_->rowFor(format, uid);
+      if (plugin_row < 0) {
+        missing.append(QString::fromStdString(uid));
+        channel.missing.append({saved[QStringLiteral("format")].toString(),
+                                QString::fromStdString(uid),
+                                saved[QStringLiteral("state")].toString(),
+                                saved[QStringLiteral("bypassed")].toBool(),
+                                saved[QStringLiteral("postFader")].toBool()});
+        continue;
+      }
+      targets.push_back({saved, plugin_row, -1});
+    }
+
+    const size_t count = strip->insert_count();
+    std::vector<bool> claimed(count, false);
+    for (Wanted& target : targets) {
+      for (size_t s = 0; s < count; ++s) {
+        PluginInstance* live = strip->insert_at(s);
+        if (claimed[s] || live == nullptr) continue;
+        const PluginDescriptor& descriptor = live->descriptor();
+        if (!same_kind(target.saved, descriptor.format, descriptor.uid)) continue;
+        target.slot = static_cast<int>(s);
+        claimed[s] = true;
+        break;
+      }
+    }
+    for (size_t s = 0; s < count; ++s)
+      if (!claimed[s] && strip->insert_at(s) != nullptr)
+        removeInsert(row, static_cast<int>(s));
+    for (Wanted& target : targets) {
+      if (target.slot >= 0) continue;
+      const QByteArray bytes = QByteArray::fromBase64(
+          target.saved[QStringLiteral("state")].toString().toLatin1());
+      const std::vector<uint8_t> blob(bytes.begin(), bytes.end());
+      target.slot = placeInsert(row, target.plugin_row, -1, &blob, sample_dir);
+    }
+    for (Wanted& target : targets) {
+      if (target.slot < 0) continue;
+      setInsertBypassed(row, target.slot,
+                        target.saved[QStringLiteral("bypassed")].toBool());
+      setInsertPostFader(row, target.slot,
+                         target.saved[QStringLiteral("postFader")].toBool());
+    }
+    // Into order: after this, wanted insert j sits in slot j. Whatever was
+    // in slot j (another wanted insert, or a hole) takes the vacated slot.
+    QStringList& labels = channel.inserts;
+    for (size_t j = 0; j < targets.size(); ++j) {
+      const int from = targets[j].slot;
+      if (from < 0 || from == static_cast<int>(j)) continue;
+      if (static_cast<int>(j) >= labels.size() || from >= labels.size()) continue;
+      for (Wanted& other : targets)
+        if (other.slot == static_cast<int>(j)) other.slot = from;
+      strip->swap_inserts(j, static_cast<size_t>(from));
+      labels.swapItemsAt(static_cast<int>(j), from);
+      targets[j].slot = static_cast<int>(j);
+    }
+    const QModelIndex idx = index(row);
+    emit dataChanged(idx, idx, {InsertsRole});
+    refreshInsertDetails(row);
+    engine_.latency_changed();
+  }
+
+  // 4. The snapshot's order, by swaps: after step j, row j is right.
+  for (int j = 0; j < wanted; ++j) {
+    if (!kept[static_cast<size_t>(j)]) continue;
+    const int at = find_row(keep[static_cast<size_t>(j)].first,
+                            keep[static_cast<size_t>(j)].second);
+    if (at >= 0 && at != j && j < static_cast<int>(channels_.size()))
+      swapRows(j, at);
+  }
+
+  // 5. Everything that names another strip, once every strip is in place.
+  //    Sends are rebuilt from nothing so a send the snapshot lacks goes.
+  for (int j = 0; j < wanted; ++j) {
+    if (!kept[static_cast<size_t>(j)]) continue;
+    const int row = find_row(keep[static_cast<size_t>(j)].first,
+                             keep[static_cast<size_t>(j)].second);
+    if (row < 0) continue;
+    if (ChannelStrip* strip = stripFor(row)) {
+      for (size_t i = 0; i < kMaxSends; ++i) strip->set_send(i, -1, 0.0f);
+    }
+    channels_[row].sends.clear();
+    restoreChannelLinks(row, entries[j].toObject());
+  }
+
+  midi_maps_.clear();
+  for (int j = 0; j < wanted; ++j) {
+    if (!kept[static_cast<size_t>(j)]) continue;
+    const int row = find_row(keep[static_cast<size_t>(j)].first,
+                             keep[static_cast<size_t>(j)].second);
+    if (row >= 0)
+      applyMapsJson(row, entries[j].toObject()[QStringLiteral("midiMaps")].toArray());
+  }
+  if (!midi_maps_.empty()) engine_.connect_all_midi_to_control();
+
+  applySessionGlobals(root);
+
+  // Editors of inserts that are gone close; every other window stays open on
+  // the very same plugin it was editing.
+  std::erase_if(editors_, [this](const OpenEditor& editor) {
+    for (size_t r = 0; r < channels_.size(); ++r) {
+      ChannelStrip* strip = stripFor(static_cast<int>(r));
+      if (strip == nullptr) continue;
+      for (size_t s = 0; s < strip->insert_count(); ++s)
+        if (strip->insert_at(s) == editor.insert) return false;
+    }
+    return true;
+  });
 
   restoring_ = false;
-  engine_.unpark_graph();
-  return true;
+  if (!channels_.empty())
+    emit dataChanged(index(0), index(static_cast<int>(channels_.size()) - 1));
+  if (!missing.isEmpty()) {
+    missing.removeDuplicates();
+    emit errorOccurred(
+        tr("Not installed here, kept in the session: %1").arg(missing.join(", ")));
+  }
 }
 
 void MixerModel::markDirty(bool schedule_save) {

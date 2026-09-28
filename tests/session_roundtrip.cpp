@@ -1,6 +1,10 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // Saves a session, throws the mixer away, and builds a new one to check it comes
 // back the same. This is what closing and reopening the app does.
 
+#include <algorithm>
+#include <QDir>
 #include <QGuiApplication>
 #include <QFile>
 #include <QTemporaryDir>
@@ -53,9 +57,10 @@ int main(int argc, char* argv[]) {
   QString effect_name;
   {
     nirbija::MixerModel mixer;
+    mixer.waitForScan();
     if (!mixer.running()) {
       std::printf("no audio server available, skipping\n");
-      return 0;
+      return 77;  // CTest marks it Skipped rather than Passed
     }
 
     mixer.addChannel(QStringLiteral("Bass"), 2);
@@ -80,6 +85,7 @@ int main(int argc, char* argv[]) {
 
   // A fresh model loads the session in its constructor, the same as a restart.
   nirbija::MixerModel restored;
+  restored.waitForScan();
   if (restored.rowCount() != 2) {
     fail("expected 2 channels back, got " + std::to_string(restored.rowCount()));
     return 1;
@@ -115,6 +121,7 @@ int main(int argc, char* argv[]) {
       fail("the built-in looper is not in the plugin list");
     } else {
       nirbija::MixerModel with_loop;
+      with_loop.waitForScan();
       if (!with_loop.running()) {
         fail("audio server went away before the looper round trip");
       } else {
@@ -150,6 +157,8 @@ int main(int argc, char* argv[]) {
     }
 
     nirbija::MixerModel looped;
+
+    looped.waitForScan();
     if (!looped.looperLoopClosed(0, 0))
       fail("the looper came back without a closed loop");
     else if (!looped.looperHasAudio(0, 0))
@@ -174,6 +183,7 @@ int main(int argc, char* argv[]) {
       fail("the built-in sampler is not in the plugin list");
     } else {
       nirbija::MixerModel with_kit;
+      with_kit.waitForScan();
       if (!with_kit.running()) {
         fail("audio server went away before the sampler round trip");
       } else {
@@ -207,6 +217,8 @@ int main(int argc, char* argv[]) {
     }
 
     nirbija::MixerModel kit;
+
+    kit.waitForScan();
     if (!kit.samplerHasAudio(0, 0))
       fail("the sampler came back silent");
     else {
@@ -236,6 +248,7 @@ int main(int argc, char* argv[]) {
       fail("the built-in sampler is not in the plugin list");
     } else {
       nirbija::MixerModel source;
+      source.waitForScan();
       if (!source.running()) {
         fail("audio server went away before the pack round trip");
       } else {
@@ -274,6 +287,7 @@ int main(int argc, char* argv[]) {
     qputenv("NIRBIJA_SESSION", (dir.path() + "/pack-target.json").toLocal8Bit());
     if (sampler_row >= 0) {
       nirbija::MixerModel target;
+      target.waitForScan();
       if (!target.running()) {
         fail("audio server went away before loading the pack");
       } else {
@@ -304,6 +318,61 @@ int main(int argc, char* argv[]) {
     qputenv("NIRBIJA_SESSION", (dir.path() + "/session.json").toLocal8Bit());
   }
 
+  // Every pack that ships in sessions/packs/ has to open in a fresh sampler
+  // with a sound on every pad it names. The samples are paths relative to the
+  // pack file, so a renamed or moved pack folder, or a WAV that went missing,
+  // shows up here as a silent pad rather than on stage.
+  {
+    qputenv("NIRBIJA_SESSION", (dir.path() + "/shipped-packs.json").toLocal8Bit());
+    const int sampler_row =
+        restored.plugins()->rowFor(nirbija::PluginFormat::Internal,
+                                   "nirbija.sampler");
+    const QDir packs(QStringLiteral(NIRBIJA_SOURCE_DIR "/sessions/packs"));
+    const QStringList folders = packs.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    if (folders.isEmpty()) fail("no packs found in sessions/packs");
+    for (const QString& folder : folders) {
+      const QDir pack_dir(packs.filePath(folder));
+      const QStringList files =
+          pack_dir.entryList({QStringLiteral("*.pack.json")}, QDir::Files);
+      if (files.size() != 1) {
+        fail(("sessions/packs/" + folder + " must hold exactly one *.pack.json")
+                 .toStdString());
+        continue;
+      }
+      const int samples = static_cast<int>(
+          QDir(pack_dir.filePath(QStringLiteral("samples")))
+              .entryList({QStringLiteral("*.wav"), QStringLiteral("*.flac")},
+                         QDir::Files)
+              .size());
+      nirbija::MixerModel mixer;
+      mixer.waitForScan();
+      if (!mixer.running()) {
+        fail("audio server went away before the shipped packs");
+        break;
+      }
+      mixer.addChannel(QStringLiteral("Pack"), 2);
+      if (sampler_row < 0 || !mixer.addInsert(0, sampler_row)) {
+        fail("could not add a sampler for the shipped packs");
+        break;
+      }
+      if (!mixer.loadSamplerPackFrom(
+              0, 0, QUrl::fromLocalFile(pack_dir.filePath(files.first())))) {
+        fail(("the shipped pack " + folder + " did not load").toStdString());
+        continue;
+      }
+      const QVariantList pads =
+          mixer.insertSamplerSnapshot(0, 0).value(QStringLiteral("pads")).toList();
+      int sounding = 0;
+      for (const QVariant& pad : pads)
+        if (pad.toMap().value(QStringLiteral("hasAudio")).toBool()) ++sounding;
+      if (sounding < std::min(samples, 16))
+        fail(("the shipped pack " + folder + " has " + QString::number(sounding) +
+              " pads with audio for " + QString::number(samples) + " samples")
+                 .toStdString());
+    }
+    qputenv("NIRBIJA_SESSION", (dir.path() + "/session.json").toLocal8Bit());
+  }
+
   // MIDI maps used to keep the graph slot from the run that learned them.
   // That number is new every launch, so a pad bound to CC 21 came back
   // unbound. They travel on the channel now, and a strip file takes them too.
@@ -315,6 +384,7 @@ int main(int argc, char* argv[]) {
       fail("the built-in FX pad is not in the plugin list");
     } else {
       nirbija::MixerModel mapped;
+      mapped.waitForScan();
       if (!mapped.running()) {
         fail("audio server went away before the map round trip");
       } else {
@@ -335,6 +405,8 @@ int main(int argc, char* argv[]) {
       }
 
       nirbija::MixerModel again;
+
+      again.waitForScan();
       if (!again.insertParamMapped(0, 0, 0))
         fail("the Crush map did not survive a restart");
       else {
@@ -344,6 +416,8 @@ int main(int argc, char* argv[]) {
       }
 
       nirbija::MixerModel strip;
+
+      strip.waitForScan();
       if (strip.running()) {
         if (!strip.loadChannelFrom(QUrl::fromLocalFile(dir.path() +
                                                        "/pads-strip.json")))

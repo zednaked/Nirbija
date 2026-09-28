@@ -1,4 +1,5 @@
 pragma ComponentBehavior: Bound
+// SPDX-License-Identifier: GPL-3.0-only
 
 import QtQuick
 import Nirbija
@@ -52,6 +53,21 @@ Item {
 
     HoverHandler {
         id: faderHover
+        onHoveredChanged: {
+            settle.stop()
+            if (hovered) settle.start()
+            else root.settled = false
+        }
+    }
+    // Scrolling the mixer sideways runs the pointer over a dozen faders, and
+    // each one used to take a decibel off the wheel on the way past. The
+    // wheel only reaches the fader once the pointer has rested on it a
+    // moment - or with Ctrl held, which says "I mean this one" at once.
+    property bool settled: false
+    Timer {
+        id: settle
+        interval: 150
+        onTriggered: root.settled = true
     }
 
     Tip {
@@ -208,10 +224,17 @@ Item {
 
             WheelHandler {
                 acceptedModifiers: Qt.NoModifier
+                // Disabled, the event passes on to the mixer's own scroll.
+                enabled: root.settled
+                onWheel: event => root.nudge(event.angleDelta.y > 0 ? 1 : -1)
+            }
+            WheelHandler {
+                acceptedModifiers: Qt.ControlModifier
                 onWheel: event => root.nudge(event.angleDelta.y > 0 ? 1 : -1)
             }
             WheelHandler {
                 acceptedModifiers: Qt.ShiftModifier
+                enabled: root.settled
                 onWheel: event => root.nudge(event.angleDelta.y > 0 ? 0.2 : -0.2)
             }
         }

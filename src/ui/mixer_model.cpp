@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // before Qt: emit() is a method, not the Qt macro
 #include "core/step_sequencer.h"
 
@@ -20,6 +22,8 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QKeyEvent>
 #include <QUrl>
 #include <QStandardPaths>
@@ -51,6 +55,8 @@ MixerModel::MixerModel(QObject* parent) : QAbstractListModel(parent) {
   // serialising its own state with printf is not something this host can
   // audit, and its session is on the line just the same.
   std::setlocale(LC_NUMERIC, "C");
+  // Starts the plugin scan on its worker. The list fills in when it is done
+  // and the session is restored right behind it - see beginStartup().
   plugins_ = std::make_unique<PluginListModel>(this);
 
   if (engine_.start("nirbija")) {
@@ -74,12 +80,14 @@ MixerModel::MixerModel(QObject* parent) : QAbstractListModel(parent) {
   // One save a second at most, however hard a fader is being dragged.
   autosave_timer_.setSingleShot(true);
   autosave_timer_.setInterval(1000);
-  connect(&autosave_timer_, &QTimer::timeout, this, &MixerModel::saveSession);
+  connect(&autosave_timer_, &QTimer::timeout, this, &MixerModel::autosave);
+
+  connect(this, &QAbstractItemModel::rowsInserted, this, &MixerModel::countChanged);
+  connect(this, &QAbstractItemModel::rowsRemoved, this, &MixerModel::countChanged);
+  connect(this, &QAbstractItemModel::modelReset, this, &MixerModel::countChanged);
 
   claimSession();
-  const bool had_file = QFile::exists(sessionPath());
-  loadSession();
-  seed_empty_session_ = !had_file;
+  seed_empty_session_ = !QFile::exists(sessionPath());
   playing_ui_ = engine_.playing();
   metronome_ui_ = engine_.metronome();
 
@@ -87,6 +95,8 @@ MixerModel::MixerModel(QObject* parent) : QAbstractListModel(parent) {
     status_ += tr(" · session read-only (another Nirbija has it)");
     emit statusChanged();
   }
+
+  beginStartup();
 
   // A live-played source, unlike everything else here, cannot afford to go
   // quiet just because a fader took the keyboard focus away from its editor -
@@ -100,8 +110,10 @@ MixerModel::~MixerModel() {
   qApp->removeEventFilter(this);
 
   // The debounced save may still be pending, and closing the window is exactly
-  // when the session matters most.
-  saveSession();
+  // when the session matters most. Quitting may park: nobody is listening.
+  // A model torn down before its session ever loaded has nothing to say
+  // about it, and would otherwise write an empty session over the real one.
+  if (session_loaded_) saveSession();
 
   // Released explicitly rather than left to process exit. flock is held by the
   // open file description, so a second model built in the same process — a
@@ -111,6 +123,41 @@ MixerModel::~MixerModel() {
     ::close(session_fd_);
     session_fd_ = -1;
   }
+}
+
+// The scan runs on its worker and the window opens meanwhile; the session
+// cannot be restored until the list says which plugins exist, so it waits on
+// scanFinished() and then goes through the event loop once more so the first
+// frame is on screen before every plugin is instantiated. A rescan from the
+// menu finishes the same signal, which is what the generation guards.
+void MixerModel::beginStartup() {
+  startup_scan_ = 1;
+  connect(plugins_.get(), &PluginListModel::scanFinished, this, [this] {
+    if (session_loaded_ || startup_scan_ == 0) return;
+    QTimer::singleShot(0, this, [this] {
+      if (!session_loaded_) finishStartup();
+    });
+  });
+}
+
+void MixerModel::finishStartup() {
+  if (session_loaded_) return;
+  session_loaded_ = true;
+  startup_scan_ = 0;
+  loadSession();
+  playing_ui_ = engine_.playing();
+  metronome_ui_ = engine_.metronome();
+  loading_ = false;
+  emit loadingChanged();
+  emit transportChanged();
+  emit masterGainChanged();
+  emit routingChanged();
+}
+
+bool MixerModel::waitForScan(int milliseconds) {
+  if (!plugins_->waitForScan(milliseconds)) return false;
+  if (!session_loaded_) finishStartup();
+  return true;
 }
 
 bool MixerModel::eventFilter(QObject* watched, QEvent* event) {
@@ -156,48 +203,10 @@ QVariant MixerModel::data(const QModelIndex& index, int role) const {
     case InputLabelRole: return channel.input_label;
     case OutputLabelRole: return channel.output_label;
     case MidiLabelRole: return channel.midi_label;
+    case InputConnectedRole: return channel.input_connected;
+    case MidiConnectedRole: return channel.midi_connected;
     case InsertsRole: return channel.inserts;
-    case InsertDetailsRole: {
-      QVariantList details;
-      details.reserve(channel.inserts.size());
-      for (int slot = 0; slot < channel.inserts.size(); ++slot) {
-        QVariantMap entry;
-        entry.insert(QStringLiteral("name"), channel.inserts.at(slot));
-        entry.insert(QStringLiteral("bypassed"),
-                     insertBypassed(index.row(), slot));
-        entry.insert(QStringLiteral("postFader"),
-                     insertPostFader(index.row(), slot));
-        // Cheap even when it is not a Looper: insertIsLooper() is one
-        // dynamic_cast, and the three state reads below short-circuit to
-        // false on a null cast. Read once a poll so a strip can show which
-        // of its inserts are armed or playing without opening each one.
-        if (insertIsLooper(index.row(), slot)) {
-          entry.insert(QStringLiteral("looperRecording"),
-                       looperRecording(index.row(), slot));
-          // Whether the head is actually on the tape, apart from Rec being
-          // down: the strip shows the wait in a different colour, the same
-          // as the editor's sign does.
-          entry.insert(QStringLiteral("looperWriting"),
-                       looperWriting(index.row(), slot));
-          entry.insert(QStringLiteral("looperPlaying"),
-                       looperPlaying(index.row(), slot));
-          entry.insert(QStringLiteral("looperHasAudio"),
-                       looperHasAudio(index.row(), slot));
-        }
-        if (insertIsSampler(index.row(), slot)) {
-          entry.insert(QStringLiteral("samplerRecording"),
-                       samplerRecording(index.row(), slot));
-          entry.insert(QStringLiteral("samplerHasAudio"),
-                       samplerHasAudio(index.row(), slot));
-        }
-        if (insertIsStepSequencer(index.row(), slot)) {
-          entry.insert(QStringLiteral("sequencerRecording"),
-                       sequencerRecording(index.row(), slot));
-        }
-        details.append(entry);
-      }
-      return details;
-    }
+    case InsertDetailsRole: return channel.details;
     case WidthRole: return channel.width;
     case AccentRole: return channel.accent;
     case IsBusRole: return channel.is_bus;
@@ -218,12 +227,120 @@ QHash<int, QByteArray> MixerModel::roleNames() const {
       {HoldLeftRole, "holdLeft"},   {HoldRightRole, "holdRight"},
       {InputLabelRole, "inputLabel"}, {OutputLabelRole, "outputLabel"},
       {MidiLabelRole, "midiLabel"},
+      {InputConnectedRole, "inputConnected"},
+      {MidiConnectedRole, "midiConnected"},
       {InsertsRole, "inserts"},
       {InsertDetailsRole, "insertDetails"},
       {WidthRole, "channelWidth"},
       {AccentRole, "accent"},   {IsBusRole, "isBus"},
       {DestinationRole, "destination"}, {SendsRole, "sends"},
   };
+}
+
+// One word per slot: every live flag a slot draws, plus the name, folded
+// into a fingerprint the poll can compare without building anything.
+QVector<quint32> MixerModel::insertDetailsSignature(int row) const {
+  QVector<quint32> signature;
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return signature;
+  const ChannelUi& channel = channels_[row];
+  signature.reserve(channel.inserts.size() + channel.missing.size());
+  for (int slot = 0; slot < channel.inserts.size(); ++slot) {
+    const QString& name = channel.inserts.at(slot);
+    quint32 bits = name.isEmpty() ? 0u : 1u;
+    if (!name.isEmpty()) {
+      bits |= (insertBypassed(row, slot) ? 2u : 0u) |
+              (insertPostFader(row, slot) ? 4u : 0u);
+      // Cheap even when it is not a Looper: insertIsLooper() is one
+      // string compare, and the state reads below short-circuit to false
+      // on a null cast. Read once a poll so a strip can show which of its
+      // inserts are armed or playing without opening each one.
+      if (insertIsLooper(row, slot)) {
+        bits |= (looperRecording(row, slot) ? 8u : 0u) |
+                (looperWriting(row, slot) ? 16u : 0u) |
+                (looperPlaying(row, slot) ? 32u : 0u) |
+                (looperHasAudio(row, slot) ? 64u : 0u);
+      }
+      if (insertIsSampler(row, slot)) {
+        bits |= (samplerRecording(row, slot) ? 128u : 0u) |
+                (samplerHasAudio(row, slot) ? 256u : 0u);
+      }
+      if (insertIsStepSequencer(row, slot))
+        bits |= sequencerRecording(row, slot) ? 512u : 0u;
+    }
+    // The name is part of the fingerprint too: a replace keeps every flag
+    // and changes only that.
+    bits ^= static_cast<quint32>(qHash(name)) << 10;
+    signature.append(bits);
+  }
+  for (const ChannelUi::MissingInsert& ghost : channel.missing)
+    signature.append(0x80000000u ^ static_cast<quint32>(qHash(ghost.uid)) ^
+                     (ghost.bypassed ? 2u : 0u) ^ (ghost.post_fader ? 4u : 0u));
+  return signature;
+}
+
+// One row's InsertDetailsRole in full: what the signature above stands for.
+QVariantList MixerModel::buildInsertDetails(int row) const {
+  QVariantList details;
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return details;
+  const ChannelUi& channel = channels_[row];
+  details.reserve(channel.inserts.size() + channel.missing.size());
+
+  for (int slot = 0; slot < channel.inserts.size(); ++slot) {
+    const QString& name = channel.inserts.at(slot);
+    QVariantMap entry;
+    entry.insert(QStringLiteral("name"), name);
+    entry.insert(QStringLiteral("filled"), !name.isEmpty());
+    entry.insert(QStringLiteral("missing"), false);
+    if (!name.isEmpty()) {
+      entry.insert(QStringLiteral("bypassed"), insertBypassed(row, slot));
+      entry.insert(QStringLiteral("postFader"), insertPostFader(row, slot));
+      if (insertIsLooper(row, slot)) {
+        entry.insert(QStringLiteral("looperRecording"), looperRecording(row, slot));
+        // Whether the head is actually on the tape, apart from Rec being
+        // down: the strip shows the wait in a different colour, the same
+        // as the editor's sign does.
+        entry.insert(QStringLiteral("looperWriting"), looperWriting(row, slot));
+        entry.insert(QStringLiteral("looperPlaying"), looperPlaying(row, slot));
+        entry.insert(QStringLiteral("looperHasAudio"), looperHasAudio(row, slot));
+      }
+      if (insertIsSampler(row, slot)) {
+        entry.insert(QStringLiteral("samplerRecording"), samplerRecording(row, slot));
+        entry.insert(QStringLiteral("samplerHasAudio"), samplerHasAudio(row, slot));
+      }
+      if (insertIsStepSequencer(row, slot)) {
+        entry.insert(QStringLiteral("sequencerRecording"),
+                     sequencerRecording(row, slot));
+      }
+    }
+    details.append(entry);
+  }
+
+  // The plugins this machine does not have, after the live chain. The slot
+  // shows the uid struck through; the entry is kept so a save writes it back.
+  for (const ChannelUi::MissingInsert& ghost : channel.missing) {
+    QVariantMap entry;
+    entry.insert(QStringLiteral("name"), ghost.uid.section('/', -1));
+    entry.insert(QStringLiteral("uid"), ghost.uid);
+    entry.insert(QStringLiteral("filled"), true);
+    entry.insert(QStringLiteral("missing"), true);
+    entry.insert(QStringLiteral("bypassed"), ghost.bypassed);
+    entry.insert(QStringLiteral("postFader"), ghost.post_fader);
+    details.append(entry);
+  }
+  return details;
+}
+
+void MixerModel::refreshInsertDetails(int row) {
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return;
+  ChannelUi& channel = channels_[row];
+  QVector<quint32> signature = insertDetailsSignature(row);
+  if (signature == channel.details_signature &&
+      channel.details.size() == signature.size())
+    return;
+  channel.details_signature = std::move(signature);
+  channel.details = buildInsertDetails(row);
+  const QModelIndex idx = index(row);
+  emit dataChanged(idx, idx, {InsertDetailsRole});
 }
 
 // The accent no strip is wearing, or the least worn once the palette runs out.
@@ -549,6 +666,8 @@ void MixerModel::toggleArm(int row) {
   if (ChannelStrip* strip = stripFor(row)) strip->set_armed(channels_[row].armed);
   const QModelIndex idx = index(row);
   emit dataChanged(idx, idx, {ArmedRole});
+  // Armed is saved with the session, so it is worth a save like the rest.
+  markDirty();
 }
 
 void MixerModel::setMasterGain(qreal gain) {
@@ -648,7 +767,9 @@ bool MixerModel::addInsertAt(int row, int pluginIndex, int targetSlot) {
 // The slot the plugin actually landed in, or -1. The engine fills the first
 // hole rather than appending, so "the last insert" is not a safe way for a
 // caller to find what it just added.
-int MixerModel::placeInsert(int row, int pluginIndex, int targetSlot) {
+int MixerModel::placeInsert(int row, int pluginIndex, int targetSlot,
+                            const std::vector<uint8_t>* state,
+                            const QString& sample_dir) {
   if (row < 0 || row >= static_cast<int>(channels_.size())) return -1;
   const PluginDescriptor* descriptor = plugins_->descriptor(pluginIndex);
   if (descriptor == nullptr) return -1;
@@ -660,6 +781,18 @@ int MixerModel::placeInsert(int row, int pluginIndex, int targetSlot) {
     emit errorOccurred(tr("Could not load %1")
                            .arg(QString::fromStdString(descriptor->name)));
     return -1;
+  }
+  // State goes in now, while nothing but this thread can see the instance.
+  // Every format wants the instance quiet for load_state(), and an instance
+  // that is not in the graph yet is as quiet as it gets - which is what lets
+  // a session restore, an undo and a duplicate all run without a park.
+  if (state != nullptr && !state->empty()) {
+    if (!instance->load_state(*state))
+      qWarning("session: %s refused its own saved state", descriptor->uid.c_str());
+    if (auto* sampler = dynamic_cast<SamplerInstance*>(instance.get())) {
+      if (!sample_dir.isEmpty())
+        sampler->resolve_paths(sample_dir.toStdString());
+    }
   }
   ChannelStrip* strip = stripFor(row);
   size_t placed_at = 0;
@@ -681,14 +814,29 @@ int MixerModel::placeInsert(int row, int pluginIndex, int targetSlot) {
   while (labels.size() <= static_cast<int>(label_at)) labels.append(QString());
   labels[static_cast<int>(label_at)] = QString::fromStdString(descriptor->name);
   const QModelIndex idx = index(row);
-  emit dataChanged(idx, idx, {InsertsRole, InsertDetailsRole});
+  emit dataChanged(idx, idx, {InsertsRole});
+  refreshInsertDetails(row);
+  // The chain's latency moved with it; JACK asks again and downstream
+  // clients line up.
+  engine_.latency_changed();
   markDirty();
   return static_cast<int>(label_at);
 }
 
 void MixerModel::removeInsert(int row, int slot) {
   if (row < 0 || row >= static_cast<int>(channels_.size())) return;
-  if (slot < 0 || slot >= channels_[row].inserts.size()) return;
+  if (slot < 0) return;
+
+  // Past the live chain sit the plugins this machine does not have; removing
+  // one of those is only forgetting the entry the session carried for it.
+  if (slot >= channels_[row].inserts.size()) {
+    const int ghost = slot - channels_[row].inserts.size();
+    if (ghost >= channels_[row].missing.size()) return;
+    channels_[row].missing.removeAt(ghost);
+    refreshInsertDetails(row);
+    markDirty();
+    return;
+  }
 
   ChannelStrip* strip = stripFor(row);
   if (strip == nullptr) return;
@@ -705,7 +853,9 @@ void MixerModel::removeInsert(int row, int slot) {
   // has to keep the same shape or the two would drift apart.
   channels_[row].inserts[slot].clear();
   const QModelIndex idx = index(row);
-  emit dataChanged(idx, idx, {InsertsRole, InsertDetailsRole});
+  emit dataChanged(idx, idx, {InsertsRole});
+  refreshInsertDetails(row);
+  engine_.latency_changed();
   markDirty();
 }
 
@@ -723,7 +873,9 @@ void MixerModel::moveInsert(int row, int slot, int direction) {
   labels.swapItemsAt(slot, target);
 
   const QModelIndex idx = index(row);
-  emit dataChanged(idx, idx, {InsertsRole, InsertDetailsRole});
+  emit dataChanged(idx, idx, {InsertsRole});
+  refreshInsertDetails(row);
+  engine_.latency_changed();
   markDirty();
 }
 
@@ -860,6 +1012,8 @@ void MixerModel::refreshRouting(int row) {
       engine_.current_sources(channel.slot, true);
 
   channel.input_label = audio.isEmpty() ? tr("no input") : audio;
+  channel.input_connected = !audio.isEmpty();
+  channel.midi_connected = !midi_sources.empty();
   if (midi_sources.empty()) {
     channel.midi_label = tr("no MIDI");
   } else if (midi_sources.size() == 1) {
@@ -869,7 +1023,8 @@ void MixerModel::refreshRouting(int row) {
   }
 
   const QModelIndex idx = index(row);
-  emit dataChanged(idx, idx, {InputLabelRole, MidiLabelRole});
+  emit dataChanged(idx, idx, {InputLabelRole, MidiLabelRole,
+                              InputConnectedRole, MidiConnectedRole});
   emit routingChanged();
   markDirty();
 }
@@ -1074,6 +1229,87 @@ QVariantMap MixerModel::insertSequencerSnapshot(int row, int slot) const {
   out[QStringLiteral("chance")] = chance;
   out[QStringLiteral("micro")] = micro;
   return out;
+}
+
+QVariantList MixerModel::insertSequencerHeads(int row, int slot) const {
+  QVariantList heads;
+  auto* seq = dynamic_cast<StepSequencerInstance*>(insertFor(row, slot));
+  if (seq == nullptr) return heads;
+  heads.reserve(StepSequencerInstance::kLanes +
+                StepSequencerInstance::kExtraHeads);
+  for (int lane = 0; lane < StepSequencerInstance::kLanes; ++lane) {
+    const int step = seq->native_head_step(lane);
+    heads.append(step < 0 ? -1 : ((lane << 8) | (step & 0xff)));
+  }
+  for (int extra = 0; extra < StepSequencerInstance::kExtraHeads; ++extra) {
+    const int step = seq->extra_head_step(extra);
+    if (seq->extra_head_muted(extra) || step < 0) {
+      heads.append(-1);
+      continue;
+    }
+    const int lane = seq->extra_head_lane(extra);
+    heads.append(0x10000 | (lane << 8) | (step & 0xff));
+  }
+  return heads;
+}
+
+int MixerModel::sequencerVersion(int row, int slot) const {
+  auto* seq = dynamic_cast<StepSequencerInstance*>(insertFor(row, slot));
+  if (seq == nullptr) return 0;
+
+  // FNV-1a over everything the grid draws apart from the heads. Five
+  // thousand integer reads is a fraction of what building the QVariant
+  // snapshot costs, and it runs thirty times a second while the grid is
+  // open, so it stays plain arithmetic.
+  quint64 hash = 1469598103934665603ull;
+  auto mix = [&hash](quint64 value) {
+    hash ^= value;
+    hash *= 1099511628211ull;
+  };
+  auto mix_real = [&mix](float value) {
+    mix(static_cast<quint64>(static_cast<qint64>(value * 65536.0f)));
+  };
+  const int pattern = seq->pattern();
+  mix(static_cast<quint64>(pattern));
+  mix(static_cast<quint64>(seq->next_pattern() + 1));
+  mix(seq->fill() ? 1 : 0);
+  mix(seq->recording() ? 2 : 0);
+  mix(static_cast<quint64>(seq->focus()));
+  mix(static_cast<quint64>(seq->view()));
+  mix(static_cast<quint64>(seq->transpose() + 128));
+  mix_real(seq->swing());
+  mix(static_cast<quint64>(seq->scale()));
+  mix(static_cast<quint64>(seq->root()));
+  for (int i = 0; i < 4; ++i) mix_real(seq->macro(i));
+  for (int lane = 0; lane < StepSequencerInstance::kLanes; ++lane) {
+    mix(static_cast<quint64>(seq->lane_note(lane)));
+    mix(static_cast<quint64>(seq->lane_length(lane)));
+    mix(seq->lane_muted(lane) ? 1 : 0);
+    mix(static_cast<quint64>(seq->lane_channel(lane)));
+    mix(static_cast<quint64>(seq->lane_division(lane)));
+    mix(static_cast<quint64>(seq->lane_direction(lane)));
+    mix(static_cast<quint64>(seq->lane_euclid(lane)));
+    mix_real(seq->lane_gate(lane));
+    for (int step = 0; step < StepSequencerInstance::kMaxSteps; ++step) {
+      mix((seq->cell_active(pattern, lane, step) ? 1u : 0u) |
+          (seq->cell_accent(pattern, lane, step) ? 2u : 0u) |
+          (seq->cell_tie(pattern, lane, step) ? 4u : 0u) |
+          (static_cast<quint64>(seq->cell_note(pattern, lane, step)) << 3) |
+          (static_cast<quint64>(seq->cell_velocity(pattern, lane, step)) << 11) |
+          (static_cast<quint64>(seq->cell_ratchet(pattern, lane, step)) << 19) |
+          (static_cast<quint64>(seq->cell_condition(pattern, lane, step)) << 27) |
+          (static_cast<quint64>(seq->cell_cond_arg(pattern, lane, step)) << 35));
+      mix_real(seq->cell_probability(pattern, lane, step));
+      mix_real(seq->cell_microtiming(pattern, lane, step));
+    }
+  }
+
+  SequencerVersion& memo = sequencer_versions_[seq];
+  if (memo.version == 0 || memo.hash != hash) {
+    memo.hash = hash;
+    ++memo.version;
+  }
+  return memo.version;
 }
 
 QVariantMap MixerModel::insertSequencerTarget(int row, int slot) const {
@@ -1353,10 +1589,14 @@ void MixerModel::setSamplerCountIn(int row, int slot, bool on) {
 
 void MixerModel::closeAllEditors() { editors_.clear(); }
 
-void MixerModel::newSession() {
+void MixerModel::clearMixer() {
   closeAllEditors();
   midi_maps_.clear();
+  // One removal per row, none of them an undo step of its own.
+  const bool was_restoring = restoring_;
+  restoring_ = true;
   while (rowCount() > 0) removeChannel(0);
+  restoring_ = was_restoring;
   setMasterGain(1.0);
   setTempo(120.0);
   if (engine_.metronome()) toggleMetronome();
@@ -1368,6 +1608,12 @@ void MixerModel::newSession() {
   if (engine_.follow_midi_clock()) toggleFollowMidiClock();
   setTimeSignature(4, 4);
   if (playing_ui_) togglePlay();
+}
+
+void MixerModel::newSession() {
+  // Throwing a session away is the one edit most worth taking back.
+  pushUndo();
+  clearMixer();
   saveSession();
 }
 
@@ -1650,49 +1896,71 @@ void MixerModel::pollLevels() {
   }
 
   // Reading the peaks is what clears them on the audio side, so it happens
-  // whether or not anyone is looking; only the redraw is skipped.
+  // whether or not anyone is looking; only the redraw is skipped - and only
+  // rows whose bar or held mark actually moved are announced. A silent mixer
+  // used to wake every delegate of every strip thirty times a second to
+  // draw the same nothing.
+  static const QList<int> kMeterRoles = {PeakLeftRole,      PeakRightRole,
+                                         PositionLeftRole,  PositionRightRole,
+                                         HoldLeftRole,      HoldRightRole};
   for (size_t row = 0; row < channels_.size(); ++row) {
     ChannelUi& channel = channels_[row];
     ChannelStrip* strip = stripFor(static_cast<int>(row));
     if (strip == nullptr) continue;
 
+    const qreal was_position[2] = {channel.position[0], channel.position[1]};
+    const qreal was_hold[2] = {channel.hold[0], channel.hold[1]};
     for (int ch = 0; ch < channel.width; ++ch)
       channel.peak[ch] = strip->read_peak(ch);
     if (channel.width == 1) channel.peak[1] = channel.peak[0];
+    bool moved = false;
     for (int ch = 0; ch < 2; ++ch) {
       advanceMeter(channel.peak[ch], channel.position[ch], channel.hold[ch],
                    channel.hold_age[ch]);
+      moved = moved || channel.position[ch] != was_position[ch] ||
+              channel.hold[ch] != was_hold[ch];
     }
+    if (moved && meters_active_) {
+      const QModelIndex idx = index(static_cast<int>(row));
+      emit dataChanged(idx, idx, kMeterRoles);
+    }
+    // The chain's live flags - Rec down, a loop playing - ride the same poll
+    // and are only announced when one of them flipped.
+    refreshInsertDetails(static_cast<int>(row));
   }
 
+  bool master_moved = false;
   master_peak_[0] = engine_.graph().read_master_peak(0);
   master_peak_[1] = engine_.graph().read_master_peak(1);
   for (int ch = 0; ch < 2; ++ch) {
+    const qreal was_position = master_position_[ch];
+    const qreal was_hold = master_hold_[ch];
     advanceMeter(master_peak_[ch], master_position_[ch], master_hold_[ch],
                  master_hold_age_[ch]);
+    master_moved = master_moved || master_position_[ch] != was_position ||
+                   master_hold_[ch] != was_hold;
   }
+  const bool was_clip = master_clip_;
   master_clip_ = engine_.graph().read_master_clip() > 0.0f;
   // Held for a few polls: a single limited transient would otherwise light
   // for one frame and be missed.
+  const bool was_limiting = limiter_working_;
   const float floor = engine_.graph().read_limiter_floor();
   if (floor < 0.999f) limiter_hold_ = 6;
   else if (limiter_hold_ > 0) --limiter_hold_;
   limiter_working_ = limiter_hold_ > 0;
   const int xruns = static_cast<int>(engine_.xrun_count());
-  if (xruns != xruns_) {
-    xruns_ = xruns;
-    emit levelsChanged();
-  }
+  const bool xruns_moved = xruns != xruns_;
+  xruns_ = xruns;
 
-  if (meters_active_) {
-    if (!channels_.empty()) {
-      emit dataChanged(index(0), index(static_cast<int>(channels_.size()) - 1),
-                       {PeakLeftRole, PeakRightRole, PositionLeftRole,
-                        PositionRightRole, HoldLeftRole, HoldRightRole,
-                        InsertDetailsRole});
-    }
-    emit levelsChanged();
-  }
+  // levelsChanged also carries the bar counter and the take clock, which
+  // move whenever the transport or the recorder runs even in silence.
+  const bool something_to_say = master_moved || xruns_moved ||
+                                was_clip != master_clip_ ||
+                                was_limiting != limiter_working_ ||
+                                engine_.playing() || engine_.recording();
+  if (meters_active_ && something_to_say) emit levelsChanged();
+  if (meters_active_) emit tick();
 
   // Without a JACK client there is no audio thread, so nothing retired can
   // still be in use and the generation gate would never open on its own.
@@ -1777,27 +2045,19 @@ void MixerModel::pushUndo() {
   emit dirtyChanged();
 }
 
+// The session as it stands, in memory. Never parks: a plugin that would
+// need quiet for its state is left out of the snapshot instead (see
+// collectInsertStates), and applySnapshot keeps such a plugin as it is.
 QByteArray MixerModel::snapshot() const {
-  const QString path = sessionPath() + QStringLiteral(".snap");
-  writeSession(path);
-  QFile file(path);
-  if (!file.open(QIODevice::ReadOnly)) return {};
-  return file.readAll();
+  if (!engine_.running()) return {};
+  return QJsonDocument(buildSession(false)).toJson(QJsonDocument::Compact);
 }
 
 void MixerModel::restoreSnapshot(const QByteArray& blob) {
   if (blob.isEmpty()) return;
-  const QString path = sessionPath() + QStringLiteral(".snap");
-  QFile file(path);
-  if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
-  file.write(blob);
-  file.close();
-  closeAllEditors();
-  midi_maps_.clear();
-  restoring_ = true;
-  while (rowCount() > 0) removeChannel(0);
-  restoring_ = false;
-  readSession(path);
+  const QJsonDocument document = QJsonDocument::fromJson(blob);
+  if (!document.isObject()) return;
+  applySnapshot(document.object());
 }
 
 void MixerModel::undo() {
@@ -1805,6 +2065,7 @@ void MixerModel::undo() {
   redo_stack_.push_back(snapshot());
   const QByteArray blob = undo_stack_.takeLast();
   restoreSnapshot(blob);
+  markDirty();
   emit dirtyChanged();
 }
 
@@ -1812,6 +2073,7 @@ void MixerModel::redo() {
   if (redo_stack_.isEmpty()) return;
   undo_stack_.push_back(snapshot());
   restoreSnapshot(redo_stack_.takeLast());
+  markDirty();
   emit dirtyChanged();
 }
 
@@ -1820,26 +2082,25 @@ void MixerModel::duplicateChannel(int row) {
   pushUndo();
   const ChannelUi src = channels_[row];
 
-  // Every plugin's state, read live unless one of them says it cannot be -
-  // see collectInsertStates() for why that is allowed.
+  // Every plugin's state, read live - see collectInsertStates() for why that
+  // is allowed. A plugin that would need the graph parked for it (a looper
+  // mid-take) is copied fresh instead: the copy is a second instrument, not
+  // a bounce, and a park is a hole in the master for everyone.
   std::vector<std::vector<uint8_t>> blobs;
   std::vector<int> plugin_rows;
   std::vector<bool> bypassed;
   std::vector<bool> post_fader;
   if (ChannelStrip* strip = stripFor(row)) {
-    const bool park = anyInsertNeedsQuietSave();
-    if (!park || engine_.park_graph()) {
-      for (size_t slot = 0; slot < strip->insert_count(); ++slot) {
-        PluginInstance* insert = strip->insert_at(slot);
-        if (insert == nullptr) continue;  // a hole left by a removal
-        const PluginDescriptor& descriptor = insert->descriptor();
-        plugin_rows.push_back(plugins_->rowFor(descriptor.format, descriptor.uid));
-        blobs.push_back(insert->save_state());
-        bypassed.push_back(strip->insert_bypassed(slot));
-        post_fader.push_back(strip->insert_post_fader(slot));
-      }
+    for (size_t slot = 0; slot < strip->insert_count(); ++slot) {
+      PluginInstance* insert = strip->insert_at(slot);
+      if (insert == nullptr) continue;  // a hole left by a removal
+      const PluginDescriptor& descriptor = insert->descriptor();
+      plugin_rows.push_back(plugins_->rowFor(descriptor.format, descriptor.uid));
+      blobs.push_back(insert->save_needs_quiet() ? std::vector<uint8_t>{}
+                                                 : insert->save_state());
+      bypassed.push_back(strip->insert_bypassed(slot));
+      post_fader.push_back(strip->insert_post_fader(slot));
     }
-    if (park) engine_.unpark_graph();
   }
 
   const int dest = src.is_bus
@@ -1854,29 +2115,18 @@ void MixerModel::duplicateChannel(int row) {
   setMidiMask(dest, midiMask(row));
   setDestination(dest, src.destination);
 
-  // The chain, in order, each plugin handed back the state its twin was in.
-  // A copy of a strip that arrives empty is not a copy of anything.
-  if (engine_.park_graph()) {
-    for (size_t i = 0; i < plugin_rows.size(); ++i) {
-      if (plugin_rows[i] < 0) continue;  // no longer installed
-      const int slot = placeInsert(dest, plugin_rows[i], -1);
-      if (slot < 0) break;  // the chain is full
-      setInsertBypassed(dest, slot, bypassed[i]);
-      setInsertPostFader(dest, slot, post_fader[i]);
-      if (blobs[i].empty()) continue;
-
-      ChannelStrip* strip = stripFor(dest);
-      if (strip == nullptr) break;
-      PluginInstance* insert = strip->insert_at(static_cast<size_t>(slot));
-      if (insert != nullptr) {
-        insert->load_state(blobs[i]);
-        if (auto* sampler = dynamic_cast<SamplerInstance*>(insert))
-          sampler->resolve_paths(
-              QFileInfo(sessionPath()).absolutePath().toStdString());
-      }
-    }
+  // The chain, in order, each plugin handed back the state its twin was in
+  // before it is published - so nothing is parked. A copy of a strip that
+  // arrives empty is not a copy of anything.
+  const QString sample_dir = QFileInfo(sessionPath()).absolutePath();
+  for (size_t i = 0; i < plugin_rows.size(); ++i) {
+    if (plugin_rows[i] < 0) continue;  // no longer installed
+    const int slot =
+        placeInsert(dest, plugin_rows[i], -1, &blobs[i], sample_dir);
+    if (slot < 0) break;  // the chain is full
+    setInsertBypassed(dest, slot, bypassed[i]);
+    setInsertPostFader(dest, slot, post_fader[i]);
   }
-  engine_.unpark_graph();
 
   // Sends last, the way a session restores them, since they name a bus.
   const QVariantList sends = src.sends;
@@ -1936,8 +2186,9 @@ void MixerModel::setInsertBypassed(int row, int slot, bool on) {
   ChannelStrip* strip = stripFor(row);
   if (strip == nullptr) return;
   strip->set_insert_bypassed(static_cast<size_t>(slot), on);
-  const QModelIndex idx = index(row);
-  emit dataChanged(idx, idx, {InsertDetailsRole});
+  refreshInsertDetails(row);
+  // A bypassed insert reports no latency, so the total changed.
+  engine_.latency_changed();
   markDirty();
 }
 
@@ -1950,8 +2201,7 @@ void MixerModel::setInsertPostFader(int row, int slot, bool on) {
   ChannelStrip* strip = stripFor(row);
   if (strip == nullptr) return;
   strip->set_insert_post_fader(static_cast<size_t>(slot), on);
-  const QModelIndex idx = index(row);
-  emit dataChanged(idx, idx, {InsertDetailsRole});
+  refreshInsertDetails(row);
   markDirty();
 }
 
@@ -2150,17 +2400,9 @@ void MixerModel::applyDronePreset(int row, int slot, int index) {
 void MixerModel::setLooperRecord(int row, int slot, bool on) {
   auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
   if (looper == nullptr) return;
-  if (on) {
-    // Snapshot before the audio thread starts writing. Parked so the copy
-    // cannot tear a sample the process callback is mid-overdub.
-    if (engine_.park_graph()) {
-      if (looper->loop_closed())
-        looper->capture_undo();
-      else
-        looper->capture_undo_empty();
-    }
-    engine_.unpark_graph();
-  }
+  // The undo snapshot is the audio thread's job now: the head copies each
+  // frame before overwriting it. Nothing to park - a park fades the master
+  // out, a hole in the music on every Rec press.
   looper->set_parameter(0, on ? 1.0 : 0.0);
   markDirty();
 }
@@ -2173,11 +2415,7 @@ void MixerModel::setLooperPlay(int row, int slot, bool on) {
 void MixerModel::clearLooper(int row, int slot) {
   auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
   if (looper == nullptr) return;
-  if (engine_.park_graph()) {
-    looper->capture_undo();
-    looper->set_parameter(2, 1.0);
-  }
-  engine_.unpark_graph();
+  looper->request_clear();
   markDirty();
 }
 
@@ -2194,27 +2432,22 @@ bool MixerModel::looperCanRedo(int row, int slot) const {
 void MixerModel::undoLooper(int row, int slot) {
   auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
   if (looper == nullptr || !looper->can_undo()) return;
-  if (engine_.park_graph()) looper->undo();
-  engine_.unpark_graph();
+  // Applied by the audio thread at a block start, no park needed.
+  looper->request_undo();
   markDirty();
 }
 
 void MixerModel::redoLooper(int row, int slot) {
   auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
   if (looper == nullptr || !looper->can_redo()) return;
-  if (engine_.park_graph()) looper->redo();
-  engine_.unpark_graph();
+  looper->request_redo();
   markDirty();
 }
 
 void MixerModel::multiplyLooper(int row, int slot) {
   auto* looper = dynamic_cast<LooperInstance*>(insertFor(row, slot));
   if (looper == nullptr || !looper->can_multiply()) return;
-  if (engine_.park_graph()) {
-    looper->capture_undo();
-    looper->multiply();
-  }
-  engine_.unpark_graph();
+  looper->request_multiply();
   markDirty();
 }
 

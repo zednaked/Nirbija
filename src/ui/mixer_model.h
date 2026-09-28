@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #pragma once
 
 #include <QAbstractListModel>
@@ -13,6 +15,7 @@
 #include <qqmlintegration.h>
 
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 #include "core/engine.h"
@@ -77,6 +80,14 @@ class MixerModel : public QAbstractListModel {
   Q_PROPERTY(bool midiClock READ midiClock NOTIFY transportChanged)
   Q_PROPERTY(bool followMidiClock READ followMidiClock NOTIFY transportChanged)
   Q_PROPERTY(bool masterClip READ masterClip NOTIFY levelsChanged)
+  // The row count as a property, so a binding in a persistent Loader (the
+  // navigator's header, the matrix's width) follows strips being added and
+  // removed instead of freezing on whatever rowCount() said the first time.
+  Q_PROPERTY(int count READ rowCount NOTIFY countChanged)
+  // True from construction until the plugin scan has finished and the
+  // autosaved session is back on the strips. The window opens before either,
+  // and the top bar says so rather than sitting black until they are done.
+  Q_PROPERTY(bool loading READ loading NOTIFY loadingChanged)
 
  public:
   enum Roles {
@@ -95,10 +106,18 @@ class MixerModel : public QAbstractListModel {
     InputLabelRole,
     OutputLabelRole,
     MidiLabelRole,
+    // Whether anything is wired in, as a bool rather than a label compared
+    // against a translated string in QML.
+    InputConnectedRole,
+    MidiConnectedRole,
     InsertsRole,
     // The same chain with the state a slot needs to draw itself:
-    // [{name, bypassed, postFader}]. Bypass used to be invisible until the
-    // menu was opened, which is a poor place to keep "this is not being heard".
+    // [{name, filled, bypassed, postFader, missing, uid, ...live flags}].
+    // Bypass used to be invisible until the menu was opened, which is a poor
+    // place to keep "this is not being heard". `filled` is false for a hole
+    // left by a removal; `missing` marks a plugin the session names but this
+    // machine does not have. The list is cached per row and only announced
+    // when something in it actually changed - see refreshInsertDetails().
     InsertDetailsRole,
     WidthRole,
     AccentRole,
@@ -126,6 +145,12 @@ class MixerModel : public QAbstractListModel {
   qreal masterHoldRight() const { return master_hold_[1]; }
   bool metersActive() const { return meters_active_; }
   void setMetersActive(bool on);
+  bool loading() const { return loading_; }
+  // Blocks until the plugin scan started in the constructor (or by a rescan)
+  // has finished, then restores the session if that is still pending. For
+  // the headless tests, which build a model and reach for its plugins on the
+  // next line; the window never needs it. Negative waits as long as it takes.
+  Q_INVOKABLE bool waitForScan(int milliseconds = -1);
   qreal masterGain() const { return master_gain_; }
   QString masterSink() const;
   bool playing() const {
@@ -203,8 +228,13 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE QString insertName(int row, int slot) const;
   Q_INVOKABLE void closeAllEditors();
 
-  // Clears the mixer back to nothing and saves that as the session.
+  // Clears the mixer back to nothing and saves that as the session. An undo
+  // step, like everything else that throws strips away.
   Q_INVOKABLE void newSession();
+  // True when there is something a "new session" would throw away.
+  Q_INVOKABLE bool sessionHasContent() const {
+    return !channels_.empty() || dirty_flag_;
+  }
   Q_INVOKABLE bool shouldSeedSession() const { return seed_empty_session_; }
 
   Q_INVOKABLE bool addInsertAt(int row, int pluginIndex, int targetSlot);
@@ -368,6 +398,9 @@ class MixerModel : public QAbstractListModel {
   // Test hook: the engine behind the model, so a test can reach a strip and
   // stand a plugin of its own in place of a scanned one.
   Engine& engineForTests() { return engine_; }
+  // Test hook: an undo step at a point the UI would not take one, so a test
+  // can undo a single insert removal.
+  void pushUndoForTests() { pushUndo(); }
 
   // File player extras: only meaningful when the insert is one.
   Q_INVOKABLE bool insertIsFilePlayer(int row, int slot) const;
@@ -393,6 +426,16 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE int insertPlayhead(int row, int slot) const;
   // Current-pattern planes plus scalars. Empty if the insert is not a sequencer.
   Q_INVOKABLE QVariantMap insertSequencerSnapshot(int row, int slot) const;
+  // A number that moves whenever anything in that snapshot other than the
+  // heads would - a cell, a lane, a macro, the pattern in view. The grid
+  // polls this and only asks for the whole snapshot when it changed; before,
+  // it rebuilt five thousand values and every cell binding twenty times a
+  // second to draw a playhead. The sequencer keeps no such counter of its
+  // own, so this hashes the planes on this side and remembers the last hash
+  // per insert. 0 when the insert is not a sequencer.
+  Q_INVOKABLE int sequencerVersion(int row, int slot) const;
+  // Just the heads, the one part of the snapshot that moves every tick.
+  Q_INVOKABLE QVariantList insertSequencerHeads(int row, int slot) const;
   // Who this sequencer actually feeds: the next non-empty insert, nobody
   // else. Two instruments on one strip is two sequencers, not a merged
   // name list. `{name, pads:[{note,name},...]}`; empty when nothing sits
@@ -476,8 +519,15 @@ class MixerModel : public QAbstractListModel {
 
   // Every insert's state blob, in the order writeSession emits them. Read
   // with the mixer playing; the graph is parked only if a plugin says its
-  // state cannot be read that way right now, and only for the asking.
-  QVector<QVector<QByteArray>> collectInsertStates() const;
+  // state cannot be read that way right now, and only for the asking - and
+  // only when the caller allows it. With `allow_park` false such a plugin's
+  // entry is marked skipped instead: the autosave and the undo snapshot
+  // would rather leave one blob out than put a hole in the master.
+  struct InsertState {
+    QByteArray blob;
+    bool skipped = false;
+  };
+  QVector<QVector<InsertState>> collectInsertStates(bool allow_park = true) const;
   bool anyInsertNeedsQuietSave() const;
 
   // False when another Nirbija already holds the session. That instance still
@@ -503,6 +553,15 @@ class MixerModel : public QAbstractListModel {
   void errorOccurred(const QString& message);
   void dirtyChanged();
   void metersActiveChanged();
+  void countChanged();
+  void loadingChanged();
+  // The plugin list is complete (again). The session load waits for it.
+  void scanFinished();
+  // One beat of the 30 Hz poll, for editors that redraw something live - a
+  // playhead, a meter, a string. Subscribing here instead of running a Timer
+  // each means one wake-up per tick however many editors are open, and none
+  // when the window is hidden.
+  void tick();
   // A key going down or up anywhere in the window, seen ahead of whichever
   // QML item happens to have focus - see eventFilter() below. A control
   // that wants the letters for itself (a text field, the Lua editor) still
@@ -542,7 +601,29 @@ class MixerModel : public QAbstractListModel {
     QString input_label;
     QString output_label;
     QString midi_label;
+    bool input_connected = false;
+    bool midi_connected = false;
     QStringList inserts;
+    // What InsertDetailsRole answers, built by refreshInsertDetails() and
+    // handed out as is: data() runs for every delegate on every dataChanged,
+    // and building a list of maps with a dozen dynamic_casts per slot there,
+    // thirty times a second, was most of the mixer's idle CPU.
+    QVariantList details;
+    // A compact fingerprint of `details` - one word per slot - compared each
+    // poll so the role is only announced when a flag actually flipped.
+    QVector<quint32> details_signature;
+    // Plugins the session named that are not installed here. Kept, blob and
+    // all, so the next save writes them back and the strip can show the gap;
+    // they sit after the live chain in the details list since the engine
+    // has no slot to hold a plugin it could not make.
+    struct MissingInsert {
+      QString format;
+      QString uid;
+      QString state;  // base64, verbatim from the file
+      bool bypassed = false;
+      bool post_fader = false;
+    };
+    QVector<MissingInsert> missing;
     // [{ bus: int, name: QString, level: qreal }], in slot order.
     QVariantList sends;
     QString accent;
@@ -553,10 +634,39 @@ class MixerModel : public QAbstractListModel {
   PluginInstance* insertFor(int row, int slot) const;
 
   // Adds an insert and reports which slot took it, or -1. addInsert and
-  // addInsertAt are the boolean faces of this for QML.
-  int placeInsert(int row, int pluginIndex, int targetSlot);
+  // addInsertAt are the boolean faces of this for QML. A state blob given
+  // here is loaded before the plugin is published to the audio thread, which
+  // is the one moment load_state() is safe without parking anything; a
+  // sampler also resolves its sample paths against `sample_dir` then.
+  int placeInsert(int row, int pluginIndex, int targetSlot,
+                  const std::vector<uint8_t>* state = nullptr,
+                  const QString& sample_dir = {});
   int busCount() const;
   void pollLevels();
+  // Rebuilds one row's InsertDetailsRole and announces it if it changed.
+  // The fingerprint is what the poll compares each tick; the list of maps
+  // is only built when the fingerprint moved.
+  void refreshInsertDetails(int row);
+  QVector<quint32> insertDetailsSignature(int row) const;
+  QVariantList buildInsertDetails(int row) const;
+  // The autosave timer's slot: saves unless a plugin would need the graph
+  // parked for it, in which case it waits and asks again a second later.
+  void autosave();
+  // The whole session as JSON, states read under the given park policy.
+  QJsonObject buildSession(bool allow_park) const;
+  static bool writeJson(const QString& path, const QJsonObject& root);
+  // Everything a session carries besides its channels: tempo, clock, master.
+  void applySessionGlobals(const QJsonObject& root);
+  // Throws every strip away without writing anything to disk.
+  void clearMixer();
+  // Brings the mixer to what `root` describes by changing only what differs:
+  // strips and inserts that are already there stay the same objects, nothing
+  // is parked, and a plugin that has to be made is loaded with its state
+  // before the audio thread ever sees it. How undo and redo restore.
+  void applySnapshot(const QJsonObject& root);
+  // Starts the plugin scan on its worker and the session load behind it.
+  void beginStartup();
+  void finishStartup();
   void handleControl(int cc, int channel, int value);
   void refreshRouting(int row);
 
@@ -577,7 +687,7 @@ class MixerModel : public QAbstractListModel {
   std::vector<ChannelUi> channels_;
 
   QJsonObject writeChannel(const ChannelUi& channel, size_t row,
-                           const QVector<QByteArray>& row_states) const;
+                           const QVector<InsertState>& row_states) const;
   QString nextAccent() const;
   int restoreChannel(const QJsonObject& entry, QStringList* missing,
                      const QString& sample_dir = {});
@@ -655,6 +765,19 @@ class MixerModel : public QAbstractListModel {
   qreal tempo_ui_ = 120.0;
   bool seed_empty_session_ = true;
   bool dirty_flag_ = false;
+  bool loading_ = true;
+  bool session_loaded_ = false;
+  // Which scan a pending "load the session when the list is ready" belongs
+  // to, so a rescan from the menu does not reload the session again.
+  int startup_scan_ = 0;
+  // sequencerVersion()'s memory: the last hash seen per insert and the
+  // counter it bumped. Keyed by the instance, which outlives the grid.
+  struct SequencerVersion {
+    quint64 hash = 0;
+    int version = 0;
+  };
+  mutable std::unordered_map<const PluginInstance*, SequencerVersion>
+      sequencer_versions_;
   bool master_clip_ = false;
   bool limiter_working_ = false;
   int limiter_hold_ = 0;

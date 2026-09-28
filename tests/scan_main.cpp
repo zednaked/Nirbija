@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // Lists every plugin the compiled-in backends can see. Fails if no backend
 // found anything at all, since this machine is expected to have LV2 plugins.
 //
@@ -29,8 +31,12 @@ const char* kind_name(nirbija::PluginKind kind) {
 int main() {
   size_t total = 0;
   std::map<std::string, size_t> by_kind;
+  size_t limit = 0;
+  if (const char* env = std::getenv("NIRBIJA_SCAN_LIMIT"))
+    limit = static_cast<size_t>(std::strtoul(env, nullptr, 10));
 
   for (const auto& backend : nirbija::make_all_backends()) {
+    if (limit > 0 && total >= limit) break;
     const char* label = "";
     switch (backend->format()) {
       case nirbija::PluginFormat::Lv2: label = "LV2"; break;
@@ -41,13 +47,14 @@ int main() {
     const auto found = backend->scan();
     std::printf("%s: %zu plugin(s)\n", label, found.size());
     for (const auto& desc : found) {
+      if (limit > 0 && total >= limit) break;
       std::printf("  %-38s %-11s %2d in %2d out  %-28s %s\n", desc.name.c_str(),
                   kind_name(desc.kind), desc.audio_inputs, desc.audio_outputs,
                   desc.category.empty() ? "-" : desc.category.c_str(),
                   desc.uid.c_str());
       ++by_kind[kind_name(desc.kind)];
+      ++total;
     }
-    total += found.size();
   }
 
   std::printf("\nby kind:\n");

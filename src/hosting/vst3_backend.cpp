@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #include "hosting/vst3_backend.h"
 
 #include <dlfcn.h>
@@ -13,9 +15,12 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <functional>
 #include <vector>
 
 #include "core/rt_queue.h"
+#include "hosting/common.h"
+#include "hosting/gui_resize.h"
 
 // Only the raw interface headers, never the SDK sources: a host needs the
 // contracts, not Steinberg's convenience classes. Without INIT_CLASS_IID the
@@ -306,7 +311,9 @@ tresult PLUGIN_API HostApplication::createInstance(TUID cid, TUID iid, void** ob
 // several queue pointers at once, so a single view that switches identity under
 // them would report the wrong parameter.
 struct ParamChanges : Vst::IParameterChanges {
-  static constexpr int32 kMaxParams = 64;
+  // Distinct parameters per block. A knob dragged across a UI tick is one
+  // entry (edits coalesce); 256 is a whole bank of them moving at once.
+  static constexpr int32 kMaxParams = 256;
 
   struct Queue : Vst::IParamValueQueue {
     Vst::ParamID id = 0;
@@ -481,7 +488,11 @@ struct EventList : Vst::IEventList {
 // descriptors and timers and expect to be driven, exactly like CLAP. This is
 // both the IPlugFrame the view resizes through and the IRunLoop it registers
 // its plumbing with, pumped from the GUI idle tick.
+class Vst3Gui;
+
 struct RunLoopFrame : IPlugFrame, Linux::IRunLoop {
+  Vst3Gui* owner = nullptr;
+
   struct Timer {
     Linux::ITimerHandler* handler;
     uint64 interval_ms;
@@ -505,12 +516,10 @@ struct RunLoopFrame : IPlugFrame, Linux::IRunLoop {
     return kNoInterface;
   }
 
-  // The window follows the plugin's child window through adoptChild, so the
-  // request only needs acknowledging.
-  tresult PLUGIN_API resizeView(IPlugView* view, ViewRect* size) override {
-    if (view != nullptr && size != nullptr) view->onSize(size);
-    return kResultOk;
-  }
+  // The plugin wants its window this big. The contract is: resize the host
+  // window, then - in this same call - onSize with what it got. The window is
+  // the UI's; see Vst3Gui::request_resize for how it is asked.
+  tresult PLUGIN_API resizeView(IPlugView* view, ViewRect* size) override;
 
   tresult PLUGIN_API registerEventHandler(Linux::IEventHandler* handler,
                                           Linux::FileDescriptor fd) override {
@@ -582,6 +591,7 @@ using ModuleExitProc = bool (*)();
 class Vst3Module {
  public:
   static std::shared_ptr<Vst3Module> open(const fs::path& binary) {
+    hosting::module_open_count().fetch_add(1, std::memory_order_relaxed);
     void* handle = dlopen(binary.c_str(), RTLD_LOCAL | RTLD_NOW);
     if (handle == nullptr) return nullptr;
 
@@ -760,6 +770,7 @@ class Vst3Instance : public PluginInstance {
     read_bus_layout();
 
     sample_rate_hint_ = sample_rate;
+    max_block_ = max_block_frames;
     build_midi_map_cache();
     allocate_buffers(max_block_frames);
 
@@ -780,16 +791,22 @@ class Vst3Instance : public PluginInstance {
     }
     processor_->setProcessing(true);
     refresh_latency();
-    active_ = true;
+    active_.store(true, std::memory_order_release);
     return true;
   }
 
   void deactivate() override {
     if (!active_) return;
+    // process() returns at once while this is clear, so once the block counter
+    // has moved past a block that saw it (or is not moving at all) the audio
+    // thread is out of the plugin and setProcessing(false) is safe.
+    active_.store(false, std::memory_order_release);
+    hosting::wait_for_audio_thread(process_generation_, [this](uint64_t seen) {
+      return process_generation_.load(std::memory_order_acquire) >= seen + 2;
+    });
     processor_->setProcessing(false);
     component_->setActive(false);
     deactivate_buses();
-    active_ = false;
   }
 
   void deactivate_buses() {
@@ -814,16 +831,15 @@ class Vst3Instance : public PluginInstance {
 
   void process(const float* const* inputs, float* const* outputs,
                uint32_t frames) override {
-    if (!active_) return;
+    process_generation_.fetch_add(1, std::memory_order_release);
+    if (!active_.load(std::memory_order_acquire)) return;
 
     // Feed the main input bus, duplicating the last strip channel when the
     // plugin is wider, exactly as the other backends do.
     if (!input_buses_.empty()) {
       auto& main = bus_channel_ptrs_in_[0];
-      for (size_t ch = 0; ch < main.size(); ++ch) {
-        const int source = std::min(static_cast<int>(ch), strip_channels_ - 1);
-        std::copy_n(inputs[source], frames, main[ch]);
-      }
+      hosting::copy_strip_inputs(inputs, strip_channels_, main.data(), main.size(),
+                                 frames);
     }
 
     // Edits queued by the UI become this block's parameter changes. Capacity
@@ -831,48 +847,45 @@ class Vst3Instance : public PluginInstance {
     // throw it away, and a discarded note-off is a stuck note.
     param_changes_.count = 0;
     ParamEdit edit;
-    while (param_edits_.pop(edit)) param_changes_.add(edit.id, edit.value);
+    while (param_edits_.pop(edit)) add_param_change(edit.id, edit.value);
 
     events_.count = 0;
     MidiEvent midi;
     while (events_.count < EventList::kMaxEvents && pending_midi_.pop(midi)) {
-      const uint8_t status = midi.data[0] & 0xf0;
-      const int32 channel = midi.data[0] & 0x0f;
+      const hosting::MidiMessage message = hosting::decode_midi(midi);
       Vst::Event& event = events_.events[events_.count];
       std::memset(&event, 0, sizeof(event));
       event.sampleOffset = static_cast<int32>(midi.frame);
-      if (status == 0x90 && midi.data[2] > 0) {
+      using Kind = hosting::MidiMessage::Kind;
+      if (message.kind == Kind::NoteOn) {
         event.type = Vst::Event::kNoteOnEvent;
-        event.noteOn.channel = static_cast<int16>(channel);
-        event.noteOn.pitch = midi.data[1];
-        event.noteOn.velocity = midi.data[2] / 127.0f;
+        event.noteOn.channel = static_cast<int16>(message.channel);
+        event.noteOn.pitch = message.key;
+        event.noteOn.velocity = static_cast<float>(message.value);
         event.noteOn.noteId = -1;
         ++events_.count;
-      } else if (status == 0x80 || (status == 0x90 && midi.data[2] == 0)) {
+      } else if (message.kind == Kind::NoteOff) {
         event.type = Vst::Event::kNoteOffEvent;
-        event.noteOff.channel = static_cast<int16>(channel);
-        event.noteOff.pitch = midi.data[1];
+        event.noteOff.channel = static_cast<int16>(message.channel);
+        event.noteOff.pitch = message.key;
         event.noteOff.velocity = 0.0f;
         event.noteOff.noteId = -1;
         ++events_.count;
-      } else if (status == 0xb0 || status == 0xe0 || status == 0xd0) {
+      } else if (message.kind == Kind::Controller ||
+                 message.kind == Kind::PitchBend ||
+                 message.kind == Kind::ChannelPressure) {
         // VST3 takes no raw CC: expression arrives as parameter changes,
         // through the plugin's own controller-to-parameter map cached at
         // activate. Without this, sustain and pitch bend die at the door.
         int16 controller = 0;
-        double normal = 0.0;
-        if (status == 0xb0) {
-          controller = midi.data[1];
-          normal = midi.data[2] / 127.0;
-        } else if (status == 0xe0) {
+        if (message.kind == Kind::Controller)
+          controller = message.controller;
+        else if (message.kind == Kind::PitchBend)
           controller = Vst::kPitchBend;
-          normal = ((midi.data[2] << 7) | midi.data[1]) / 16383.0;
-        } else {
+        else
           controller = Vst::kAfterTouch;
-          normal = midi.data[1] / 127.0;
-        }
-        const Vst::ParamID mapped = midi_map_cache_[channel][controller];
-        if (mapped != Vst::kNoParamId) param_changes_.add(mapped, normal);
+        const Vst::ParamID mapped = midi_map_cache_[message.channel][controller];
+        if (mapped != Vst::kNoParamId) add_param_change(mapped, message.value);
       }
     }
 
@@ -907,10 +920,8 @@ class Vst3Instance : public PluginInstance {
 
     if (!output_buses_.empty()) {
       auto& main = bus_channel_ptrs_out_[0];
-      for (int ch = 0; ch < strip_channels_; ++ch) {
-        const size_t source = std::min(static_cast<size_t>(ch), main.size() - 1);
-        std::copy_n(main[source], frames, outputs[ch]);
-      }
+      hosting::copy_strip_outputs(main.data(), main.size(), outputs,
+                                  strip_channels_, frames);
     }
 
     // Whatever the plugin emitted becomes MIDI for the inserts below it.
@@ -918,23 +929,29 @@ class Vst3Instance : public PluginInstance {
     for (int32 i = 0; i < out_events_.count &&
                       produced_count_ < static_cast<int>(kMaxProduced); ++i) {
       const Vst::Event& event = out_events_.events[i];
-      MidiEvent& out = produced_[produced_count_];
-      out.frame = static_cast<uint32_t>(std::max<int32>(0, event.sampleOffset));
-      out.size = 3;
+      const uint32_t frame =
+          static_cast<uint32_t>(std::max<int32>(0, event.sampleOffset));
       if (event.type == Vst::Event::kNoteOnEvent && event.noteOn.pitch >= 0) {
-        out.data[0] = static_cast<uint8_t>(0x90 | (event.noteOn.channel & 0x0f));
-        out.data[1] = static_cast<uint8_t>(event.noteOn.pitch);
-        out.data[2] = static_cast<uint8_t>(
-            std::clamp(event.noteOn.velocity, 0.0f, 1.0f) * 127.0f);
-        ++produced_count_;
+        produced_[produced_count_++] = hosting::make_note_event(
+            true, event.noteOn.channel, event.noteOn.pitch,
+            event.noteOn.velocity, frame);
       } else if (event.type == Vst::Event::kNoteOffEvent &&
                  event.noteOff.pitch >= 0) {
-        out.data[0] = static_cast<uint8_t>(0x80 | (event.noteOff.channel & 0x0f));
-        out.data[1] = static_cast<uint8_t>(event.noteOff.pitch);
-        out.data[2] = 0;
-        ++produced_count_;
+        produced_[produced_count_++] = hosting::make_note_event(
+            false, event.noteOff.channel, event.noteOff.pitch, 0.0, frame);
       }
     }
+  }
+
+  // One parameter into this block's changes, saying so once when the block
+  // holds more distinct parameters than the list can carry.
+  void add_param_change(Vst::ParamID id, Vst::ParamValue value) {
+    if (param_changes_.add(id, value)) return;
+    if (!param_changes_full_logged_.exchange(true, std::memory_order_relaxed))
+      std::fprintf(stderr,
+                   "vst3: %s changed more than %d parameters in one block; "
+                   "the rest were dropped\n",
+                   desc_.name.c_str(), ParamChanges::kMaxParams);
   }
 
   size_t take_midi_output(MidiEvent* out, size_t capacity) override {
@@ -968,28 +985,72 @@ class Vst3Instance : public PluginInstance {
   void set_parameter(uint32_t id, double value) override {
     const double clamped = std::clamp(value, 0.0, 1.0);
     // The controller drives what an editor displays; the queue carries the same
-    // edit to the processor on its next block.
+    // edit to the processor on its next block. With no block coming - see
+    // host_idle - the queue is flushed from there instead.
     if (controller_ != nullptr) controller_->setParamNormalized(id, clamped);
-    param_edits_.push({id, clamped});
+    if (!param_edits_.push({id, clamped}))
+      param_drops_.fetch_add(1, std::memory_order_relaxed);
   }
 
+  // Both halves of the plugin, since VST3 keeps them apart: the component's
+  // state is the sound, the controller's is what its editor remembers (a
+  // zoom, a page, a selected tab). Old sessions hold the component alone, as
+  // a bare blob; the header tells the two apart.
+  //   "nvst3" 0x00 0x01 | u32 component length | component | controller
   std::vector<uint8_t> save_state() const override {
     std::vector<uint8_t> blob;
     if (component_ == nullptr) return blob;
-    MemStream stream(&blob);
+    std::vector<uint8_t> component;
+    MemStream stream(&component);
     component_->getState(&stream);
+    if (component.empty()) return blob;
+
+    std::vector<uint8_t> controller;
+    if (controller_ != nullptr) {
+      MemStream controller_stream(&controller);
+      if (controller_->getState(&controller_stream) != kResultOk) controller.clear();
+    }
+
+    blob.insert(blob.end(), kStateMagic, kStateMagic + kStateMagicSize);
+    const uint32_t length = static_cast<uint32_t>(component.size());
+    for (int shift = 0; shift < 32; shift += 8)
+      blob.push_back(static_cast<uint8_t>((length >> shift) & 0xff));
+    blob.insert(blob.end(), component.begin(), component.end());
+    blob.insert(blob.end(), controller.begin(), controller.end());
     return blob;
   }
 
   bool load_state(const std::vector<uint8_t>& blob) override {
     if (component_ == nullptr || blob.empty()) return false;
-    std::vector<uint8_t> copy = blob;
-    MemStream stream(&copy);
+
+    std::vector<uint8_t> component;
+    std::vector<uint8_t> controller;
+    const bool framed =
+        blob.size() >= kStateMagicSize + 4 &&
+        std::memcmp(blob.data(), kStateMagic, kStateMagicSize) == 0;
+    if (framed) {
+      uint32_t length = 0;
+      for (int i = 0; i < 4; ++i)
+        length |= static_cast<uint32_t>(blob[kStateMagicSize + i]) << (8 * i);
+      const size_t start = kStateMagicSize + 4;
+      // A truncated file must not turn into a read past the end.
+      if (length > blob.size() - start) return false;
+      component.assign(blob.begin() + start, blob.begin() + start + length);
+      controller.assign(blob.begin() + start + length, blob.end());
+    } else {
+      component = blob;
+    }
+    if (component.empty()) return false;
+
+    MemStream stream(&component);
     if (component_->setState(&stream) != kResultOk) return false;
     if (controller_ != nullptr) {
-      MemStream replay(&copy);
-      replay.cursor = 0;
+      MemStream replay(&component);
       controller_->setComponentState(&replay);
+      if (!controller.empty()) {
+        MemStream own(&controller);
+        controller_->setState(&own);
+      }
     }
     return true;
   }
@@ -1008,7 +1069,60 @@ class Vst3Instance : public PluginInstance {
                    std::memory_order_relaxed);
   }
 
-  void host_idle() override { refresh_latency(); }
+  void host_idle() override {
+    if (processor_ == nullptr) return;
+
+    // Latency or I/O changed: the plugin may only change either while
+    // inactive, so it is taken through setActive(false), its buses and
+    // latency read again, and brought back - same instance, same state.
+    if (restart_requested_.exchange(false, std::memory_order_acq_rel) &&
+        active_.load(std::memory_order_acquire)) {
+      deactivate();
+      activate(sample_rate_hint_, max_block_);
+    }
+    refresh_latency();
+
+    // Active, but nothing is calling process(): no audio server, or a strip
+    // out of the graph. Edits would sit in the queue until it overflowed. The
+    // interface sanctions a process() call with no samples for exactly this -
+    // "flush parameter changes" - and it is safe from here as long as the
+    // audio thread is not also in process(): a whole idle interval with the
+    // block counter still says it is not, and the graph is only changed from
+    // this same thread, so it cannot start on us in between.
+    const uint64_t generation = process_generation_.load(std::memory_order_acquire);
+    if (active_.load(std::memory_order_acquire) &&
+        generation == idle_seen_generation_ && param_edits_.size() > 0)
+      flush_parameters();
+    idle_seen_generation_ = generation;
+
+    const uint32_t drops = param_drops_.load(std::memory_order_relaxed);
+    if (drops > 0 && !param_drops_logged_) {
+      param_drops_logged_ = true;
+      std::fprintf(stderr,
+                   "vst3: %s dropped %u parameter change(s): the queue to the "
+                   "audio thread was full\n",
+                   desc_.name.c_str(), drops);
+    }
+  }
+
+  // process() with numSamples = 0: the pending parameter changes land, no
+  // audio moves. Main thread, only while the audio thread is provably idle.
+  void flush_parameters() {
+    param_changes_.count = 0;
+    ParamEdit edit;
+    while (param_edits_.pop(edit)) add_param_change(edit.id, edit.value);
+    if (param_changes_.count == 0) return;
+
+    Vst::ProcessData data{};
+    data.processMode = Vst::kRealtime;
+    data.symbolicSampleSize = Vst::kSample32;
+    data.numSamples = 0;
+    data.numInputs = 0;
+    data.numOutputs = 0;
+    data.inputParameterChanges = &param_changes_;
+    data.outputParameterChanges = &out_param_changes_;
+    processor_->process(data);
+  }
 
   bool take_state_dirty() override {
     return state_dirty_.exchange(false, std::memory_order_acq_rel);
@@ -1126,18 +1240,35 @@ class Vst3Instance : public PluginInstance {
   std::shared_ptr<Vst3Module> module_;
   HostApplication host_;
 
-  struct Handler : Vst::IComponentHandler {
+  struct Handler : Vst::IComponentHandler, Vst::IComponentHandler2 {
     Vst3Instance* owner = nullptr;
     uint32 PLUGIN_API addRef() override { return 1; }
     uint32 PLUGIN_API release() override { return 1; }
     tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
       if (same_iid(iid, FUnknown_iid) || same_iid(iid, Vst::IComponentHandler_iid)) {
-        *obj = this;
+        *obj = static_cast<Vst::IComponentHandler*>(this);
+        return kResultOk;
+      }
+      if (same_iid(iid, Vst::IComponentHandler2_iid)) {
+        *obj = static_cast<Vst::IComponentHandler2*>(this);
         return kResultOk;
       }
       *obj = nullptr;
       return kNoInterface;
     }
+
+    // IComponentHandler2. setDirty is the one that matters: it is how a VST3
+    // says "my state changed, ask me for it again" - a preset loaded from its
+    // own browser reaches the session file through nothing else.
+    tresult PLUGIN_API setDirty(TBool state) override {
+      if (state) owner->state_dirty_.store(true, std::memory_order_release);
+      return kResultOk;
+    }
+    // The editor is opened by the user, not by the plugin.
+    tresult PLUGIN_API requestOpenEditor(FIDString) override { return kNotImplemented; }
+    // No undo history to group edits into.
+    tresult PLUGIN_API startGroupEdit() override { return kResultOk; }
+    tresult PLUGIN_API finishGroupEdit() override { return kResultOk; }
     tresult PLUGIN_API beginEdit(Vst::ParamID) override { return kResultOk; }
     // The editor's own knob moves arrive here and go to the DSP the same way
     // the generic editor's do. They are also the only sign the host gets that
@@ -1148,16 +1279,22 @@ class Vst3Instance : public PluginInstance {
       return kResultOk;
     }
     tresult PLUGIN_API endEdit(Vst::ParamID) override { return kResultOk; }
-    // VST3 has no "my state changed" callback; a restart request is the
-    // nearest thing a plugin sends after loading a preset of its own.
+    // Values or titles moved wholesale: something was loaded, and the state
+    // is worth asking for again (older plugins say this instead of setDirty).
+    // Latency or I/O: those may only change while inactive, so the plugin is
+    // asking to be taken down and brought back, which host_idle does.
     tresult PLUGIN_API restartComponent(int32 flags) override {
       if (flags & (Vst::kParamValuesChanged | Vst::kParamTitlesChanged |
                    Vst::kReloadComponent))
         owner->state_dirty_.store(true, std::memory_order_release);
-      owner->refresh_latency();
+      if (flags & (Vst::kLatencyChanged | Vst::kIoChanged | Vst::kReloadComponent))
+        owner->restart_requested_.store(true, std::memory_order_release);
       return kResultOk;
     }
   } handler_;
+
+  static constexpr uint8_t kStateMagic[] = {'n', 'v', 's', 't', '3', 0x00, 0x01};
+  static constexpr size_t kStateMagicSize = sizeof(kStateMagic);
 
   Vst::IComponent* component_ = nullptr;
   Vst::IEditController* controller_ = nullptr;
@@ -1166,12 +1303,19 @@ class Vst3Instance : public PluginInstance {
   bool component_inited_ = false;
   bool controller_inited_ = false;
   bool controller_handler_set_ = false;
-  bool active_ = false;
+  std::atomic<bool> active_{false};
   bool has_event_input_ = false;
   int strip_channels_ = 2;
   double sample_rate_hint_ = 48000.0;
+  uint32_t max_block_ = 0;
   std::atomic<uint32_t> latency_{0};
   std::atomic<bool> state_dirty_{false};
+  std::atomic<bool> restart_requested_{false};
+  std::atomic<uint64_t> process_generation_{0};
+  uint64_t idle_seen_generation_ = 0;
+  std::atomic<uint32_t> param_drops_{0};
+  bool param_drops_logged_ = false;
+  std::atomic<bool> param_changes_full_logged_{false};
 
   std::vector<int32> input_buses_, output_buses_;
   std::vector<std::vector<std::vector<float>>> bus_store_in_, bus_store_out_;
@@ -1200,10 +1344,56 @@ class Vst3Instance : public PluginInstance {
 
 // --- editor ------------------------------------------------------------------
 
-class Vst3Gui : public PluginGui {
+class Vst3Gui : public PluginGui, public hosting::ResizablePluginGui {
  public:
-  explicit Vst3Gui(Vst3Instance* owner) : owner_(owner) {}
+  explicit Vst3Gui(Vst3Instance* owner) : owner_(owner) { frame_.owner = this; }
   ~Vst3Gui() override { detach(); }
+
+  // --- hosting::ResizablePluginGui ---
+  // How the window that embeds the editor takes part in resizing.
+  //
+  // The plugin's side: IPlugFrame::resizeView wants the host window resized
+  // and onSize called in the same call stack. With a handler installed that
+  // is what happens: the handler resizes the window to the requested size
+  // (adjusting it if it must) and returns true; onSize follows with the size
+  // it settled on. Without one, the request is recorded for
+  // take_resize_request() and onSize is called with the requested size
+  // anyway, so an unwired editor still lays out.
+  void set_resize_handler(ResizeHandler handler) override {
+    resize_handler_ = std::move(handler);
+  }
+
+  // The last plugin-initiated resize nobody handled, once.
+  bool take_resize_request(int* width, int* height) override {
+    if (!pending_resize_) return false;
+    pending_resize_ = false;
+    *width = pending_width_;
+    *height = pending_height_;
+    return true;
+  }
+
+  // The user's side: whether the window may offer a resize grip at all, and
+  // what to do while they drag - checkSizeConstraint lets the plugin snap the
+  // rectangle to one it can draw; the window resizes to that and then calls
+  // resized() so the view lays out.
+  bool resizable() const override {
+    return view_ != nullptr && view_->canResize() == kResultTrue;
+  }
+
+  bool constrain_size(int* width, int* height) const override {
+    if (view_ == nullptr) return false;
+    ViewRect rect{0, 0, *width, *height};
+    if (view_->checkSizeConstraint(&rect) != kResultOk) return false;
+    *width = rect.getWidth();
+    *height = rect.getHeight();
+    return true;
+  }
+
+  void resized(int width, int height) override {
+    if (view_ == nullptr || width <= 0 || height <= 0) return;
+    ViewRect rect{0, 0, width, height};
+    view_->onSize(&rect);
+  }
 
   bool attach(uintptr_t parent_window) override {
     Vst::IEditController* controller = owner_->controller();
@@ -1260,10 +1450,39 @@ class Vst3Gui : public PluginGui {
   }
 
  private:
+  friend struct RunLoopFrame;
+
+  // resizeView, on this editor's view.
+  tresult request_resize(IPlugView* view, ViewRect* size) {
+    if (view == nullptr || size == nullptr) return kInvalidArgument;
+    if (view != view_) return kInvalidArgument;
+    int width = size->getWidth();
+    int height = size->getHeight();
+    if (resize_handler_) {
+      if (!resize_handler_(&width, &height)) return kResultFalse;
+    } else {
+      pending_resize_ = true;
+      pending_width_ = width;
+      pending_height_ = height;
+    }
+    ViewRect rect{0, 0, width, height};
+    view_->onSize(&rect);
+    return kResultOk;
+  }
+
   Vst3Instance* owner_;
   IPlugView* view_ = nullptr;
   RunLoopFrame frame_;
+  ResizeHandler resize_handler_;
+  bool pending_resize_ = false;
+  int pending_width_ = 0;
+  int pending_height_ = 0;
 };
+
+tresult PLUGIN_API RunLoopFrame::resizeView(IPlugView* view, ViewRect* size) {
+  if (owner == nullptr) return kNotInitialized;
+  return owner->request_resize(view, size);
+}
 
 std::unique_ptr<PluginGui> Vst3Instance::create_gui() {
   if (controller_ == nullptr) return nullptr;
@@ -1278,9 +1497,24 @@ std::vector<fs::path> vst3_search_paths() {
   return paths;
 }
 
+// The architecture folder inside a bundle, as the VST3 packaging spec names
+// it for the machine this host was built for.
+constexpr const char* kBundleArch =
+#if defined(__x86_64__)
+    "x86_64-linux";
+#elif defined(__aarch64__)
+    "aarch64-linux";
+#elif defined(__i386__)
+    "i386-linux";
+#elif defined(__arm__)
+    "armv7l-linux";
+#else
+#error "unknown architecture: name its VST3 bundle folder here"
+#endif
+
 // Bundle dir -> the shared object inside it, empty when the layout is wrong.
 fs::path bundle_binary(const fs::path& bundle) {
-  const fs::path dir = bundle / "Contents" / "x86_64-linux";
+  const fs::path dir = bundle / "Contents" / kBundleArch;
   std::error_code ec;
   for (const auto& entry : fs::directory_iterator(dir, ec))
     if (entry.path().extension() == ".so") return entry.path();
@@ -1293,6 +1527,7 @@ class Vst3Backend : public PluginBackend {
 
   std::vector<PluginDescriptor> scan() override {
     std::vector<PluginDescriptor> found;
+    hosting::ScanCache cache("vst3");
     for (const fs::path& dir : vst3_search_paths()) {
       std::error_code ec;
       if (!fs::is_directory(dir, ec)) continue;
@@ -1302,15 +1537,26 @@ class Vst3Backend : public PluginBackend {
       fs::recursive_directory_iterator it(dir, ec), end;
       for (; !ec && it != end; it.increment(ec)) {
         if (it->path().extension() != ".vst3") continue;
-        scan_bundle(it->path(), found);
         it.disable_recursion_pending();
+        // The cache is keyed on the bundle but stamped from the binary inside
+        // it: replacing the .so in place moves the file's mtime, not the
+        // folder's.
+        const fs::path binary = bundle_binary(it->path());
+        if (binary.empty()) continue;
+        std::vector<PluginDescriptor> here;
+        if (!cache.lookup(it->path().string(), binary, &here)) {
+          scan_bundle(it->path(), here);
+          cache.store(it->path().string(), binary, here);
+        }
+        found.insert(found.end(), here.begin(), here.end());
       }
     }
+    cache.save();
     return found;
   }
 
   std::unique_ptr<PluginInstance> instantiate(const PluginDescriptor& desc) override {
-    std::shared_ptr<Vst3Module> module = module_for(desc.path);
+    std::shared_ptr<Vst3Module> module = module_for(desc.path, true);
     if (module == nullptr) return nullptr;
 
     // The uid stores the class id as hex, factory order being unstable across
@@ -1340,21 +1586,19 @@ class Vst3Backend : public PluginBackend {
   }
 
  private:
-  std::shared_ptr<Vst3Module> module_for(const std::string& bundle) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = modules_.find(bundle);
-    if (it != modules_.end())
-      if (std::shared_ptr<Vst3Module> alive = it->second.lock()) return alive;
-
-    const fs::path binary = bundle_binary(bundle);
-    if (binary.empty()) return nullptr;
-    std::shared_ptr<Vst3Module> module = Vst3Module::open(binary);
-    if (module != nullptr) modules_[bundle] = module;
-    return module;
+  std::shared_ptr<Vst3Module> module_for(const std::string& bundle, bool pin) {
+    return modules_.get(
+        bundle,
+        [&bundle]() -> std::shared_ptr<Vst3Module> {
+          const fs::path binary = bundle_binary(bundle);
+          if (binary.empty()) return nullptr;
+          return Vst3Module::open(binary);
+        },
+        pin);
   }
 
   void scan_bundle(const fs::path& bundle, std::vector<PluginDescriptor>& out) {
-    std::shared_ptr<Vst3Module> module = module_for(bundle.string());
+    std::shared_ptr<Vst3Module> module = module_for(bundle.string(), false);
     if (module == nullptr) return;
 
     IPluginFactory* factory = module->factory();
@@ -1412,8 +1656,7 @@ class Vst3Backend : public PluginBackend {
       desc.kind = PluginKind::Effect;
   }
 
-  std::mutex mutex_;
-  std::map<std::string, std::weak_ptr<Vst3Module>> modules_;
+  hosting::ModuleCache<Vst3Module> modules_;
 };
 
 }  // namespace

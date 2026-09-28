@@ -1,4 +1,5 @@
 pragma ComponentBehavior: Bound
+// SPDX-License-Identifier: GPL-3.0-only
 
 import QtQuick
 import QtQuick.Controls.Basic
@@ -18,7 +19,7 @@ import Nirbija
 // The window glows in the colour of what the looper is doing: red while it
 // writes, green while it plays, yellow while it counts in, as bright as the
 // loop is loud. Half seen across a dark stage, that is the whole state.
-Popup {
+EditorPopup {
     id: root
 
     property int targetRow: -1
@@ -83,9 +84,6 @@ Popup {
     property bool mapping: false
     property int waitingParam: -1
     property var mapped: ({})
-    // Set once, the first time this ever opens - after that the popup stays
-    // wherever it was last dragged, the same as a real tool window would.
-    property bool positioned: false
 
     // Parameter ids, mirrored from LooperInstance.
     readonly property int pRecord: 0
@@ -164,101 +162,31 @@ Popup {
     // A row that outgrows this width should look cramped, not spill buttons
     // out past the panel and over the mixer behind it.
     clip: true
-    // Not modal: the mixer behind it stays live, so a fader or the transport
-    // is still reachable with this open - the whole point of it being a tool
-    // window rather than a dialog. Dragging the empty background moves it;
-    // see the DragHandler below.
-    modal: false
-    padding: Skin.spacingL
-    closePolicy: (root.mapping || Mixer.learning)
-                 ? Popup.NoAutoClose
-                 : Popup.CloseOnEscape
-
-    background: Rectangle {
-        gradient: Gradient {
-            GradientStop { position: 0.0; color: Qt.lighter(Skin.popup, 1.08) }
-            GradientStop { position: 1.0; color: Skin.popup }
-        }
-        border.width: 1
-        border.color: Skin.border
-        radius: Skin.radiusL
-        clip: true
-
-        // The glow: light under a door, in the state's colour, as bright as
-        // the loop is loud. Recording keeps a floor so a silent take still
-        // shows the tape is rolling; counting in breathes with the click.
-        Rectangle {
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.bottom: parent.bottom
-            height: parent.height * 0.4
-            radius: parent.radius
-            gradient: Gradient {
-                GradientStop { position: 0.0; color: "transparent" }
-                GradientStop { position: 1.0; color: root.stateHue }
-            }
-            opacity: root.countBeats > 0 || root.armed || root.punchingOut ? 0.22
-                   : root.writing ? Math.max(0.14, Math.min(0.32, root.loopLevel * 0.5))
-                   : root.hasAudio && root.playing ? Math.min(0.32, root.loopLevel * 0.5)
-                   : 0
-            Behavior on opacity { NumberAnimation { duration: 120 } }
-        }
-
-        // Empty chrome is not a handler on its own, so without this a press
-        // on the padding falls through onto the strip behind - and, now that
-        // the popup can sit anywhere, doubles as how it moves.
-        HoverHandler {}
-        TapHandler {}
-        DragHandler {
-            target: null
-            grabPermissions: PointerHandler.TakeOverForbidden
-            onCentroidChanged: if (active) {
-                const nx = root.x + centroid.position.x - centroid.pressPosition.x
-                const ny = root.y + centroid.position.y - centroid.pressPosition.y
-                const maxX = Overlay.overlay
-                    ? Math.max(0, Overlay.overlay.width - root.width) : nx
-                const maxY = Overlay.overlay
-                    ? Math.max(0, Overlay.overlay.height - root.height) : ny
-                root.x = Math.max(0, Math.min(nx, maxX))
-                root.y = Math.max(0, Math.min(ny, maxY))
-            }
-        }
-        WheelHandler {
-            acceptedModifiers: Qt.NoModifier
-            onWheel: event => event.accepted = true
-        }
-        WheelHandler {
-            acceptedModifiers: Qt.ShiftModifier
-            onWheel: event => event.accepted = true
-        }
-    }
-
-    enter: Transition {
-        NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Skin.fast }
-    }
+    // The chrome, the glow and the drag are EditorPopup's; what the glow
+    // says is this editor's.
+    holdOpen: root.mapping || Mixer.learning
+    glowHue: root.stateHue
+    glowOpacity: root.countBeats > 0 || root.armed || root.punchingOut ? 0.22
+                 : root.writing ? Math.max(0.14, Math.min(0.32, root.loopLevel * 0.5))
+                 : root.hasAudio && root.playing ? Math.min(0.32, root.loopLevel * 0.5)
+                 : 0
 
     function openFor(row, slot) {
         root.targetRow = row
         root.targetSlot = slot
         root.refreshAll()
-        if (!root.positioned) {
-            // Clamped: opened before the window has its size, the centre of
-            // a zero-sized overlay is off the top-left corner.
-            root.x = Math.max(0, Math.round((Overlay.overlay.width - root.width) / 2))
-            root.y = Math.max(0, Math.round((Overlay.overlay.height - root.height) / 2))
-            root.positioned = true
-        }
+        root.place()
         root.open()
     }
 
-    onOpened: {
-        positionTimer.start()
-        waveformTimer.start()
-    }
-    onClosed: {
-        positionTimer.stop()
-        waveformTimer.stop()
-        root.stopMapping()
+    onClosed: root.stopMapping()
+
+    // Two lists of the same length, element by element.
+    function sameList(a, b) {
+        if (a.length !== b.length) return false
+        for (let i = 0; i < a.length; ++i)
+            if (a[i] !== b[i]) return false
+        return true
     }
 
     function isMapped(id) {
@@ -311,21 +239,10 @@ Popup {
         parent: Overlay.overlay
     }
 
-    // A ring in the corner of anything bound to a knob - the same ring the
-    // bars draw for themselves.
-    component MapDot: Rectangle {
+    component MapDot: MapRing {
         required property int param
-        anchors.right: parent.right
-        anchors.top: parent.top
-        anchors.margins: Skin.spacingXS
-        width: Px.px(8)
-        height: Px.px(8)
-        radius: width / 2
-        z: 2
-        visible: root.isMapped(param)
-        color: "transparent"
-        border.width: Px.px(2)
-        border.color: root.waitingParam === param ? Skin.solo : Skin.focus
+        mapped: root.isMapped(param)
+        waiting: root.waitingParam === param
     }
 
     // The header's buttons: a little taller than the mixer's, the way the
@@ -377,8 +294,13 @@ Popup {
     }
 
     function refreshWaveform() {
-        root.peaks = Mixer.looperWaveform(root.targetRow, root.targetSlot, 160)
-        root.layers = Mixer.looperLayers(root.targetRow, root.targetSlot, 160)
+        // Assigned only when the tape actually changed: a new `peaks` is a
+        // hundred and sixty bars torn down and built again, and the loop
+        // mostly is not changing.
+        const peaks = Mixer.looperWaveform(root.targetRow, root.targetSlot, 160)
+        if (!root.sameList(peaks, root.peaks)) root.peaks = peaks
+        const layers = Mixer.looperLayers(root.targetRow, root.targetSlot, 160)
+        if (!root.sameList(layers, root.layers)) root.layers = layers
         root.trimStart = Mixer.looperTrimStart(root.targetRow, root.targetSlot)
         root.trimEnd = Mixer.looperTrimEnd(root.targetRow, root.targetSlot)
         root.fadeIn = Mixer.looperFadeIn(root.targetRow, root.targetSlot)
@@ -482,19 +404,20 @@ Popup {
         easing.type: Easing.OutQuad
     }
 
-    Timer {
-        id: positionTimer
-        interval: 40
-        repeat: true
-        onTriggered: root.refreshPosition()
-    }
-    Timer {
-        id: waveformTimer
-        interval: 400
-        repeat: true
-        onTriggered: {
-            root.refreshWaveform()
-            root.refreshTransport()
+    // On the mixer's 30 Hz beat rather than two timers of this popup's own.
+    // The playhead moves every tick; the tape and the transport state are
+    // read every twelfth (about 400 ms), since a loop's shape only changes
+    // while it is being written.
+    property int ticks: 0
+    Connections {
+        target: Mixer
+        enabled: root.visible
+        function onTick() {
+            root.refreshPosition()
+            if (++root.ticks % 12 === 0) {
+                root.refreshWaveform()
+                root.refreshTransport()
+            }
         }
     }
 
@@ -521,87 +444,46 @@ Popup {
             // from the channel meter beside it in the mixer, which is the
             // loop plus whatever is passing through live and does not say
             // whether the stack itself is getting hot.
-            Rectangle {
+            StageChip {
                 id: stageChip
                 Layout.preferredWidth: Px.px(300)
                 Layout.preferredHeight: Skin.buttonHeight + Px.px(6)
-                radius: Skin.radius
-                color: Skin.slotEmpty
-                border.width: 1
-                border.color: Qt.rgba(root.stateHue.r, root.stateHue.g, root.stateHue.b, 0.6)
-                property real pulse: 1
+                hue: root.stateHue
+                busy: root.writing || root.countBeats > 0 || root.armed || root.punchingOut
+                lit: root.hasAudio && root.playing
+                label: root.countBeats > 0 ? String(root.countBeats) : root.stageLabel
+                labelSize: root.countBeats > 0 ? Skin.fontXL : Skin.fontL
 
-                SequentialAnimation on pulse {
-                    running: root.writing || root.countBeats > 0 || root.armed || root.punchingOut
-                    loops: Animation.Infinite
-                    NumberAnimation { from: 1; to: 0.35; duration: 420; easing.type: Easing.InOutSine }
-                    NumberAnimation { from: 0.35; to: 1; duration: 420; easing.type: Easing.InOutSine }
+                Text {
+                    visible: root.loopClock.length > 0
+                    text: root.loopClock
+                    color: Skin.text
+                    font.pixelSize: Skin.fontL
+                    font.bold: true
+                    font.family: Skin.monoFamily
                 }
 
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: Skin.spacing
-                    anchors.rightMargin: Skin.spacing
-                    spacing: Skin.spacingS
-
-                    Rectangle {
-                        Layout.preferredWidth: Px.px(10)
-                        Layout.preferredHeight: Px.px(10)
-                        radius: width / 2
-                        color: root.stateHue
-                        opacity: root.writing || root.countBeats > 0 || root.armed || root.punchingOut
-                                 ? stageChip.pulse
-                               : root.hasAudio && root.playing ? 1 : 0.5
-                    }
-
-                    Text {
-                        text: root.countBeats > 0 ? root.countBeats : root.stageLabel
-                        color: root.stateHue
-                        font.pixelSize: root.countBeats > 0 ? Skin.fontXL : Skin.fontL
-                        font.bold: true
-                        font.letterSpacing: Px.px(1)
-                    }
-
-                    // Where the head is in the loop, bar.beat, so a player
-                    // reading the song's clock in the top bar reads the
-                    // loop's the same way.
-                    Text {
-                        visible: root.loopClock.length > 0
-                        text: root.loopClock
-                        color: Skin.text
-                        font.pixelSize: Skin.fontL
-                        font.bold: true
-                        font.family: Skin.monoFamily
-                    }
-
-                    Text {
-                        Layout.fillWidth: true
-                        visible: text.length > 0
-                        text: root.hasLoop ? root.lengthLabel(root.loopBeats)
-                            : wave.defining && wave.targetBeats > 0
-                                ? qsTr("→ %1").arg(root.lengthLabel(wave.targetBeats))
-                            : wave.defining ? qsTr("free") : ""
-                        color: Skin.textDim
-                        font.pixelSize: Skin.fontS
-                        font.family: Skin.monoFamily
-                        elide: Text.ElideRight
-                    }
-
-                    Meter {
-                        visible: root.hasAudio
-                        vertical: false
-                        showHold: true
-                        Layout.preferredWidth: Px.px(64)
-                        Layout.alignment: Qt.AlignVCenter
-                        position: root.loopLevel
-                        hold: root.loopLevelHold
-                    }
+                Text {
+                    Layout.fillWidth: true
+                    visible: text.length > 0
+                    text: root.hasLoop ? root.lengthLabel(root.loopBeats)
+                        : wave.defining && wave.targetBeats > 0
+                            ? qsTr("→ %1").arg(root.lengthLabel(wave.targetBeats))
+                        : wave.defining ? qsTr("free") : ""
+                    color: Skin.textDim
+                    font.pixelSize: Skin.fontS
+                    font.family: Skin.monoFamily
+                    elide: Text.ElideRight
                 }
 
-                HoverHandler { id: stageHover }
-                Tip {
-                    text: qsTr("What the tape is doing, where the head is in the loop as bar.beat, how long the loop is, and how hot the loop itself runs - apart from whatever is passing through live.")
-                    visible: stageHover.hovered
+                Meter {
+                    visible: root.hasAudio
+                    vertical: false
+                    showHold: true
+                    Layout.preferredWidth: Px.px(64)
+                    Layout.alignment: Qt.AlignVCenter
+                    position: root.loopLevel
+                    hold: root.loopLevelHold
                 }
             }
 
@@ -875,13 +757,17 @@ Popup {
                                 height: parent.height - 2 * Skin.spacingL
 
                                 Repeater {
-                                    model: root.peaks
+                                    // The count, not the list: the bars are
+                                    // built once and read their own bucket,
+                                    // so a new scan moves heights instead of
+                                    // rebuilding a hundred and sixty items.
+                                    model: root.peaks.length
 
                                     Rectangle {
                                         id: bar
-                                        required property real modelData
                                         required property int index
-                                        readonly property real peak: Math.min(1, modelData)
+                                        readonly property real peak:
+                                            Math.min(1, bar.index < root.peaks.length ? root.peaks[bar.index] : 0)
                                         // Which overdub pass most recently
                                         // touched this stretch - 0 for the
                                         // base take. Falls back to 0 if the
@@ -1174,157 +1060,70 @@ Popup {
                         // Trim handles: full-height, dragged to wherever the
                         // loop should start and stop, with a tab at the top
                         // that is easier to find than a hairline.
-                        component TrimHandle: Item {
-                            id: handle
-                            required property bool isStart
-                            property int atX: 0
-                            readonly property bool lit: dragHover.hovered || drag.active
-
-                            x: handle.atX - width / 2
-                            width: Px.px(14)
-                            height: wave.height
-
-                            Rectangle {
-                                anchors.horizontalCenter: parent.horizontalCenter
-                                anchors.top: parent.top
-                                anchors.bottom: parent.bottom
-                                width: Px.px(4)
-                                radius: Skin.radiusS
-                                color: handle.lit ? Skin.focus : Skin.accent
-                            }
-                            Rectangle {
-                                anchors.horizontalCenter: parent.horizontalCenter
-                                anchors.top: parent.top
-                                width: parent.width
-                                height: Px.px(10)
-                                radius: Skin.radiusS
-                                color: handle.lit ? Skin.focus : Skin.accent
-                            }
-                            Rectangle {
-                                anchors.horizontalCenter: parent.horizontalCenter
-                                anchors.bottom: parent.bottom
-                                width: parent.width
-                                height: Px.px(10)
-                                radius: Skin.radiusS
-                                color: handle.lit ? Skin.focus : Skin.accent
-                            }
-
-                            HoverHandler { id: dragHover; cursorShape: Qt.SizeHorCursor }
-                            Tip {
-                                text: handle.isStart
-                                      ? qsTr("Where the loop starts. Drag it in to trim the head.")
-                                      : qsTr("Where the loop ends. Drag it in to trim the tail.")
-                                visible: dragHover.hovered && !drag.active
-                            }
-
-                            DragHandler {
-                                id: drag
-                                target: null
-                                // Both axes, or a slightly vertical drag is a
-                                // better match for the fader sitting under
-                                // this popup and steals the grab mid-trim.
-                                xAxis.enabled: true
-                                yAxis.enabled: true
-                                grabPermissions: PointerHandler.CanTakeOverFromAnything
-                                                 | PointerHandler.ApprovesTakeOverByNothing
-                                onCentroidChanged: if (drag.active) {
-                                    const fraction = Math.max(0, Math.min(1,
-                                        (handle.x + handle.width / 2 + drag.centroid.position.x
-                                         - drag.centroid.pressPosition.x) / wave.width))
-                                    if (handle.isStart)
-                                        root.trimStart = Math.min(fraction, root.trimEnd - 0.02)
-                                    else
-                                        root.trimEnd = Math.max(fraction, root.trimStart + 0.02)
-                                    Mixer.setLooperTrim(root.targetRow, root.targetSlot,
-                                                        root.trimStart, root.trimEnd)
-                                }
-                            }
-                        }
 
                         TrimHandle {
                             isStart: true
                             atX: wave.trimStartX
                             visible: root.hasLoop
+                            height: wave.height
+                            span: wave.width
+                            start: root.trimStart
+                            end: root.trimEnd
+                            tip: qsTr("Where the loop starts. Drag it in to trim the head.")
+                            onMoved: (start, end) => {
+                                root.trimStart = start
+                                root.trimEnd = end
+                                Mixer.setLooperTrim(root.targetRow, root.targetSlot,
+                                                    root.trimStart, root.trimEnd)
+                            }
                         }
                         TrimHandle {
                             isStart: false
                             atX: wave.trimEndX
                             visible: root.hasLoop
+                            height: wave.height
+                            span: wave.width
+                            start: root.trimStart
+                            end: root.trimEnd
+                            tip: qsTr("Where the loop ends. Drag it in to trim the tail.")
+                            onMoved: (start, end) => {
+                                root.trimStart = start
+                                root.trimEnd = end
+                                Mixer.setLooperTrim(root.targetRow, root.targetSlot,
+                                                    root.trimStart, root.trimEnd)
+                            }
                         }
 
                         // Fade handles: small marks that only move between
                         // their own trim edge and the window's midpoint.
-                        component FadeHandle: Item {
-                            id: fadeHandle
-                            required property bool isIn
-                            property int atX: 0
-                            readonly property bool lit: fadeHover.hovered || fadeDrag.active
-
-                            x: fadeHandle.atX - width / 2
-                            anchors.verticalCenter: wave.verticalCenter
-                            width: Px.px(22)
-                            height: Px.px(22)
-
-                            Rectangle {
-                                anchors.centerIn: parent
-                                width: Px.px(12)
-                                height: Px.px(12)
-                                radius: width / 2
-                                color: fadeHandle.lit ? Skin.focus : Skin.solo
-                                Rectangle {
-                                    anchors.centerIn: parent
-                                    width: parent.width * 1.8
-                                    height: width
-                                    radius: width / 2
-                                    color: "transparent"
-                                    border.width: Px.px(2)
-                                    border.color: fadeHandle.lit ? Skin.focus : Skin.solo
-                                    opacity: 0.45
-                                }
-                            }
-
-                            HoverHandler { id: fadeHover; cursorShape: Qt.SizeHorCursor }
-                            Tip {
-                                text: fadeHandle.isIn
-                                      ? qsTr("Fade in. Drag it right and the loop swells from silence each time round.")
-                                      : qsTr("Fade out. Drag it left and the loop sinks to silence before the end.")
-                                visible: fadeHover.hovered && !fadeDrag.active
-                            }
-
-                            DragHandler {
-                                id: fadeDrag
-                                target: null
-                                xAxis.enabled: true
-                                yAxis.enabled: true
-                                grabPermissions: PointerHandler.CanTakeOverFromAnything
-                                                 | PointerHandler.ApprovesTakeOverByNothing
-                                onCentroidChanged: if (fadeDrag.active) {
-                                    const half = Math.max(1, wave.halfWindow)
-                                    const x = fadeHandle.x + fadeHandle.width / 2
-                                              + fadeDrag.centroid.position.x
-                                              - fadeDrag.centroid.pressPosition.x
-                                    if (fadeHandle.isIn) {
-                                        root.fadeIn = Math.max(0, Math.min(1,
-                                            (x - wave.trimStartX) / half))
-                                    } else {
-                                        root.fadeOut = Math.max(0, Math.min(1,
-                                            (wave.trimEndX - x) / half))
-                                    }
-                                    Mixer.setLooperFades(root.targetRow, root.targetSlot,
-                                                         root.fadeIn, root.fadeOut)
-                                }
-                            }
-                        }
 
                         FadeHandle {
                             isIn: true
                             atX: wave.fadeInX
                             visible: root.hasLoop
+                            anchors.verticalCenter: wave.verticalCenter
+                            trimStartX: wave.trimStartX
+                            trimEndX: wave.trimEndX
+                            tip: qsTr("Fade in. Drag it right and the loop swells from silence each time round.")
+                            onMoved: fraction => {
+                                root.fadeIn = fraction
+                                Mixer.setLooperFades(root.targetRow, root.targetSlot,
+                                                     root.fadeIn, root.fadeOut)
+                            }
                         }
                         FadeHandle {
                             isIn: false
                             atX: wave.fadeOutX
                             visible: root.hasLoop
+                            anchors.verticalCenter: wave.verticalCenter
+                            trimStartX: wave.trimStartX
+                            trimEndX: wave.trimEndX
+                            tip: qsTr("Fade out. Drag it left and the loop sinks to silence before the end.")
+                            onMoved: fraction => {
+                                root.fadeOut = fraction
+                                Mixer.setLooperFades(root.targetRow, root.targetSlot,
+                                                     root.fadeIn, root.fadeOut)
+                            }
                         }
                     }
                 }

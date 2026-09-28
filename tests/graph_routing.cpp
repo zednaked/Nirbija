@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // Drives the graph with synthetic sources, so routing, mute, solo, fader and
 // meters are covered without a JACK server.
 

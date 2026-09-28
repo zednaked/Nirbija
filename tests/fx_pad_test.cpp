@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -179,6 +181,46 @@ Tone held(int pad, float amount, double freq, bool two_tone, int measure_blocks)
   out.flat_fraction = static_cast<double>(flat) / counted;
   out.hf_ratio = energy > 1e-12 ? hf_energy / energy : 0.0;
   return out;
+}
+
+// The largest sample-to-sample step a held pad puts out on a steady sine,
+// once the wet mix and the tempo pads have settled. A sine at `freq` and
+// 0.5 moves at most 0.5·2π·freq/48000 a sample; anything much above that is
+// an edge, a seam or a return that was not smoothed.
+float held_max_step(int pad, float amount, double freq, int measure_blocks) {
+  constexpr uint32_t kBlock = 256;
+  constexpr int kWarm = 300;
+  nirbija::FxPadInstance fx;
+  fx.set_channel_layout(2);
+  fx.activate(48000.0, kBlock);
+  std::vector<float> in_l(kBlock), in_r(kBlock), out_l(kBlock), out_r(kBlock);
+  const float* ins[2] = {in_l.data(), in_r.data()};
+  float* outs[2] = {out_l.data(), out_r.data()};
+  nirbija::TransportInfo transport;
+  transport.playing = true;
+  transport.rolling = true;
+  transport.tempo_bpm = 120.0;
+  transport.numerator = 4;
+  transport.denominator = 4;
+  double phase = 0.0;
+  float previous = 0.0f, worst = 0.0f;
+  for (int b = 0; b < kWarm + measure_blocks; ++b) {
+    // Pressed once the history holds a full second, like a hand would.
+    if (b == 200) fx.set_pad_amount(pad, amount);
+    for (uint32_t i = 0; i < kBlock; ++i) {
+      in_l[i] = in_r[i] = 0.5f * static_cast<float>(std::sin(phase));
+      phase += 2.0 * 3.14159265358979 * freq / 48000.0;
+    }
+    transport.seconds = b * static_cast<double>(kBlock) / 48000.0;
+    transport.beats = transport.seconds * transport.tempo_bpm / 60.0;
+    fx.set_transport(transport);
+    fx.process(ins, outs, kBlock);
+    for (uint32_t i = 0; i < kBlock; ++i) {
+      if (b >= kWarm) worst = std::max(worst, std::fabs(out_l[i] - previous));
+      previous = out_l[i];
+    }
+  }
+  return worst;
 }
 
 }  // namespace
@@ -427,6 +469,37 @@ int main() {
     if (peak < 0.05f)
       fail("a light reverse press never attacked (peak " +
            std::to_string(peak) + ")");
+  }
+
+  // No edges. A 220 Hz sine at 0.5 moves 0.0144 a sample on its own; the
+  // gate's and the cutter's 1.5 ms ramps add a hundredth or so. The old
+  // 1-or-0 gain stepped by the whole sample, up to 0.5, at every open and
+  // close - a click on every division.
+  {
+    const float gate = held_max_step(nirbija::FxPadInstance::Gate, 1.0f, 220.0, 200);
+    if (gate > 0.05f)
+      fail("the gate's edge steps by " + std::to_string(gate));
+    const float cutter = held_max_step(nirbija::FxPadInstance::Cutter, 1.0f, 220.0, 200);
+    if (cutter > 0.05f)
+      fail("the cutter's edge steps by " + std::to_string(cutter));
+  }
+
+  // No seam in the stutter. At 1/32 of 120 BPM a slice is 750 samples, and
+  // 220 Hz does not fit that a whole number of times, so the wrap from the
+  // slice's last sample to its first used to be a jump.
+  {
+    const float step = held_max_step(nirbija::FxPadInstance::Stutter, 1.0f, 220.0, 200);
+    if (step > 0.06f)
+      fail("the stutter's seam steps by " + std::to_string(step));
+  }
+
+  // No jump when the reverse tape runs out and comes back to now. Over the
+  // two seconds of tape 220.25 Hz is a half cycle off itself, so the return
+  // used to land on the far side of the wave.
+  {
+    const float step = held_max_step(nirbija::FxPadInstance::Reverse, 1.0f, 220.25, 260);
+    if (step > 0.06f)
+      fail("the reverse's return steps by " + std::to_string(step));
   }
 
   if (failures > 0) {

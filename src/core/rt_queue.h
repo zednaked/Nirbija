@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #pragma once
 
 #include <array>
@@ -47,8 +49,11 @@ class RtQueue {
  private:
   static constexpr size_t kMask = Capacity - 1;
   std::array<T, Capacity> slots_{};
-  std::atomic<size_t> write_{0};
-  std::atomic<size_t> read_{0};
+  // Each index on its own cache line: the producer writes one and the
+  // consumer the other, and sharing a line would make every push on the UI
+  // thread bounce the line the audio thread is polling.
+  alignas(64) std::atomic<size_t> write_{0};
+  alignas(64) std::atomic<size_t> read_{0};
 };
 
 }  // namespace nirbija

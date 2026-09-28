@@ -1,13 +1,18 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #pragma once
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 
+#include "core/midi_out.h"
 #include "core/plugin.h"
 
 namespace nirbija {
@@ -69,6 +74,10 @@ class ScriptInstance : public PluginInstance {
   // abre e nada aposentado seria liberado. Ver PluginInstance.
   void reclaim_retired(bool audio_running) override;
 
+  // UI thread, on the host's idle poll: runs a rebuild a knob asked for and
+  // the debounce held back. See set_parameter.
+  void host_idle() override;
+
   const PluginDescriptor& descriptor() const override { return descriptor_; }
 
   // --- the UI thread's side --------------------------------------------------
@@ -82,6 +91,22 @@ class ScriptInstance : public PluginInstance {
   // has never seen the API.
   static const char* default_script();
 
+  // A knob rebuilds the tables (a fresh lua_State, load, two pcalls), which
+  // is cheap once and a stall when a slider streams a hundred moves a
+  // second. So a move rebuilds at once only if the last rebuild is older
+  // than this; otherwise it marks a rebuild pending and host_idle() runs it.
+  static constexpr std::chrono::milliseconds kRebuildInterval{30};
+
+  // How many times the script has been built, counting the constructor's.
+  // For tests: the debounce is about this number.
+  uint64_t rebuild_count() const {
+    return rebuild_count_.load(std::memory_order_relaxed);
+  }
+  // Replaces the clock the debounce reads, so a test can move time by hand
+  // instead of sleeping. Default is steady_clock.
+  using Clock = std::chrono::steady_clock;
+  void set_clock_for_tests(std::function<Clock::time_point()> now);
+
  private:
   struct Lua;
 
@@ -89,6 +114,9 @@ class ScriptInstance : public PluginInstance {
   // until the audio thread has been seen past it.
   void publish(std::unique_ptr<Tables> tables);
   void collect();
+  Clock::time_point now() const;
+  // Runs the pending rebuild once the last one is kRebuildInterval old.
+  void rebuild_if_due();
 
   PluginDescriptor descriptor_;
 
@@ -104,9 +132,14 @@ class ScriptInstance : public PluginInstance {
 
   std::array<std::atomic<double>, kKnobs> knobs_{};
 
+  // Debounce state, UI thread only apart from the pending flag a knob sets.
+  std::atomic<bool> rebuild_pending_{false};
+  std::atomic<uint64_t> rebuild_count_{0};
+  Clock::time_point last_rebuild_{};
+  std::function<Clock::time_point()> clock_;
+
   static constexpr size_t kMaxEvents = 64;
-  std::array<MidiEvent, kMaxEvents> events_{};
-  size_t event_count_ = 0;
+  MidiOutBlock<kMaxEvents> out_;
 
   // Incoming (note, channel) -> the pitch and channel that actually went
   // out, so a knob rebuild cannot send the matching note-off to a new

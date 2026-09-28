@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #pragma once
 
 #include <array>
@@ -5,6 +7,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "core/midi_out.h"
 #include "core/plugin.h"
 #include "core/rt_queue.h"
 
@@ -54,7 +57,9 @@ class KeyboardInstrumentInstance : public PluginInstance {
 
  private:
   static constexpr size_t kMaxEvents = 64;
-  static constexpr size_t kQueueCapacity = 256;  // power of two, RtQueue needs it
+  // Power of two, RtQueue needs it. Generous: a queue that fills drops key
+  // events, and a dropped key-up is a stuck note (see release_all_).
+  static constexpr size_t kQueueCapacity = 1024;
 
   struct KeyEvent {
     uint8_t note = 0;
@@ -71,14 +76,18 @@ class KeyboardInstrumentInstance : public PluginInstance {
 
   // UI thread pushes, audio thread pops in process() — see class comment.
   RtQueue<KeyEvent, kQueueCapacity> incoming_;
+  // Set by key_up when the queue was full and its key-up went nowhere. The
+  // audio thread then lets go of every note it holds: the one release that
+  // was lost cannot be told apart from the others, and a stuck note is
+  // worse than a chord cut short.
+  std::atomic<bool> release_all_{false};
 
   // --- audio thread only -----------------------------------------------------
   // Which notes this instance itself is currently holding down, so a queued
   // key-up that lost its race with a key-down (or a stray repeat) never
   // double-fires or releases a note it never sounded.
   std::array<bool, 128> held_{};
-  std::array<MidiEvent, kMaxEvents> events_{};
-  size_t event_count_ = 0;
+  MidiOutBlock<kMaxEvents> out_;
 };
 
 }  // namespace nirbija

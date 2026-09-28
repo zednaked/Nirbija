@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-only
 import QtQuick
 import QtQuick.Controls.Basic
 import Nirbija
@@ -9,6 +10,11 @@ AbstractButton {
     id: root
 
     property string pluginName: ""
+    // The session names this plugin and this machine does not have it. The
+    // slot is kept - struck through, with the id in its hint - so the entry
+    // survives to a machine that does.
+    property bool missing: false
+    property string uid: ""
     property bool bypassed: false
     property bool postFader: false
     // A Looper insert's own state, so a live set reads at a glance whether
@@ -43,6 +49,8 @@ AbstractButton {
     Tip {
         text: root.empty
               ? qsTr("Empty insert slot. Click to load a plugin here.")
+              : root.missing
+              ? qsTr("%1 is not installed here. Its settings are kept in the session; right-click to forget it.").arg(root.uid)
               : qsTr("%1 — click to open its editor. Right-click or hold for bypass, reorder and remove.").arg(root.pluginName)
         visible: root.hovered
     }
@@ -123,9 +131,10 @@ AbstractButton {
             anchors.rightMargin: Skin.spacingXS
             text: root.empty ? "+" : root.pluginName
             color: root.empty ? Skin.textDim
-                 : root.bypassed ? Skin.disabled
+                 : root.bypassed || root.missing ? Skin.disabled
                  : Skin.text
             font.pixelSize: root.empty ? Skin.fontXL : Skin.font
+            font.strikeout: root.missing
             horizontalAlignment: root.empty ? Text.AlignHCenter : Text.AlignLeft
             verticalAlignment: Text.AlignVCenter
             elide: Text.ElideRight

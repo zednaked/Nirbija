@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // Nothing in the graph may step. Every switch a person can throw while the
 // music plays - mute, solo, bypass, a send, the master fader, dim, mono, the
 // park around a state load - has to reach the speaker as a slope, and the

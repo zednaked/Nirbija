@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // Manual tool: brings the whole mixer up, stands one built-in plugin on a
 // fresh strip, opens its editor and writes a picture of the window. For
 // looking at an editor without clicking through to it. Not a ctest target -
@@ -77,6 +79,9 @@ int main(int argc, char* argv[]) {
     std::fprintf(stderr, "no Mixer singleton\n");
     return 1;
   }
+  // The scan and the session load are asynchronous now; this tool wants
+  // both done before it stands a plugin on a strip.
+  mixer->waitForScan();
   if (!mixer->masterMute()) mixer->toggleMasterMute();
 
   const int row = mixer->rowCount() > 0 ? 0 : mixer->addChannel(QString(), 2);

@@ -1,7 +1,10 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #include "core/engine.h"
 #include "core/ble_midi.h"
 
 #include <jack/midiport.h>
+#include <sys/mman.h>
 
 #include <algorithm>
 #include <cmath>
@@ -198,6 +201,21 @@ bool Engine::start(const std::string& client_name) {
   block_frames_ = jack_get_buffer_size(client_);
   graph_->prepare(sample_rate_, block_frames_);
 
+  // Everything mapped now and later stays resident: a page fault inside
+  // process() is a disk read on the audio thread. Failure (no
+  // RLIMIT_MEMLOCK, typically) is not fatal, only slower under pressure, so
+  // it is said once and the engine carries on.
+  if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
+    static bool said = false;
+    if (!said) {
+      said = true;
+      std::perror(
+          "nirbija: mlockall failed; memory may page under load (raise "
+          "RLIMIT_MEMLOCK: put the user in the audio group, or set memlock "
+          "unlimited in /etc/security/limits.d/)");
+    }
+  }
+
   master_out_[0] = jack_port_register(client_, "master_out_l",
                                       JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
   master_out_[1] = jack_port_register(client_, "master_out_r",
@@ -218,25 +236,37 @@ bool Engine::start(const std::string& client_name) {
   jack_set_xrun_callback(client_, jack_xrun_trampoline, this);
   jack_set_buffer_size_callback(client_, jack_buffer_size_trampoline, this);
   jack_set_sample_rate_callback(client_, jack_sample_rate_trampoline, this);
+  // No jack_set_port_connect_callback: with one registered, pipewire-jack
+  // (1.6) leaves a jack_port_disconnect() unreflected in
+  // jack_port_get_all_connections() when it returns, and the UI, which
+  // reads the connections straight after, shows the old source. The direct
+  // outs' listener flags are refreshed from the UI thread instead.
+  jack_set_latency_callback(client_, jack_latency_trampoline, this);
+
+  // Before the process callback can run: process() reads ble_midi_, and a
+  // pointer that appears after activation is a pointer it could read half
+  // set. PipeWire lists the SMC-PAD as a MIDI port but never AcquireNotify's
+  // the BLE characteristic, so the port stays silent; we take the notify FD
+  // ourselves.
+  ble_midi_ = std::make_unique<BleMidi>();
+  ble_midi_->start();
+
   if (jack_activate(client_) != 0) {
     stop();
     return false;
   }
-  // After JACK is up: PipeWire lists the SMC-PAD as a MIDI port but never
-  // AcquireNotify's the BLE characteristic, so the port stays silent. We
-  // take the notify FD ourselves.
-  ble_midi_ = std::make_unique<BleMidi>();
-  ble_midi_->start();
   return true;
 }
 
 void Engine::stop() {
+  // The process callback stops before anything it reads is torn down: the
+  // BLE queue was reset with process() still running and popping from it.
+  if (client_ != nullptr) jack_deactivate(client_);
   if (ble_midi_) {
     ble_midi_->stop();
     ble_midi_.reset();
   }
   if (client_ == nullptr) return;
-  jack_deactivate(client_);
   jack_client_close(client_);
   client_ = nullptr;
   master_out_[0] = master_out_[1] = nullptr;
@@ -256,26 +286,33 @@ size_t Engine::add_channel(const std::string& name, int channel_count) {
   if (index >= kMaxChannels) return kMaxChannels;
 
   // Revive a hole: ports from the previous occupant are still registered.
-  if (index < channel_ports_.size() && channel_ports_[index].audio[0] != nullptr) {
-    ChannelPorts& record = channel_ports_[index];
+  ChannelPorts& record = channel_ports_[index];
+  if (record.audio[0].load(std::memory_order_acquire) != nullptr) {
     // A mono occupant only registered the left half. A stereo strip in
     // the same hole needs the right-hand ports or its right side is
     // permanently silent.
-    if (channel_count > 1 && record.audio[1] == nullptr) {
+    if (channel_count > 1 && record.audio[1].load(std::memory_order_relaxed) == nullptr) {
       const std::string in_name = std::to_string(index + 1) + "_in_r";
-      record.audio[1] = jack_port_register(client_, in_name.c_str(),
-                                           JACK_DEFAULT_AUDIO_TYPE,
-                                           JackPortIsInput, 0);
-      const std::string out_name = std::to_string(index + 1) + "_out_r";
-      record.audio_out[1] = jack_port_register(client_, out_name.c_str(),
+      record.audio[1].store(jack_port_register(client_, in_name.c_str(),
                                                JACK_DEFAULT_AUDIO_TYPE,
-                                               JackPortIsOutput, 0);
+                                               JackPortIsInput, 0),
+                            std::memory_order_release);
+      const std::string out_name = std::to_string(index + 1) + "_out_r";
+      record.audio_out[1].store(jack_port_register(client_, out_name.c_str(),
+                                                   JACK_DEFAULT_AUDIO_TYPE,
+                                                   JackPortIsOutput, 0),
+                                std::memory_order_release);
     }
-    record.tap = false;
+    record.tap.store(false, std::memory_order_release);
+    refresh_out_connected(index);
+    // The ports are all published above before the graph publishes the strip,
+    // so a pass that can see the channel can see its ports.
     return graph_->add_channel(
         name, channel_count,
-        std::make_unique<JackInputSource>(record.audio[0], record.audio[1]),
-        std::make_unique<JackMidiSource>(record.midi));
+        std::make_unique<JackInputSource>(
+            record.audio[0].load(std::memory_order_relaxed),
+            record.audio[1].load(std::memory_order_relaxed)),
+        std::make_unique<JackMidiSource>(record.midi.load(std::memory_order_relaxed)));
   }
 
   // Ports are named by index, not by the channel's display name: two channels
@@ -307,23 +344,22 @@ size_t Engine::add_channel(const std::string& name, int channel_count) {
     return kMaxChannels;
   }
 
-  ChannelPorts record;
-  record.audio[0] = ports[0];
-  record.audio[1] = ports[1];
-  record.midi = midi_port;
+  // Every port is published here, before graph_->add_channel() publishes
+  // the strip, so process() never finds a live channel with half a record.
+  record.audio[0].store(ports[0], std::memory_order_release);
+  record.audio[1].store(ports[1], std::memory_order_release);
+  record.midi.store(midi_port, std::memory_order_release);
   for (int ch = 0; ch < channel_count; ++ch) {
     const std::string out_name =
         std::to_string(index + 1) +
         (channel_count == 1 ? "_out" : (ch == 0 ? "_out_l" : "_out_r"));
-    record.audio_out[ch] = jack_port_register(
-        client_, out_name.c_str(), JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
+    record.audio_out[ch].store(
+        jack_port_register(client_, out_name.c_str(), JACK_DEFAULT_AUDIO_TYPE,
+                           JackPortIsOutput, 0),
+        std::memory_order_release);
   }
-  // By index, not appended: the slot handed back can be a hole in the middle
-  // (a tap channel that was removed leaves one with no ports of its own), and
-  // pushing there would file this channel's ports under someone else's number.
-  if (channel_ports_.size() <= index) channel_ports_.resize(index + 1);
-  record.tap = false;
-  channel_ports_[index] = record;
+  record.tap.store(false, std::memory_order_release);
+  refresh_out_connected(index);
 
   return graph_->add_channel(name, channel_count,
                              std::make_unique<JackInputSource>(ports[0], ports[1]),
@@ -414,12 +450,13 @@ double Engine::recorded_seconds() const {
 }
 
 void Engine::remove_channel(size_t channel) {
-  if (client_ == nullptr || channel >= channel_ports_.size()) return;
+  if (client_ == nullptr || channel >= kMaxChannels) return;
 
   const ChannelPorts& record = channel_ports_[channel];
-  for (jack_port_t* port : record.audio)
-    if (port != nullptr) jack_port_disconnect(client_, port);
-  if (record.midi != nullptr) jack_port_disconnect(client_, record.midi);
+  for (const auto& port : record.audio)
+    if (jack_port_t* p = port.load(std::memory_order_acquire)) jack_port_disconnect(client_, p);
+  if (jack_port_t* midi = record.midi.load(std::memory_order_acquire))
+    jack_port_disconnect(client_, midi);
 
   graph_->remove_channel(channel);
 }
@@ -470,45 +507,48 @@ std::vector<std::string> Engine::available_sinks(bool physical_only) const {
 }
 
 bool Engine::connect_source(size_t channel, const std::string& port, bool midi) {
-  if (client_ == nullptr || channel >= channel_ports_.size()) return false;
+  if (client_ == nullptr || channel >= kMaxChannels) return false;
   const ChannelPorts& record = channel_ports_[channel];
+  jack_port_t* const audio[2] = {record.audio[0].load(std::memory_order_acquire),
+                                 record.audio[1].load(std::memory_order_acquire)};
+  jack_port_t* const midi_port = record.midi.load(std::memory_order_acquire);
 
   // Picking a source replaces the old one rather than stacking on top of it,
   // which is what choosing an input in a mixer means.
-  const int count = midi ? 1 : (record.audio[1] != nullptr ? 2 : 1);
+  const int count = midi ? 1 : (audio[1] != nullptr ? 2 : 1);
   for (int i = 0; i < count; ++i) {
-    jack_port_t* target = midi ? record.midi : record.audio[i];
+    jack_port_t* target = midi ? midi_port : audio[i];
     if (target != nullptr) jack_port_disconnect(client_, target);
   }
   if (port.empty()) return true;
-  if (record.tap) return false;
+  if (record.tap.load(std::memory_order_acquire)) return false;
 
   if (midi) {
-    if (record.midi == nullptr) return false;
-    return jack_connect(client_, port.c_str(), jack_port_name(record.midi)) == 0;
+    if (midi_port == nullptr) return false;
+    return jack_connect(client_, port.c_str(), jack_port_name(midi_port)) == 0;
   }
-  if (record.audio[0] == nullptr) return false;
+  if (audio[0] == nullptr) return false;
 
   // A stereo channel fed from a stereo source should take both sides. The
   // sibling is the next port of the same client, which is how JACK names them.
   std::vector<std::string> siblings = available_sources(false);
   const auto chosen = std::find(siblings.begin(), siblings.end(), port);
 
-  bool ok = jack_connect(client_, port.c_str(), jack_port_name(record.audio[0])) == 0;
+  bool ok = jack_connect(client_, port.c_str(), jack_port_name(audio[0])) == 0;
   if (count == 2 && chosen != siblings.end() && std::next(chosen) != siblings.end()) {
     const std::string& next = *std::next(chosen);
     const std::string client_of = port.substr(0, port.find(':'));
     if (next.rfind(client_of, 0) == 0)
-      ok = jack_connect(client_, next.c_str(), jack_port_name(record.audio[1])) == 0 && ok;
+      ok = jack_connect(client_, next.c_str(), jack_port_name(audio[1])) == 0 && ok;
   }
   return ok;
 }
 
 std::vector<std::string> Engine::current_sources(size_t channel, bool midi) const {
   std::vector<std::string> found;
-  if (client_ == nullptr || channel >= channel_ports_.size()) return found;
-  jack_port_t* port = midi ? channel_ports_[channel].midi
-                           : channel_ports_[channel].audio[0];
+  if (client_ == nullptr || channel >= kMaxChannels) return found;
+  jack_port_t* port = midi ? channel_ports_[channel].midi.load(std::memory_order_acquire)
+                           : channel_ports_[channel].audio[0].load(std::memory_order_acquire);
   if (port == nullptr) return found;
 
   const char** connections = jack_port_get_all_connections(client_, port);
@@ -519,8 +559,8 @@ std::vector<std::string> Engine::current_sources(size_t channel, bool midi) cons
 }
 
 bool Engine::set_midi_link(size_t channel, const std::string& port, bool on) {
-  if (client_ == nullptr || channel >= channel_ports_.size()) return false;
-  jack_port_t* target = channel_ports_[channel].midi;
+  if (client_ == nullptr || channel >= kMaxChannels) return false;
+  jack_port_t* target = channel_ports_[channel].midi.load(std::memory_order_acquire);
   if (target == nullptr) return false;
 
   if (on)
@@ -529,9 +569,9 @@ bool Engine::set_midi_link(size_t channel, const std::string& port, bool on) {
 }
 
 std::string Engine::current_source(size_t channel, bool midi) const {
-  if (client_ == nullptr || channel >= channel_ports_.size()) return {};
-  jack_port_t* port = midi ? channel_ports_[channel].midi
-                           : channel_ports_[channel].audio[0];
+  if (client_ == nullptr || channel >= kMaxChannels) return {};
+  jack_port_t* port = midi ? channel_ports_[channel].midi.load(std::memory_order_acquire)
+                           : channel_ports_[channel].audio[0].load(std::memory_order_acquire);
   if (port == nullptr) return {};
 
   const char** connections = jack_port_get_all_connections(client_, port);
@@ -563,30 +603,46 @@ std::string Engine::current_master_sink() const {
 }
 
 bool Engine::connect_channel_sink(size_t channel, const std::string& port) {
-  if (client_ == nullptr || channel >= channel_ports_.size()) return false;
-  for (jack_port_t* out : channel_ports_[channel].audio_out)
+  if (client_ == nullptr || channel >= kMaxChannels) return false;
+  ChannelPorts& record = channel_ports_[channel];
+  jack_port_t* const outs[2] = {record.audio_out[0].load(std::memory_order_acquire),
+                                record.audio_out[1].load(std::memory_order_acquire)};
+  for (jack_port_t* out : outs)
     if (out != nullptr) jack_port_disconnect(client_, out);
-  if (port.empty() || channel_ports_[channel].audio_out[0] == nullptr)
+  if (port.empty() || outs[0] == nullptr) {
+    refresh_out_connected(channel);
     return true;
-  bool ok = jack_connect(client_, jack_port_name(channel_ports_[channel].audio_out[0]),
-                         port.c_str()) == 0;
+  }
+  // Marked connected before the wire goes in, so the block the connection
+  // lands in already carries fresh audio rather than whatever the buffer
+  // last held.
+  record.out_connected.store(true, std::memory_order_release);
+  bool ok = jack_connect(client_, jack_port_name(outs[0]), port.c_str()) == 0;
   const std::vector<std::string> all = available_sinks(false);
   const auto it = std::find(all.begin(), all.end(), port);
-  if (channel_ports_[channel].audio_out[1] != nullptr && it != all.end() &&
-      std::next(it) != all.end()) {
+  if (outs[1] != nullptr && it != all.end() && std::next(it) != all.end()) {
     const std::string& next = *std::next(it);
     if (next.rfind(port.substr(0, port.find(':')), 0) == 0)
-      ok = jack_connect(client_,
-                        jack_port_name(channel_ports_[channel].audio_out[1]),
-                        next.c_str()) == 0 &&
-           ok;
+      ok = jack_connect(client_, jack_port_name(outs[1]), next.c_str()) == 0 && ok;
   }
+  refresh_out_connected(channel);
   return ok;
 }
 
+void Engine::refresh_out_connected(size_t channel) {
+  if (client_ == nullptr || channel >= kMaxChannels) return;
+  ChannelPorts& record = channel_ports_[channel];
+  bool connected = false;
+  for (const auto& out : record.audio_out) {
+    jack_port_t* port = out.load(std::memory_order_acquire);
+    if (port != nullptr && jack_port_connected(port) > 0) connected = true;
+  }
+  record.out_connected.store(connected, std::memory_order_release);
+}
+
 std::string Engine::current_channel_sink(size_t channel) const {
-  if (client_ == nullptr || channel >= channel_ports_.size()) return {};
-  jack_port_t* port = channel_ports_[channel].audio_out[0];
+  if (client_ == nullptr || channel >= kMaxChannels) return {};
+  jack_port_t* port = channel_ports_[channel].audio_out[0].load(std::memory_order_acquire);
   if (port == nullptr) return {};
   const char** connections = jack_port_get_all_connections(client_, port);
   std::string found;
@@ -599,18 +655,19 @@ size_t Engine::add_tap_channel(size_t source, int pair) {
   if (client_ == nullptr) return kMaxChannels;
   const size_t index = graph_->next_channel_slot();
   if (index >= kMaxChannels) return kMaxChannels;
-  if (channel_ports_.size() <= index) channel_ports_.resize(index + 1);
 
   ChannelPorts& record = channel_ports_[index];
   // A removed strip leaves its ports registered. Disconnect them so the
   // tap does not leak onto the previous occupant's hardware outs, and
   // mark the slot so process() will not write them either.
-  for (jack_port_t* port : record.audio)
-    if (port != nullptr) jack_port_disconnect(client_, port);
-  for (jack_port_t* port : record.audio_out)
-    if (port != nullptr) jack_port_disconnect(client_, port);
-  if (record.midi != nullptr) jack_port_disconnect(client_, record.midi);
-  record.tap = true;
+  for (const auto& port : record.audio)
+    if (jack_port_t* p = port.load(std::memory_order_acquire)) jack_port_disconnect(client_, p);
+  for (const auto& port : record.audio_out)
+    if (jack_port_t* p = port.load(std::memory_order_acquire)) jack_port_disconnect(client_, p);
+  if (jack_port_t* midi = record.midi.load(std::memory_order_acquire))
+    jack_port_disconnect(client_, midi);
+  record.tap.store(true, std::memory_order_release);
+  refresh_out_connected(index);
 
   auto tap = std::make_unique<TapSource>(graph_.get(), source, pair);
   tap->prepare(block_frames_);
@@ -644,12 +701,63 @@ int Engine::jack_process_trampoline(jack_nframes_t frames, void* arg) {
 }
 
 int Engine::jack_buffer_size_trampoline(jack_nframes_t frames, void* arg) {
-  // Process is stopped. Scratch grows if needed and is never shrunk; plugins
-  // are not re-activated for a period change.
+  // Process is stopped. Scratch grows if needed and is never shrunk, and a
+  // period that grows past what the plugins were activated with has every
+  // insert deactivated and activated again with the new maximum (see
+  // ChannelStrip::prepare); a smaller one changes nothing for them.
   auto* engine = static_cast<Engine*>(arg);
   engine->block_frames_ = frames;
   engine->graph_->prepare(engine->sample_rate_, frames);
   return 0;
+}
+
+void Engine::jack_latency_trampoline(jack_latency_callback_mode_t mode, void* arg) {
+  static_cast<Engine*>(arg)->report_latency(mode);
+}
+
+// JACK's model: in capture mode a client sets, on each output port, the
+// capture latency of the inputs feeding it plus its own; in playback mode it
+// sets, on each input port, the playback latency of the outputs it feeds
+// plus its own. The graph mixes every input to every output, so the deepest
+// upstream number is taken and the graph's own (the compensation everything
+// is delayed to, plus the limiter's lookahead) is added on top.
+void Engine::report_latency(jack_latency_callback_mode_t mode) {
+  if (client_ == nullptr) return;
+  const jack_nframes_t own = graph_->internal_latency_samples();
+
+  jack_port_t* inputs[kMaxChannels * 2 + 2];
+  jack_port_t* outputs[kMaxChannels * 2 + 2];
+  size_t n_in = 0;
+  size_t n_out = 0;
+  for (size_t i = 0; i < kMaxChannels; ++i) {
+    const ChannelPorts& record = channel_ports_[i];
+    for (const auto& port : record.audio)
+      if (jack_port_t* p = port.load(std::memory_order_acquire)) inputs[n_in++] = p;
+    for (const auto& port : record.audio_out)
+      if (jack_port_t* p = port.load(std::memory_order_acquire)) outputs[n_out++] = p;
+  }
+  for (jack_port_t* port : master_out_)
+    if (port != nullptr) outputs[n_out++] = port;
+
+  jack_port_t** from = mode == JackCaptureLatency ? inputs : outputs;
+  const size_t n_from = mode == JackCaptureLatency ? n_in : n_out;
+  jack_port_t** to = mode == JackCaptureLatency ? outputs : inputs;
+  const size_t n_to = mode == JackCaptureLatency ? n_out : n_in;
+
+  jack_latency_range_t upstream{0, 0};
+  for (size_t i = 0; i < n_from; ++i) {
+    jack_latency_range_t range;
+    jack_port_get_latency_range(from[i], mode, &range);
+    upstream.min = std::max(upstream.min, range.min);
+    upstream.max = std::max(upstream.max, range.max);
+  }
+  jack_latency_range_t reported{upstream.min + own, upstream.max + own};
+  for (size_t i = 0; i < n_to; ++i)
+    jack_port_set_latency_range(to[i], mode, &reported);
+}
+
+void Engine::latency_changed() {
+  if (client_ != nullptr) jack_recompute_total_latencies(client_);
 }
 
 int Engine::jack_sample_rate_trampoline(jack_nframes_t rate, void* arg) {
@@ -705,8 +813,12 @@ void Engine::drain_commands() {
       if (command.channel >= graph_->channel_count()) continue;
       if (!graph_->channel_alive(command.channel)) continue;
     }
-    ChannelStrip& strip = command.bus ? graph_->bus(command.channel)
-                                      : graph_->channel(command.channel);
+    // The published pointer, never the owning one: the UI thread moves the
+    // owning pointer around under us in add_channel and remove_channel.
+    ChannelStrip* live = command.bus ? graph_->live_bus(command.channel)
+                                     : graph_->live_channel(command.channel);
+    if (live == nullptr) continue;
+    ChannelStrip& strip = *live;
     switch (command.kind) {
       case EngineCommand::Kind::SetGain: strip.set_gain(command.value); break;
       case EngineCommand::Kind::SetPan: strip.set_pan(command.value); break;
@@ -726,6 +838,17 @@ void Engine::drain_commands() {
 }
 
 size_t Engine::poll_control(MidiEvent* out, size_t capacity) {
+  // The UI's poll is also when the direct outs learn whether anyone listens:
+  // a connection made from outside (a patchbay) shows up here within a
+  // tick, and until it does the out holds silence, not a stale block. Our
+  // own connect_channel_sink() marks the flag on the spot.
+  if (client_ != nullptr) {
+    const size_t count = graph_->channel_count();
+    for (size_t i = 0; i < count; ++i)
+      if (graph_->channel_alive(i) &&
+          !channel_ports_[i].tap.load(std::memory_order_acquire))
+        refresh_out_connected(i);
+  }
   size_t drained = 0;
   MidiEvent event;
   while (drained < capacity && control_events_.pop(event)) out[drained++] = event;
@@ -739,8 +862,8 @@ void Engine::connect_all_midi_to_control() {
 }
 
 void Engine::connect_all_midi_to_channel(size_t channel) {
-  if (client_ == nullptr || channel >= channel_ports_.size()) return;
-  jack_port_t* midi = channel_ports_[channel].midi;
+  if (client_ == nullptr || channel >= kMaxChannels) return;
+  jack_port_t* midi = channel_ports_[channel].midi.load(std::memory_order_acquire);
   if (midi == nullptr) return;
   for (const std::string& source : available_sources(true))
     jack_connect(client_, source.c_str(), jack_port_name(midi));
@@ -783,9 +906,10 @@ int Engine::process(jack_nframes_t frames) {
   if (ble_midi_ != nullptr) {
     MidiEvent ble[32];
     const size_t ble_n = ble_midi_->pop(ble, 32);
+    const size_t channels = graph_->channel_count();
     for (size_t i = 0; i < ble_n; ++i) {
       control_events_.push(ble[i]);
-      for (size_t ch = 0; ch < channel_ports_.size(); ++ch) {
+      for (size_t ch = 0; ch < channels; ++ch) {
         if (graph_->channel_alive(ch))
           graph_->push_injected_midi(ch, ble[i]);
       }
@@ -830,19 +954,35 @@ int Engine::process(jack_nframes_t frames) {
   for (int ch = 0; ch < 2; ++ch)
     master[ch] = static_cast<float*>(jack_port_get_buffer(master_out_[ch], frames));
 
+  // The click is scheduled before the render and rendered inside it, so it
+  // goes through the limiter and the park fade with everything else.
+  schedule_metronome(frames, tempo, transport.beats);
   graph_->render(master, frames);
-  render_metronome(master, frames, tempo, transport.beats);
 
-  for (size_t i = 0; i < channel_ports_.size(); ++i) {
-    if (!graph_->channel_alive(i)) continue;
-    if (channel_ports_[i].tap) continue;
-    ChannelStrip& strip = graph_->channel(i);
+  const size_t channels = graph_->channel_count();
+  for (size_t i = 0; i < channels; ++i) {
+    // The published pointer, not graph_->channel(): the UI thread moves the
+    // owning pointer in add_channel and remove_channel.
+    ChannelStrip* strip = graph_->live_channel(i);
+    if (strip == nullptr) continue;
+    const ChannelPorts& record = channel_ports_[i];
+    if (record.tap.load(std::memory_order_acquire)) continue;
+    // Nobody listening: nothing to copy. The block after the listener left
+    // gets silence written once, so the buffer does not hold a stale block
+    // for the next listener to hear.
+    const bool connected = record.out_connected.load(std::memory_order_acquire);
+    if (!connected && !out_written_[i]) continue;
+    out_written_[i] = connected;
     for (int ch = 0; ch < 2; ++ch) {
-      jack_port_t* port = channel_ports_[i].audio_out[ch];
+      jack_port_t* port = record.audio_out[ch].load(std::memory_order_acquire);
       if (port == nullptr) continue;
       auto* dest = static_cast<float*>(jack_port_get_buffer(port, frames));
-      const float* src = strip.output_cache(std::min(ch, strip.channel_count() - 1));
       if (dest == nullptr) continue;
+      if (!connected) {
+        std::fill_n(dest, frames, 0.0f);
+        continue;
+      }
+      const float* src = strip->output_cache(std::min(ch, strip->channel_count() - 1));
       if (src != nullptr) std::copy_n(src, frames, dest);
       else std::fill_n(dest, frames, 0.0f);
       // The same fade the master got. Without it a parked block copied the
@@ -974,44 +1114,29 @@ void Engine::read_external_clock(uint32_t frames) {
   transport_beats_ = beats;
 }
 
-// A short sine tick on every beat, a fifth higher on the downbeat. Added after
-// the master fader on purpose: pulling the mix down for a break should not
-// take the count with it.
-void Engine::render_metronome(float* const* master, uint32_t frames, double tempo,
-                              double start_beats) {
-  const bool wanted = metronome_.load(std::memory_order_relaxed);
-  if (!wanted && click_remaining_ == 0) return;
+// A short tick on every beat, higher on the downbeat, rendered by the graph
+// after the master fader (pulling the mix down for a break should not take
+// the count with it) and before the limiter and the park fade, which it used
+// to skip. The beat's frame is worked out once for the block rather than by
+// flooring the beat count at every sample.
+void Engine::schedule_metronome(uint32_t frames, double tempo, double start_beats) {
+  if (!metronome_.load(std::memory_order_relaxed)) return;
+  if (sample_rate_ <= 0.0 || tempo <= 0.0) return;
+
+  // boundary_frame() looks for the next boundary strictly ahead of the start,
+  // so the very first beat of a run from zero is asked for separately.
+  uint32_t at = frames;
+  if (start_beats == 0.0) {
+    at = 0;
+  } else {
+    at = dsp::boundary_frame(start_beats, tempo, sample_rate_, 1.0, 0, frames);
+  }
+  if (at >= frames) return;
 
   const double beats_per_frame = tempo / 60.0 / sample_rate_;
-
-  for (uint32_t i = 0; i < frames; ++i) {
-    if (wanted) {
-      const double beat_now = start_beats + beats_per_frame * i;
-      const double beat_next = beat_now + beats_per_frame;
-      if (std::floor(beat_now) != std::floor(beat_next) || beat_now == 0.0) {
-        const long long beat = static_cast<long long>(
-            beat_now == 0.0 ? 0 : std::floor(beat_next));
-        const int bar = std::max(1, time_num_.load(std::memory_order_relaxed));
-        const bool downbeat = beat % bar == 0;
-        click_length_ = static_cast<uint32_t>(sample_rate_ * 0.03);
-        click_remaining_ = click_length_;
-        click_phase_ = 0.0;
-        click_step_ = 2.0 * 3.14159265358979 * (downbeat ? 1568.0 : 1046.5) /
-                      sample_rate_;
-      }
-    }
-
-    if (click_remaining_ > 0) {
-      const float envelope =
-          static_cast<float>(click_remaining_) / static_cast<float>(click_length_);
-      const float sample =
-          static_cast<float>(std::sin(click_phase_)) * envelope * envelope * 0.4f;
-      click_phase_ += click_step_;
-      --click_remaining_;
-      master[0][i] += sample;
-      master[1][i] += sample;
-    }
-  }
+  const long long beat = std::llround(start_beats + beats_per_frame * at);
+  const int bar = std::max(1, time_num_.load(std::memory_order_relaxed));
+  graph_->schedule_click(at, beat % bar == 0);
 }
 
 }  // namespace nirbija

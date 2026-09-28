@@ -1,9 +1,12 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #pragma once
 
 #include <atomic>
 #include <cstdint>
 #include <vector>
 
+#include "core/dsp.h"
 #include "core/plugin.h"
 
 namespace nirbija {
@@ -35,11 +38,15 @@ class LooperInstance : public PluginInstance {
   // open is written as a closed loop so closing the app mid-take does not
   // throw the recording away.
   std::vector<uint8_t> save_state() const override;
-  // The tape is being written while Rec is down, and a save copies the
-  // whole tape; between takes the audio thread only reads it, and the copy
-  // can happen underneath.
+  // The tape is being written while Rec is down, and for the few blocks an
+  // undo, redo or multiply request takes to land; a save copies the whole
+  // tape. Between takes the audio thread only reads it, and the copy can
+  // happen underneath.
   bool save_needs_quiet() const override {
-    return record_request_.load(std::memory_order_relaxed);
+    return record_request_.load(std::memory_order_relaxed) ||
+           undo_request_.load(std::memory_order_relaxed) ||
+           redo_request_.load(std::memory_order_relaxed) ||
+           multiply_request_.load(std::memory_order_relaxed);
   }
   bool load_state(const std::vector<uint8_t>& blob) override;
 
@@ -160,34 +167,50 @@ class LooperInstance : public PluginInstance {
   // The editor draws a bar grid from this and the time signature.
   double loop_beats() const { return loop_beats_.load(std::memory_order_relaxed); }
 
-  // The state before the last Rec or Clear, plus each phrase recorded
-  // since — a phrase is a run of input between silences. Undo peels the
-  // last of those, not the whole pass, so a held Rec with two licks in it
-  // does not throw the first one away. Called from the UI thread with the
-  // graph parked — the copy is the loop, not something process() can afford.
-  void capture_undo();
-  void capture_undo_empty();
-  bool can_undo() const;
-  bool can_redo() const;
-  void undo();
-  void redo();
+  // --- undo ------------------------------------------------------------------
+  // One layer of undo: the state before the last Rec, Clear or Multiply,
+  // plus each phrase recorded since — a phrase is a run of input between
+  // silences. Undo peels the last of those, not the whole pass, so a held
+  // Rec with two licks in it does not throw the first one away.
+  //
+  // Everything here is a request the audio thread carries out at the start
+  // of a block: the snapshot is taken by the head itself as it overwrites
+  // the tape (copy-before-write into a second, equally sized buffer), and
+  // undo swaps which of the two is live. Nothing is copied on the UI thread
+  // and the graph never has to be parked — a park fades the master to
+  // silence, which is a hole in the music on every Rec press. can_undo() and
+  // can_redo() are mirrors updated once a block.
+  bool can_undo() const { return can_undo_.load(std::memory_order_relaxed); }
+  bool can_redo() const { return can_redo_.load(std::memory_order_relaxed); }
+  void request_undo() { undo_request_.store(true, std::memory_order_release); }
+  void request_redo() { redo_request_.store(true, std::memory_order_release); }
+  void request_clear() { clear_request_.store(true, std::memory_order_release); }
 
   // Doubles the tape by appending a copy of itself, so the next pass can
-  // write into the new half. UI thread, graph parked — the copy is the
-  // loop, not something process() can afford.
+  // write into the new half. Same request pattern as undo; the copy is at
+  // most half the tape and runs once, on the audio thread, at a block start.
   bool can_multiply() const;
-  void multiply();
+  void request_multiply() {
+    multiply_request_.store(true, std::memory_order_release);
+  }
 
  private:
   // What the audio thread is doing right now with the loop.
-  enum class Stage { Empty, Defining, Playing, Overdubbing, Stopped };
+  enum class Stage { Empty, Defining, Playing, Overdubbing };
 
   // 0 free, 1 beat, 2 one bar, 3 two, 4 four, 5 eight, 6 = kQuantizeSync.
   static constexpr int kQuantizeMax = kQuantizeSync;
 
-  bool at_boundary(uint32_t frames) const;
+  // Frame inside this block where a pending Rec change lands: 0 when the
+  // grid is off or the block starts on the line, `frames` when the line is
+  // beyond this block.
+  uint32_t punch_frame(uint32_t frames) const;
   double beats_to_boundary(const TransportInfo& transport) const;
-  void apply_requests(uint32_t frames);
+  // Handles the clear/undo/redo/multiply requests and the count-in, then
+  // returns the frame at which the record edge (if any) applies.
+  uint32_t apply_requests(uint32_t frames);
+  void apply_record_edge();
+  void punch_out();
   double unit_beats() const;
   uint64_t snap_length(uint64_t written) const;
   // One Length unit in frames, 0 when Length is free. The first take closes
@@ -198,25 +221,53 @@ class LooperInstance : public PluginInstance {
   void start_count_in();
   void stop_count_in();
   void begin_record();
-  void fire_count_click(bool downbeat);
-  float tone_sample(int channel, float sample);
   // Walks play_pos_ around [start, end) after a step; true if it wrapped.
   bool wrap_play_pos(double start, double end, bool reverse);
   // Stereo frames currently on the tape: the closed length, or the open
   // take if the loop has not been punched out yet.
   uint64_t tape_frames() const;
-  // Copies src into buffer_, resampling when src_rate is not this instance's
-  // rate. Returns how many frames landed, already clamped to capacity.
+  // Copies src into both tape buffers, resampling when src_rate is not this
+  // instance's rate. Returns how many frames landed, already clamped to
+  // capacity. UI thread only (activate / load_state).
   uint64_t import_audio(const float* src, uint64_t src_frames, double src_rate);
+
+  // The live tape and its shadow (the undo layer) - see the undo section
+  // above. Both are sized once in activate(); the audio thread only ever
+  // flips which one is live.
+  float* tape() { return tapes_[live_.load(std::memory_order_relaxed)].data(); }
+  const float* tape() const {
+    return tapes_[live_.load(std::memory_order_relaxed)].data();
+  }
+  float* shadow() {
+    return tapes_[live_.load(std::memory_order_relaxed) ^ 1].data();
+  }
+  // Copy-before-write: the first time a pass touches a frame, its old value
+  // goes into the shadow. Frames past the snapshot's length were silent in
+  // the old state, so the shadow gets silence for them.
+  void snapshot(uint64_t frame);
+  void snapshot_range(uint64_t lo, uint64_t hi);
+  // Frames the previous undo layer changed have to be copied into the shadow
+  // before a new layer can be swapped in; this does a bounded chunk of that
+  // work per block.
+  void sweep_shadow();
+  bool sweep_done() const { return stale_pos_ >= stale_hi_; }
+  // Writes `in` onto the tape at `frame` with weight `ramp` (0..1), the way
+  // the current stage and knobs say: fresh tape while defining, add or
+  // replace over an existing loop.
+  void write_frame(uint64_t frame, const float in[2], float ramp);
+  // 4-point read at a fractional position, indices wrapped within [lo, hi).
+  void read_frame(const float* buffer, double position, uint64_t lo,
+                  uint64_t hi, float out[2]) const;
 
   PluginDescriptor descriptor_;
   int channels_ = 2;
   double sample_rate_ = 48000.0;
   TransportInfo transport_;
 
-  // Interleaved stereo, sized once in activate() for the longest loop allowed;
-  // nothing ever grows on the audio thread.
-  std::vector<float> buffer_;
+  // Interleaved stereo, two of them, sized once in activate() for the
+  // longest loop allowed; nothing ever grows on the audio thread.
+  std::vector<float> tapes_[2];
+  std::atomic<int> live_{0};
   uint64_t capacity_frames_ = 0;
   // Frames in the closed loop, 0 while empty. Atomic because waveform() and
   // has_audio() read it from the UI thread; it only ever changes at a loop
@@ -235,6 +286,9 @@ class LooperInstance : public PluginInstance {
   std::atomic<bool> record_request_{false};
   std::atomic<bool> play_request_{true};
   std::atomic<bool> clear_request_{false};
+  std::atomic<bool> undo_request_{false};
+  std::atomic<bool> redo_request_{false};
+  std::atomic<bool> multiply_request_{false};
   std::atomic<int> quantize_{2};  // 0 free, 1 beat, 2..5 = 1/2/4/8 bars, 6 sync
   std::atomic<float> gain_{1.0f};
   std::atomic<float> pitch_{0.0f};  // semitones, -12..12
@@ -264,21 +318,44 @@ class LooperInstance : public PluginInstance {
   // One byte per frame, the layer that most recently wrote there. Sized in
   // activate() with the tape so the audio thread never grows it.
   std::vector<uint8_t> layer_;
+  // One byte per frame: how much of a full record pass the frame has had so
+  // far, 255 = a whole one. The ~5 ms ramp in and the ramp out of a pass
+  // that is exactly one loop long land on the same frames, and each scales
+  // the old layer by only part of the feedback; summing the weights lets the
+  // second touch finish what the first started, so a one-cycle wipe with
+  // feedback 0 (or Replace) really wipes. Reset the first time a layer
+  // touches the frame, in snapshot().
+  std::vector<uint8_t> rec_weight_;
 
   // Count-in, audio thread only. Own clock so Rec can count with Play off.
   bool counting_ = false;
   double count_phase_ = 0.0;
   int count_total_ = 0;
-  uint32_t click_remaining_ = 0;
-  uint32_t click_length_ = 0;
-  double click_phase_ = 0.0;
-  double click_step_ = 0.0;
+  dsp::ClickTone click_;
 
-  // One-pole lowpass on the wet loop, audio thread only.
+  // One-pole lowpass on the wet loop, audio thread only. The coefficient is
+  // worked out once a block from the Tone knob, not once a sample.
   float tone_lpf_[2] = {0.0f, 0.0f};
+  float tone_coeff_ = 1.0f;
+  bool tone_bypass_ = true;
+  // Playback rate for this block: pitch and speed folded together.
+  double rate_ = 1.0;
 
-  // The record state the audio thread last acted on, to spot edges.
+  // Per-sample smoothing, all set once a block and stepped once a sample:
+  // the loop gain (a mapped fader must not zipper), Play on/off (a hard cut
+  // clicks) and the weight of the input going onto the tape at the edges of
+  // a record pass (a hard punch clicks on the tape, every time round).
+  dsp::LinearRamp gain_ramp_;
+  dsp::LinearRamp play_ramp_;
+  dsp::LinearRamp rec_ramp_;
+  // ~5 ms in frames: the record edge ramps, the Play ramp, and the wrap
+  // crossfade all use this one length.
+  uint32_t edge_frames_ = 240;
+
+  // The record state the audio thread last acted on, to spot edges; and the
+  // request it is about to act on at this block's punch frame.
   bool record_active_ = false;
+  bool pending_record_ = false;
 
   // Trim window and fade shape, as fractions of the closed loop. Written from
   // the UI thread while dragging a handle, read every sample on the audio
@@ -291,10 +368,12 @@ class LooperInstance : public PluginInstance {
   std::atomic<double> fade_out_{0.0};
 
   // Updated once a block, for the UI to read - see position_fraction(),
-  // writing() and beats_to_boundary().
+  // writing(), beats_to_boundary(), can_undo() and can_redo().
   std::atomic<double> position_fraction_{-1.0};
   std::atomic<bool> writing_{false};
   std::atomic<double> beats_to_boundary_{-1.0};
+  std::atomic<bool> can_undo_{false};
+  std::atomic<bool> can_redo_{false};
 
   // Frame bounds of the current trim window, clamped to the loop length
   // passed in - always length_'s current value, but process() only wants to
@@ -304,8 +383,9 @@ class LooperInstance : public PluginInstance {
   // The fade multiplier at a frame already known to be inside [start, end).
   float envelope_at(uint64_t position, uint64_t start, uint64_t end) const;
 
-  struct UndoLayer {
-    std::vector<float> audio;
+  // --- undo machinery, audio thread only -------------------------------------
+  // The metadata half of the undo layer; the audio half is the shadow tape.
+  struct UndoMeta {
     uint64_t length = 0;
     double beats = 0.0;
     double trim_start = 0.0;
@@ -315,24 +395,61 @@ class LooperInstance : public PluginInstance {
     bool valid = false;
     bool undone = false;
   };
-  UndoLayer undo_;
+  UndoMeta undo_meta_;
+  // One byte per frame: 0 the shadow equals the tape here, 1 the shadow is
+  // stale (a finished layer changed the tape and the sweep has not caught
+  // up), 2 the shadow holds this layer's pre-pass value. Sized in activate().
+  std::vector<uint8_t> shadow_state_;
+  static constexpr uint8_t kShadowSynced = 0;
+  static constexpr uint8_t kShadowStale = 1;
+  static constexpr uint8_t kShadowSnapped = 2;
+  // Range of frames snapshotted by the current layer, and the range the
+  // sweep still has to sync. Both empty when lo >= hi.
+  uint64_t touched_lo_ = 0;
+  uint64_t touched_hi_ = 0;
+  uint64_t stale_pos_ = 0;
+  uint64_t stale_hi_ = 0;
+  // Takes the current state as the new undo layer: the previous layer's
+  // differences become permanent (queued for the sweep) and the phrase
+  // list starts over.
+  void capture_undo();
   void swap_undo();
+  void apply_undo();
+  void apply_redo();
+  void apply_multiply();
+  void apply_clear();
 
-  // One byte per frame, set when Rec heard something this pass. Sized in
-  // activate() with the tape so the audio thread never grows it.
+  // One byte per frame, set when Rec heard something this pass, plus one
+  // past the highest frame set so the scans stay short. Sized in activate()
+  // with the tape so the audio thread never grows it.
   std::vector<uint8_t> recorded_;
+  // recorded_hi_ only ever grows until the next clear, so a clear knows how
+  // far to wipe; recorded_count_ is how many bytes are set, so "is there a
+  // phrase to peel" is a comparison, not a scan, once a block.
+  uint64_t recorded_hi_ = 0;
+  uint64_t recorded_count_ = 0;
+  void mark_recorded(uint64_t frame);
+  void clear_recorded();
+  bool has_burst() const {
+    return recorded_count_ > 0 && tape_frames() > 0;
+  }
+  // A peeled phrase lives in the shadow tape (the peel swaps the range
+  // between tape and shadow), so a peel is just its bounds.
   struct Peel {
     uint64_t start = 0;
     uint64_t end = 0;
-    std::vector<float> audio;
     uint64_t dropped_length = 0;
     double dropped_beats = 0.0;
   };
-  std::vector<Peel> peels_;
+  static constexpr int kMaxPeels = 32;
+  Peel peels_[kMaxPeels];
+  int peel_count_ = 0;
   bool last_burst(uint64_t* start, uint64_t* end) const;
   bool peel_last_burst();
   void restore_peel();
-  void clear_recorded();
+  void swap_range(uint64_t lo, uint64_t hi);
+  bool undo_possible() const;
+  bool redo_possible() const;
 };
 
 

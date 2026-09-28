@@ -1,13 +1,23 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // Runs audio through real CLAP plugins installed on this machine: an effect for
-// the insert path, and an instrument for the no-audio-input path.
+// the insert path, and an instrument for the no-audio-input path. The Drone
+// built next to the host is always there, so the backend itself - scan cache,
+// re-activation, parameters while inactive - is exercised on every machine.
+
+#include <unistd.h>
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
 #include "core/channel_strip.h"
 #include "core/plugin.h"
+#include "hosting/common.h"
 
 namespace {
 
@@ -149,6 +159,92 @@ void check_instrument(nirbija::PluginBackend& backend,
   std::printf("  %s: ran idle without producing garbage\n", desc.name.c_str());
 }
 
+// The backend must survive deactivate() + activate(): a JACK period change
+// re-activates every insert with a bigger block, and the plugin must come back
+// as it was, not at its defaults. Also the paths only the Drone can show on
+// every machine: a parameter set while inactive lands through params.flush.
+void check_lifecycle(nirbija::PluginBackend& backend,
+                     const nirbija::PluginDescriptor& desc) {
+  auto plugin = backend.instantiate(desc);
+  if (plugin == nullptr) {
+    fail("instantiate returned null for " + desc.name);
+    return;
+  }
+  plugin->set_channel_layout(2);
+  const auto params = plugin->parameters();
+  if (params.empty()) {
+    fail(desc.name + " reported no parameters");
+    return;
+  }
+  const auto& first = params.front();
+
+  // Inactive: no process() will ever carry this, so it must go straight in.
+  const double original = plugin->parameter_value(first.id);
+  const double moved =
+      (original == first.max_value) ? first.min_value : first.max_value;
+  plugin->set_parameter(first.id, moved);
+  if (plugin->parameter_value(first.id) != moved)
+    fail(desc.name + ": a parameter set before activate was lost");
+
+  if (!plugin->activate(kSampleRate, kBlock)) {
+    fail("activate failed for " + desc.name);
+    return;
+  }
+  Buffers in, out;
+  const float* in_ptrs[2] = {in.ptrs[0], in.ptrs[1]};
+  plugin->process(in_ptrs, out.ptrs, kBlock);
+  if (plugin->parameter_value(first.id) != moved)
+    fail(desc.name + ": the pre-activate value did not survive activation");
+
+  // Period change: down and up again with a bigger block. Same instance,
+  // same state.
+  plugin->deactivate();
+  const uint32_t bigger = kBlock * 4;
+  if (!plugin->activate(kSampleRate, bigger)) {
+    fail(desc.name + ": re-activate with a bigger block failed");
+    return;
+  }
+  if (plugin->parameter_value(first.id) != moved)
+    fail(desc.name + ": re-activation lost a parameter");
+
+  std::vector<std::vector<float>> big_in(2, std::vector<float>(bigger, 0.0f));
+  std::vector<std::vector<float>> big_out(2, std::vector<float>(bigger, 0.0f));
+  const float* big_in_ptrs[2] = {big_in[0].data(), big_in[1].data()};
+  float* big_out_ptrs[2] = {big_out[0].data(), big_out[1].data()};
+  for (int block = 0; block < 4; ++block)
+    plugin->process(big_in_ptrs, big_out_ptrs, bigger);
+  for (const auto& channel : big_out)
+    for (float sample : channel)
+      if (!std::isfinite(sample)) {
+        fail(desc.name + " produced NaN or inf after re-activation");
+        break;
+      }
+
+  // And a value set while deactivated, picked up by the next activation.
+  plugin->deactivate();
+  plugin->set_parameter(first.id, original);
+  if (!plugin->activate(kSampleRate, kBlock)) {
+    fail(desc.name + ": third activate failed");
+    return;
+  }
+  plugin->process(in_ptrs, out.ptrs, kBlock);
+  if (plugin->parameter_value(first.id) != original)
+    fail(desc.name + ": a parameter set while deactivated was lost");
+  plugin->deactivate();
+  std::printf("  %s: survived deactivate/activate with state intact\n",
+              desc.name.c_str());
+}
+
+// Where the Drone .clap was built: next to this binary's tree, unless told.
+std::string drone_dir() {
+  if (const char* env = std::getenv("NIRBIJA_DRONE_CLAP_DIR")) return env;
+  std::error_code ec;
+  const auto exe = std::filesystem::read_symlink("/proc/self/exe", ec);
+  if (ec) return {};
+  // <build>/tests/nirbija_clap_process -> <build>/clap
+  return (exe.parent_path().parent_path() / "clap").string();
+}
+
 }  // namespace
 
 int main() {
@@ -159,14 +255,71 @@ int main() {
 
   if (backend == nullptr) {
     std::printf("CLAP backend not compiled in, skipping\n");
-    return 0;
+    return 77;
   }
 
+  // The Drone built with the host joins the search path, so there is always
+  // one CLAP to run. The scan cache goes to a private directory: this test
+  // must neither read the user's cache nor leave anything in it.
+  const std::string drone = drone_dir();
+  if (!drone.empty()) setenv("CLAP_PATH", drone.c_str(), 1);
+  const std::filesystem::path cache_dir =
+      std::filesystem::temp_directory_path() /
+      ("nirbija-clap-process-" + std::to_string(getpid()));
+  std::filesystem::create_directories(cache_dir);
+  setenv("XDG_CACHE_HOME", cache_dir.c_str(), 1);
+
+  auto& opens = nirbija::hosting::module_open_count();
+  const uint64_t before = opens.load();
   const auto all = backend->scan();
-  if (all.empty()) {
-    std::printf("no CLAP plugins installed, skipping\n");
-    return 0;
+  const uint64_t after_first = opens.load();
+  if (after_first == before) fail("the first scan opened no module at all");
+
+  // Second scan: every module is unchanged, so none may be opened again.
+  const auto again = backend->scan();
+  if (opens.load() != after_first)
+    fail("the second scan re-opened " + std::to_string(opens.load() - after_first) +
+         " module(s) the cache should have answered for");
+  if (again.size() != all.size())
+    fail("the cached scan listed " + std::to_string(again.size()) +
+         " plugins, the real one " + std::to_string(all.size()));
+  for (size_t i = 0; i < all.size() && i < again.size(); ++i) {
+    if (all[i].uid != again[i].uid || all[i].name != again[i].name ||
+        all[i].kind != again[i].kind || all[i].path != again[i].path ||
+        all[i].category != again[i].category) {
+      fail("cached descriptor differs from the scanned one for " + all[i].name);
+      break;
+    }
   }
+
+  // A corrupt cache is ignored and rebuilt, not trusted and not fatal.
+  {
+    std::ofstream garbage(cache_dir / "nirbija" / "plugins-clap.json",
+                          std::ios::trunc);
+    garbage << "{\"version\":1,\"modules\":[{\"path\":\"x\",\"plugins\":[{\"kind\":99}]},";
+  }
+  const auto rebuilt = backend->scan();
+  if (rebuilt.size() != all.size())
+    fail("scanning over a corrupt cache changed the result");
+  if (opens.load() == after_first)
+    fail("scanning over a corrupt cache opened nothing: it trusted garbage");
+
+  std::error_code ec;
+  std::filesystem::remove_all(cache_dir, ec);
+
+  if (all.empty()) {
+    std::printf("no CLAP plugins found, not even the Drone; skipping\n");
+    return failures > 0 ? 1 : 77;
+  }
+
+  bool found_drone = false;
+  for (const auto& desc : all) {
+    if (desc.uid != "com.nirbija.drone") continue;
+    found_drone = true;
+    check_lifecycle(*backend, desc);
+    check_instrument(*backend, desc);
+  }
+  if (!found_drone) fail("the built Drone .clap was not found under " + drone);
 
   if (const auto* effect = find_by_name(all, "Dragonfly Room Reverb")) {
     check_effect(*backend, *effect);

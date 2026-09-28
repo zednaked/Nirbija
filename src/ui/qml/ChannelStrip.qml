@@ -1,4 +1,5 @@
 pragma ComponentBehavior: Bound
+// SPDX-License-Identifier: GPL-3.0-only
 
 import QtQuick
 import QtQuick.Layouts
@@ -29,8 +30,12 @@ Rectangle {
     property real holdRight: 0
     property string inputLabel: ""
     property string midiLabel: ""
+    property bool inputConnected: false
+    property bool midiConnected: false
     property string outputLabel: ""
-    // [{name, bypassed, postFader}]
+    // [{name, filled, missing, bypassed, postFader, ...}] - see
+    // MixerModel::InsertDetailsRole. `filled` is false for a hole left by a
+    // removal, which is a slot to fill, not a plugin to open.
     property var inserts: []
     property bool isBus: false
     property var sends: []
@@ -102,7 +107,7 @@ Rectangle {
             Layout.preferredHeight: visible ? Skin.slotHeight : 0
             label: root.inputLabel
             tip: qsTr("Audio input for this channel. Click to pick a source; right-click for the full list.")
-            filled: root.inputLabel !== qsTr("no input")
+            filled: root.inputConnected
             position: Math.max(root.positionLeft, root.positionRight)
             onClicked: root.inputSlotClicked(this)
             onMenuRequested: root.inputMenuRequested(this)
@@ -116,7 +121,7 @@ Rectangle {
             Layout.preferredHeight: visible ? Skin.slotHeight : 0
             label: root.midiLabel
             tip: qsTr("MIDI input. Click to pick a source; right-click to filter which MIDI channels get through.")
-            filled: root.midiLabel !== qsTr("no MIDI")
+            filled: root.midiConnected
             position: 0
             onClicked: root.midiSlotClicked(this)
             onMenuRequested: root.midiMenuRequested(this)
@@ -231,8 +236,12 @@ Rectangle {
                 required property int index
 
                 width: insertList.width
-                pluginName: index < root.inserts.length
-                            ? root.inserts[index].name : ""
+                readonly property bool present: index < root.inserts.length
+                                                && root.inserts[index].filled === true
+                pluginName: slot.present ? root.inserts[index].name : ""
+                missing: slot.present && root.inserts[index].missing === true
+                uid: slot.present && root.inserts[index].uid !== undefined
+                     ? root.inserts[index].uid : ""
                 bypassed: index < root.inserts.length
                           && root.inserts[index].bypassed === true
                 postFader: index < root.inserts.length
@@ -251,8 +260,7 @@ Rectangle {
                                     && root.inserts[index].sequencerRecording === true
                 onClicked: root.insertSlotClicked(slot.index, slot)
                 onMenuRequested: {
-                    if (slot.index < root.inserts.length)
-                        root.insertMenuRequested(slot.index, slot)
+                    if (slot.present) root.insertMenuRequested(slot.index, slot)
                 }
             }
         }
@@ -332,7 +340,7 @@ Rectangle {
                     if (!active) return
                     const step = root.stripStep
                     const minRow = -root.row
-                    const maxRow = Mixer.rowCount() - 1 - root.row
+                    const maxRow = Mixer.count - 1 - root.row
                     const travelled = centroid.position.x - centroid.pressPosition.x
                     // A half-step of "give" past the last strip it can still
                     // promise to land on, so the drag does not feel like it

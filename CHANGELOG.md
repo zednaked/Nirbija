@@ -1,6 +1,113 @@
 # Changelog
 
-## 0.4.0 — unreleased
+## 0.4.0 — 2026-09-27
+
+### A review of the whole tree, and what it turned up
+
+A complete pass over the ~45k lines - the audio core, the built-in
+instruments, the three plugin backends, the Qt interface, the build - with
+one question: where does this stop short of perfect on stage? What follows
+is what changed. Every item on the audio path has a headless test beside it
+in `tests/`, and the suite runs under ASan, UBSan and now ThreadSanitizer.
+
+**Two crashes that were waiting to happen.** The engine kept its JACK port
+records in a `std::vector` the UI thread resized while the process callback
+walked it; it is a fixed array of atomics now, published before the strip
+goes live. And the realtime thread reached strips through the `unique_ptr`
+the UI had just moved out on removal; it reads the atomic live pointer only
+(`live_channel()`, `live_bus()`).
+
+**A PipeWire quantum change no longer overflows plugins.** When the period
+grew, the graph resized its own scratch but never told the plugins, so a
+CLAP or VST3 activated at 256 frames was handed 1024. A growth now
+deactivates and reactivates every insert with the new maximum, and the
+backends carry state across that (`tests/strip_reactivate.cpp`).
+
+**No more holes from the looper.** Rec, Clear, Undo, Redo and Multiply
+parked the whole graph - master faded to silence, a quiet block, fade back -
+to copy the tape on the UI thread; and since Rec marks the session dirty, the
+autosave a second later parked it again with the take still running. The
+looper keeps two tapes and copies each frame to the shadow just before the
+first time a pass overwrites it, on the audio thread, so undo is one pointer
+swap and nothing ever parks (`tests/looper_rt_test.cpp` fails on any
+allocation inside `process()`). Punch-in and punch-out land on the exact
+frame of the bar rather than the start of the block; the wrap of the loop and
+the edges of a recording pass get a five-millisecond crossfade; gain, play
+and pitch ramp instead of stepping; playback interpolates with a Hermite
+curve.
+
+**Plugin delay compensation stopped clicking.** Inserting or bypassing a
+latent plugin on one strip changed the delay of every other strip in the
+same block, a jump on every channel. The delay line crossfades from the old
+read position to the new one (`tests/pdc_crossfade.cpp`); its per-sample
+modulo went too.
+
+**MIDI in time order.** Injected events and each insert's own output were
+appended, not merged; LV2 and CLAP both require non-decreasing time. The
+chain buffer is sorted by frame, note-off before note-on on a tie, before any
+insert sees it (`tests/midi_order.cpp`). A torn snapshot of the insert chain
+no longer runs the block with no inserts; it reuses the last good one.
+
+**The step sequencer on the downbeat.** A pattern change queued for the bar
+took effect only when a block *started* in the new bar, so the first step
+played the old pattern; the pattern is chosen per step now. Gate and ratchet
+note-offs are emitted where they fall inside the block rather than after the
+step loop, so a 25% gate at 1/16 is exact to the sample; a MIDI clock that
+jumps slightly between blocks can no longer skip a step. The `process()`
+that had grown to 340 lines is eight named methods.
+
+**The sampler, the drone, the FX pad, the file player.** The sampler
+published a new pad buffer after reading the generation that guards the old
+one, a window for a use-after-free; the order is fixed and shared through
+`dsp::RetiredList`. Retriggering a pad or swapping its sample cut the
+sounding voice dead; there is a pool of thirty-two voices and the old one
+fades. The drone recomputes its six frequencies every 32 samples instead of
+every sample, takes its sine from a table and its saturation from a rational
+curve. The FX pad hoists every coefficient out of the sample loop, ramps its
+gate and cutter edges, windows its stutter and crossfades its reverse. The
+file player ramps gain and transport, crossfades its loop point and a file
+swap. The standalone Drone CLAP tells the host when a note re-roots it, treats
+velocity zero as a note-off, and resets without allocating.
+
+**The plugin backends, closer to their specs.** CLAP: the note dialect a port
+asks for is honoured (a CLAP-only synth used to stay mute), the host answers
+`request_restart`, `params.rescan`/`request_flush`, `latency.changed`,
+`gui.request_resize`/`closed`, and a parameter set while the plugin is not
+processing is flushed rather than dropped. VST3: `IComponentHandler2` so
+plugins can mark themselves dirty, `restartComponent` actually restarts,
+parameters flush with a zero-sample process when idle, and the controller
+state is saved beside the component (old blobs still load). LV2: a sample-rate
+change re-instantiates with state, the MIDI atom port is chosen by
+`atom:supports`, buffers follow `rsz:minimumSize`, options say the truth about
+block sizes, and latency comes from `lv2:latency`. All three share
+`hosting/common.h`. Plugin scans are cached on disk by path, mtime and size,
+and a module is never `dlclose`d once it has been instantiated.
+
+**Realtime infrastructure.** The process memory is locked (`mlockall`), and
+the graph reports its internal latency - delay compensation plus the
+limiter's lookahead - to JACK. The metronome click is rendered inside the
+graph, so it obeys the limiter and stays silent during a park. Zeroing of
+scratch buffers, latency queries and direct-out copies happen only where
+something was written or is connected.
+
+**A third sampler pack, named for what it holds.** The pack imported from a
+Koala Sampler project is `sessions/packs/long-chops/` - sixteen recorded
+phrases and loops to trim and chop, not a kit - and is documented beside
+808 Trap and Techno Clang. `tests/session_roundtrip.cpp` now opens every pack
+in `sessions/packs/` in a fresh sampler and fails when a pad it names comes up
+silent, so a moved folder or a missing WAV is caught before a gig.
+
+**The build.** `CMakePresets.json` names every tree (`dev`, `debug`, `asan`,
+`asan-ui`, `tsan`, `release`). An unset build type means Release, Release
+means LTO, `-fno-plt` and hidden inline visibility, and the DSP core is
+compiled without `errno` and trapping-math bookkeeping. `dist.sh` strips the
+binary through CMake (11 MB to 6). libsystemd is behind `NIRBIJA_BLE_MIDI`.
+Tests carry labels: the pre-push hook runs `quick` in about twenty seconds
+with a timeout on every test, instead of opening every plugin on the machine
+for minutes; CI runs on every push now that the repository is public, adds a
+ThreadSanitizer job and a Qt job with `qmllint` in an Arch container. `tests/render_bench.cpp` measures the worst block.
+There is an AppStream `metainfo.xml`, a `PKGBUILD`, `.clang-format` and
+`.editorconfig`.
 
 ### A drone instrument, with an editor made of strings
 

@@ -95,8 +95,13 @@ the Sampler in the chain.
   snare, hats front to back.
 - **Techno Clang** (`packs/techno-clang/`) — a punchy distorted kick, harsh
   metallic hats, a clang where the cowbell usually sits.
+- **Long Chops** (`packs/long-chops/`) — sixteen recorded phrases and loops,
+  three to thirty-seven seconds each, not one-shots: pads to trim, pitch and
+  chop in the Sampler editor rather than to fire as a kit. Imported from a
+  Koala Sampler project with `import-koala.py`, which carried each pad's trim,
+  pitch, pan and volume across.
 
-Both come out of the same tiny synth as the house kit above (`drum_synth.py`,
+The first two come out of the same tiny synth as the house kit above (`drum_synth.py`,
 shared by both generator scripts) — different numbers in, a different kit
 out. Rebuild after tuning a voice:
 

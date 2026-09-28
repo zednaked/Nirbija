@@ -1,4 +1,5 @@
 pragma ComponentBehavior: Bound
+// SPDX-License-Identifier: GPL-3.0-only
 
 import QtQuick
 import QtQuick.Controls.Basic
@@ -25,7 +26,7 @@ import Nirbija
 // one. The four macros a performer rides - Density, Chaos, Probability,
 // Ratchet - are bars on the right, Swing and Transpose smaller ones below
 // them, and MAP binds any of them to a knob on this strip's MIDI input.
-Popup {
+EditorPopup {
     id: root
 
     property int targetRow: -1
@@ -149,9 +150,6 @@ Popup {
     // of them. QML-only — the engine still focuses a lane.
     property int focusedPitch: -1
     readonly property int unlockedNote: 255
-    // Set once, the first time this ever opens - after that the popup stays
-    // wherever it was last dragged, the same as a real tool window would.
-    property bool positioned: false
 
     // MAP: press it, tap a control, turn a knob. `waitingParam` is the one
     // tapped and not yet bound; `mapped` says which already have a knob.
@@ -231,78 +229,13 @@ Popup {
     // A row that outgrows this width should look cramped, not spill buttons
     // out past the panel and over the mixer behind it.
     clip: true
-    // Not modal: the mixer behind it stays live, so a fader or the transport
-    // is still reachable with this open - the whole point of it being a tool
-    // window rather than a dialog. Dragging the empty background moves it;
-    // see the DragHandler below.
-    modal: false
-    padding: Skin.spacingL
-    closePolicy: (root.mapping || Mixer.learning)
-                 ? Popup.NoAutoClose
-                 : Popup.CloseOnEscape
-
-    background: Rectangle {
-        gradient: Gradient {
-            GradientStop { position: 0.0; color: Qt.lighter(Skin.popup, 1.08) }
-            GradientStop { position: 1.0; color: Skin.popup }
-        }
-        border.width: 1
-        border.color: Skin.border
-        radius: Skin.radiusL
-        clip: true
-
-        // The glow: light under a door, in the state's colour. While the
-        // pattern runs it breathes on the one, so the bar can be felt with
-        // the popup half seen across a dark stage; recording and Fill keep
-        // a floor so they are never missed.
-        Rectangle {
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.bottom: parent.bottom
-            height: parent.height * 0.4
-            radius: parent.radius
-            gradient: Gradient {
-                GradientStop { position: 0.0; color: "transparent" }
-                GradientStop { position: 1.0; color: root.stateHue }
-            }
-            opacity: root.stateBusy ? 0.18 + 0.10 * root.flash
-                   : root.playing && root.hitCount > 0 ? 0.08 + 0.16 * root.flash
-                   : 0
-            Behavior on opacity { NumberAnimation { duration: 120 } }
-        }
-
-        HoverHandler {}
-        TapHandler {}
-        // Empty chrome is not a handler on its own, so without this a press
-        // on the padding falls through onto whatever strip sits underneath -
-        // and, now that the popup can sit anywhere, doubles as how it moves.
-        DragHandler {
-            target: null
-            grabPermissions: PointerHandler.TakeOverForbidden
-            onCentroidChanged: if (active) {
-                const nx = root.x + centroid.position.x - centroid.pressPosition.x
-                const ny = root.y + centroid.position.y - centroid.pressPosition.y
-                const maxX = Overlay.overlay
-                    ? Math.max(0, Overlay.overlay.width - root.width) : nx
-                const maxY = Overlay.overlay
-                    ? Math.max(0, Overlay.overlay.height - root.height) : ny
-                root.x = Math.max(0, Math.min(nx, maxX))
-                root.y = Math.max(0, Math.min(ny, maxY))
-            }
-        }
-        WheelHandler {
-            acceptedModifiers: Qt.NoModifier
-            onWheel: event => event.accepted = true
-        }
-        WheelHandler {
-            acceptedModifiers: Qt.ShiftModifier
-            onWheel: event => event.accepted = true
-        }
-    }
-
-    enter: Transition {
-        NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Skin.fast }
-    }
+    // The chrome, the glow and the drag are EditorPopup's; what the glow
+    // says is this editor's.
+    holdOpen: root.mapping || Mixer.learning
+    glowHue: root.stateHue
+    glowOpacity: root.stateBusy ? 0.18 + 0.10 * root.flash
+                 : root.playing && root.hitCount > 0 ? 0.08 + 0.16 * root.flash
+                 : 0
 
     onClosed: {
         root.playhead = -1
@@ -359,21 +292,10 @@ Popup {
         easing.type: Easing.OutQuad
     }
 
-    // A ring in the corner of anything bound to a knob - the same ring the
-    // bars draw for themselves.
-    component MapDot: Rectangle {
+    component MapDot: MapRing {
         required property int param
-        anchors.right: parent.right
-        anchors.top: parent.top
-        anchors.margins: Skin.spacingXS
-        width: Px.px(8)
-        height: Px.px(8)
-        radius: width / 2
-        z: 2
-        visible: root.isMapped(param)
-        color: "transparent"
-        border.width: Px.px(2)
-        border.color: root.waitingParam === param ? Skin.solo : Skin.focus
+        mapped: root.isMapped(param)
+        waiting: root.waitingParam === param
     }
 
     // The header's buttons: a little taller than the mixer's, the way the
@@ -533,24 +455,33 @@ Popup {
     // pollOnly is for the 50ms playhead timer: it already pays for this
     // snapshot every tick, but the target-chain query and the row-pitch
     // scan don't need redoing unless what feeds them actually moved.
+    // Assigns a plane only when it differs: every `property var` written
+    // here invalidates the bindings of a hundred and twenty-eight cells,
+    // whether or not a single value moved.
+    function takePlane(name, next) {
+        const value = next || []
+        if (!root.sameFields(value, root[name])) root[name] = value
+    }
+
     function readAll(pollOnly) {
         const snap = Mixer.insertSequencerSnapshot(root.targetRow, root.targetSlot)
         const prevNote = root.note
         const prevLanes = root.lanes
-        root.on = snap.on || []
-        root.accent = snap.accent || []
-        root.tie = snap.tie || []
-        root.note = snap.note || []
-        root.vel = snap.vel || []
-        root.chance = snap.chance || []
-        root.ratchet = snap.ratchet || []
-        root.cond = snap.cond || []
-        root.condArg = snap.condArg || []
-        root.micro = snap.micro || []
-        root.lanes = snap.lanes || []
-        root.gates = snap.gates || []
-        root.heads = snap.heads || []
-        root.macros = snap.macros || [1, 0, 0, 1]
+        root.takePlane("on", snap.on)
+        root.takePlane("accent", snap.accent)
+        root.takePlane("tie", snap.tie)
+        root.takePlane("note", snap.note)
+        root.takePlane("vel", snap.vel)
+        root.takePlane("chance", snap.chance)
+        root.takePlane("ratchet", snap.ratchet)
+        root.takePlane("cond", snap.cond)
+        root.takePlane("condArg", snap.condArg)
+        root.takePlane("micro", snap.micro)
+        root.takePlane("lanes", snap.lanes)
+        root.takePlane("gates", snap.gates)
+        root.takePlane("heads", snap.heads)
+        root.takePlane("macros", snap.macros || [1, 0, 0, 1])
+        root.planeVersion = Mixer.sequencerVersion(root.targetRow, root.targetSlot)
         root.pattern = snap.pattern ?? 0
         root.nextPattern = snap.nextPattern ?? -1
         root.fill = snap.fill === true || snap.fill === 1
@@ -608,20 +539,8 @@ Popup {
         root.refreshMapped()
         root.revealFocusedVoice()
         root.page = 0
-        if (!root.positioned) {
-            root.x = Math.round((Overlay.overlay.width - root.width) / 2)
-            root.y = Math.round((Overlay.overlay.height - root.height) / 2)
-            root.positioned = true
-        }
-        root.clampPos()
+        root.place()
         root.open()
-    }
-
-    function clampPos() {
-        const ov = Overlay.overlay
-        if (!ov) return
-        root.x = Math.max(0, Math.min(root.x, ov.width - root.width))
-        root.y = Math.max(0, Math.min(root.y, ov.height - root.height))
     }
 
     function setParam(id, value) {
@@ -1038,19 +957,34 @@ Popup {
             Math.max(root.lowNote, Math.min(root.highNote, midi))))
     }
 
-    Timer {
-        running: root.visible
-        interval: 50
-        repeat: true
-        onTriggered: {
+    // The version of the planes the grid was last built from - see
+    // Mixer.sequencerVersion(). 0 is "never".
+    property int planeVersion: 0
+
+    // On the mixer's own 30 Hz beat rather than a timer of this popup's.
+    // Each tick reads the two things that move on their own - the heads and
+    // the playhead - and asks the model whether anything else did. Only then
+    // is the whole snapshot fetched: it is five thousand values and every
+    // cell binding in the grid, and it used to be rebuilt twenty times a
+    // second to move a playhead.
+    Connections {
+        target: Mixer
+        enabled: root.visible
+        function onTick() {
             root.playhead = Mixer.insertPlayhead(root.targetRow, root.targetSlot)
-            // The full snapshot, not just the playhead: the grid needs all
-            // eight heads lit, and Record needs the pattern it is painting.
-            // insertSequencerSnapshot is already the size of an insertParameters
-            // call on a plugin with a hundred-odd parameters - the same 50ms
-            // timer already paid for that elsewhere. pollOnly skips redoing
-            // the target-chain query and row-pitch scan when nothing moved.
-            root.readAll(true)
+            const heads = Mixer.insertSequencerHeads(root.targetRow, root.targetSlot)
+            if (!root.sameFields(heads, root.heads)) root.heads = heads
+            const version = Mixer.sequencerVersion(root.targetRow, root.targetSlot)
+            if (version !== root.planeVersion) {
+                root.planeVersion = version
+                // pollOnly skips redoing the target-chain query and the
+                // row-pitch scan unless what feeds them actually moved.
+                root.readAll(true)
+            } else {
+                // The chain under the sequencer moves without this window
+                // being told - see readAll(). One short walk of the strip.
+                if (root.readTarget()) root.rebuildRowPitches()
+            }
             // The focused lane came round to its one: that was the bar.
             const head = root.headStep
             if (head === 0 && root.lastHeadStep !== 0 && root.lastHeadStep >= 0) root.flare()
@@ -1066,7 +1000,6 @@ Popup {
 
     contentItem: ColumnLayout {
         spacing: Skin.spacing
-        clip: true
 
         // --- header ------------------------------------------------------------
         RowLayout {
@@ -1087,81 +1020,43 @@ Popup {
             // it, the focused lane's own bar.beat, which pattern is playing
             // and which is queued, and the name of the chip the notes reach
             // - or a warning that nothing does.
-            Rectangle {
+            StageChip {
                 id: stageChip
                 Layout.preferredWidth: Px.px(340)
                 Layout.preferredHeight: Skin.buttonHeight + Px.px(6)
-                radius: Skin.radius
-                color: Skin.slotEmpty
-                border.width: 1
-                border.color: Qt.rgba(root.stateHue.r, root.stateHue.g, root.stateHue.b, 0.6)
-                property real pulse: 1
+                hue: root.stateHue
+                busy: root.stateBusy
+                lit: root.playing
+                label: root.stateLabel
 
-                SequentialAnimation on pulse {
-                    running: root.stateBusy
-                    loops: Animation.Infinite
-                    NumberAnimation { from: 1; to: 0.35; duration: 420; easing.type: Easing.InOutSine }
-                    NumberAnimation { from: 0.35; to: 1; duration: 420; easing.type: Easing.InOutSine }
+                Text {
+                    visible: root.laneClock.length > 0
+                    text: root.laneClock
+                    color: Skin.text
+                    font.pixelSize: Skin.fontL
+                    font.bold: true
+                    font.family: Skin.monoFamily
                 }
 
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: Skin.spacing
-                    anchors.rightMargin: Skin.spacing
-                    spacing: Skin.spacingS
-
-                    Rectangle {
-                        Layout.preferredWidth: Px.px(10)
-                        Layout.preferredHeight: Px.px(10)
-                        radius: width / 2
-                        color: root.stateHue
-                        opacity: root.stateBusy ? stageChip.pulse
-                               : root.playing ? 1 : 0.5
-                    }
-
-                    Text {
-                        text: root.stateLabel
-                        color: root.stateHue
-                        font.pixelSize: Skin.fontL
-                        font.bold: true
-                        font.letterSpacing: Px.px(1)
-                    }
-
-                    Text {
-                        visible: root.laneClock.length > 0
-                        text: root.laneClock
-                        color: Skin.text
-                        font.pixelSize: Skin.fontL
-                        font.bold: true
-                        font.family: Skin.monoFamily
-                    }
-
-                    Text {
-                        text: root.nextPattern >= 0 && root.nextPattern !== root.pattern
-                              ? qsTr("P%1 → P%2").arg(root.pattern + 1).arg(root.nextPattern + 1)
-                              : qsTr("P%1").arg(root.pattern + 1)
-                        color: root.nextPattern >= 0 && root.nextPattern !== root.pattern
-                               ? Skin.solo : Skin.textDim
-                        font.pixelSize: Skin.fontS
-                        font.bold: true
-                        font.family: Skin.monoFamily
-                    }
-
-                    Text {
-                        Layout.fillWidth: true
-                        text: root.targetName.length > 0
-                              ? "→ " + root.targetName
-                              : qsTr("→ nothing below")
-                        color: root.targetName.length > 0 ? Skin.textDim : Skin.solo
-                        font.pixelSize: Skin.fontS
-                        elide: Text.ElideRight
-                    }
+                Text {
+                    text: root.nextPattern >= 0 && root.nextPattern !== root.pattern
+                          ? qsTr("P%1 → P%2").arg(root.pattern + 1).arg(root.nextPattern + 1)
+                          : qsTr("P%1").arg(root.pattern + 1)
+                    color: root.nextPattern >= 0 && root.nextPattern !== root.pattern
+                           ? Skin.solo : Skin.textDim
+                    font.pixelSize: Skin.fontS
+                    font.bold: true
+                    font.family: Skin.monoFamily
                 }
 
-                HoverHandler { id: stageHover }
-                Tip {
-                    text: qsTr("What the sequencer is doing, where the focused lane is as bar.beat, which pattern plays and which is queued, and the instrument the notes go to - the next insert down this strip.")
-                    visible: stageHover.hovered
+                Text {
+                    Layout.fillWidth: true
+                    text: root.targetName.length > 0
+                          ? "→ " + root.targetName
+                          : qsTr("→ nothing below")
+                    color: root.targetName.length > 0 ? Skin.textDim : Skin.solo
+                    font.pixelSize: Skin.fontS
+                    elide: Text.ElideRight
                 }
             }
 

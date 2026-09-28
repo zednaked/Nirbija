@@ -1,4 +1,5 @@
 pragma ComponentBehavior: Bound
+// SPDX-License-Identifier: GPL-3.0-only
 
 import QtQuick
 import QtQuick.Controls.Basic
@@ -18,7 +19,7 @@ Popup {
     // especially at a high UI scale where both grow together - centred, an
     // oversized popup would have overflowed evenly off both edges instead of
     // just one, but still past the only surface it can draw on.
-    width: Math.min(Px.px(760), Px.px(220) + Mixer.rowCount() * Px.px(46),
+    width: Math.min(Px.px(760), Px.px(220) + Mixer.count * Px.px(46),
                     Overlay.overlay ? Overlay.overlay.width - Px.px(24)
                                      : Px.px(760))
     height: Math.min(Px.px(500), Px.px(110) + sources.length * Px.px(36),

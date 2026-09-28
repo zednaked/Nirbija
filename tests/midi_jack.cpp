@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // Proves the MIDI path through JACK itself: a second client sends a note into
 // the engine's channel MIDI port, a synth on that channel plays it, and the
 // master bus meter shows the sound. midi_synth covers the same chain with the

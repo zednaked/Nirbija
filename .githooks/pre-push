@@ -1,18 +1,30 @@
 #!/usr/bin/env bash
 # Passe de sanitizer antes de deixar o push sair.
 #
-# Este e o guardiao do projeto, e mora aqui e nao no GitHub Actions de
-# proposito: o repo e privado, e la o Actions consome cota da conta. Aqui e de
-# graca e o retorno vem antes do push, nao depois. O workflow continua no
-# repositorio, so que sob demanda, para quando fizer falta uma arvore limpa.
+# Este e o primeiro guardiao do projeto e mora aqui, na maquina, porque o
+# retorno vem antes do push e nao depois. O workflow em .github/ e o segundo:
+# roda a cada push numa arvore limpa, com Qt, TSan e tudo o que a maquina
+# local nao tem como comparar.
+#
+# Aqui roda so a suite rapida (`ctest -L quick`): os testes offline de DSP e
+# de grafo, uns vinte segundos incrementais. Os que abrem todos os plugins da
+# maquina ou precisam de um servidor de audio ficam de fora - eles levavam
+# minutos e nao dependem do que mudou no commit; `ctest --preset all` roda
+# tudo quando fizer falta.
 #
 # Ligar (uma vez por clone):
 #
 #     git config core.hooksPath .githooks
+#     cmake --preset asan
 #
 # Pular numa emergencia:
 #
 #     NIRBIJA_SKIP_CHECK=1 git push        (ou git push --no-verify)
+#
+# Rodar tambem a suite rapida sob ThreadSanitizer, se build-tsan/ existir
+# (cmake --preset tsan):
+#
+#     NIRBIJA_TSAN=1 git push
 
 set -uo pipefail
 
@@ -20,6 +32,9 @@ set -uo pipefail
 
 raiz=$(git rev-parse --show-toplevel)
 build=$raiz/build-asan
+# Um log por execucao, nao um nome fixo em /tmp que colide entre usuarios e
+# entre dois pushes ao mesmo tempo.
+log=$(mktemp -t nirbija-prepush.XXXXXX)
 
 # Sem a arvore de sanitizer nao ha o que rodar. Isso avisa e deixa passar em vez
 # de barrar: quem acabou de clonar nao deve descobrir o hook sendo impedido de
@@ -30,37 +45,46 @@ if [ ! -f "$build/CMakeCache.txt" ]; then
   pre-push: sem arvore de sanitizer, seguindo sem checar.
   Para ligar a checagem, uma vez:
 
-    cmake -S . -B build-asan -G Ninja \\
-      -DNIRBIJA_UI=OFF -DNIRBIJA_TESTS=ON -DCMAKE_BUILD_TYPE=Debug \\
-      -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \\
-      -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+    cmake --preset asan
 
 AVISO
   exit 0
 fi
 
-printf '\n  pre-push: compilando sob ASan+UBSan...\n' >&2
-if ! cmake --build "$build" -j"$(nproc)" >/tmp/nirbija-prepush.log 2>&1; then
-  printf '\n  pre-push: a compilacao falhou. Push barrado.\n' >&2
-  tail -25 /tmp/nirbija-prepush.log >&2
-  printf '\n  Log inteiro em /tmp/nirbija-prepush.log\n' >&2
+falhou() {
+  printf '\n  pre-push: %s. Push barrado.\n' "$1" >&2
+  tail -40 "$log" >&2
+  printf '\n  Log inteiro em %s\n' "$log" >&2
   printf '  Para empurrar assim mesmo: NIRBIJA_SKIP_CHECK=1 git push\n\n' >&2
   exit 1
-fi
+}
+
+printf '\n  pre-push: compilando sob ASan+UBSan...\n' >&2
+cmake --build "$build" -j"$(nproc)" >"$log" 2>&1 || falhou "a compilacao falhou"
 
 # detect_leaks=0 nao e preguica: o LeakSanitizer acusa vazamento dentro de
 # pw_context_load_module quando o libjack abre o cliente, e o vazamento e do
 # PipeWire. Sem isso quatro testes parecem quebrados.
-printf '  pre-push: rodando a suite...\n' >&2
-if ! ASAN_OPTIONS=detect_leaks=0 \
-     UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=0 \
-     ctest --test-dir "$build" --output-on-failure >/tmp/nirbija-prepush.log 2>&1; then
-  printf '\n  pre-push: teste falhou. Push barrado.\n\n' >&2
-  tail -40 /tmp/nirbija-prepush.log >&2
-  printf '\n  Log inteiro em /tmp/nirbija-prepush.log\n' >&2
-  printf '  Para empurrar assim mesmo: NIRBIJA_SKIP_CHECK=1 git push\n\n' >&2
-  exit 1
+#
+# --timeout e a rede: nenhum teste rapido leva mais de segundos, e um JACK
+# travado segurava o push pelos 25 minutos do padrao do ctest.
+printf '  pre-push: rodando a suite rapida...\n' >&2
+ASAN_OPTIONS=detect_leaks=0 \
+UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=0 \
+  ctest --test-dir "$build" -L quick --timeout 120 --output-on-failure \
+  >"$log" 2>&1 || falhou "teste falhou"
+printf '  pre-push: %s\n' "$(grep -E 'tests passed' "$log" | tail -1)" >&2
+
+if [ "${NIRBIJA_TSAN:-0}" = "1" ] && [ -f "$raiz/build-tsan/CMakeCache.txt" ]; then
+  printf '  pre-push: compilando sob TSan...\n' >&2
+  cmake --build "$raiz/build-tsan" -j"$(nproc)" >"$log" 2>&1 || falhou "a compilacao TSan falhou"
+  printf '  pre-push: suite rapida sob TSan...\n' >&2
+  TSAN_OPTIONS=halt_on_error=0 \
+    ctest --test-dir "$raiz/build-tsan" -L quick --timeout 300 --output-on-failure \
+    >"$log" 2>&1 || falhou "teste falhou sob TSan"
+  printf '  pre-push: %s\n' "$(grep -E 'tests passed' "$log" | tail -1)" >&2
 fi
 
-printf '  pre-push: %s\n\n' "$(grep -E 'tests passed' /tmp/nirbija-prepush.log | tail -1)" >&2
+rm -f "$log"
+printf '\n' >&2
 exit 0

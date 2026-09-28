@@ -1,7 +1,14 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // Drives MixerModel the way the QML does — add a channel, move a fader, load an
 // insert — without opening a window. Catches the wiring breaking between the UI
 // and the engine, which a compile check cannot.
 
+// Before Qt: the sequencer has an emit() method, and Qt's emit is a macro.
+#include "core/step_sequencer.h"
+
+#include <QCoreApplication>
+#include <QElapsedTimer>
 #include <QGuiApplication>
 #include <QFile>
 #include <QTemporaryDir>
@@ -88,9 +95,11 @@ int main(int argc, char* argv[]) {
   qputenv("NIRBIJA_SESSION", (dir.path() + "/session.json").toLocal8Bit());
 
   nirbija::MixerModel mixer;
+  // The scan runs on a worker now; the checks below reach for the list.
+  mixer.waitForScan();
   if (!mixer.running()) {
     std::printf("no audio server available, skipping\n");
-    return 0;
+    return 77;  // CTest marks it Skipped rather than Passed
   }
 
   mixer.addChannel(QStringLiteral("Guitar"), 2);
@@ -847,6 +856,190 @@ int main(int argc, char* argv[]) {
             fail("a loaded strip carries the wrong name");
         }
       }
+    }
+  }
+
+  // --- a bad file does not take the autosave with it ------------------------
+  //
+  // Loading used to call newSession() first, which wrote an empty session
+  // over the autosave before the file was even read: a load that then
+  // failed had already destroyed the last good state. Now the autosave is
+  // untouched until a session that did load is saved, a copy is kept
+  // beside it, and a failed load puts the previous session back.
+  {
+    mixer.saveSession();
+    const QString autosave = dir.path() + QStringLiteral("/session.json");
+    QFile before(autosave);
+    QByteArray was;
+    if (before.open(QIODevice::ReadOnly)) {
+      was = before.readAll();
+      before.close();
+    }
+    const int rows = mixer.rowCount();
+
+    const QString broken = dir.path() + QStringLiteral("/broken.json");
+    QFile out(broken);
+    if (out.open(QIODevice::WriteOnly)) {
+      out.write("{ \"version\": 1, \"channels\": [ { \"name\": ");
+      out.close();
+    }
+    if (mixer.loadSessionFrom(QUrl::fromLocalFile(broken)))
+      fail("a truncated session file loaded");
+    if (mixer.rowCount() != rows)
+      fail("a failed load did not put the previous session back");
+    QFile after(autosave);
+    if (after.open(QIODevice::ReadOnly)) {
+      if (after.readAll() != was) fail("a failed load rewrote the autosave");
+      after.close();
+    }
+  }
+
+  // --- a plugin this machine does not have is kept, not dropped -----------
+  //
+  // The insert details show the gap (missing, uid), the row still carries
+  // the entry and its state blob, and the next save writes it back.
+  {
+    const QString path = dir.path() + QStringLiteral("/ghost.json");
+    QFile out(path);
+    if (!out.open(QIODevice::WriteOnly)) {
+      fail("could not write a session with a missing plugin");
+    } else {
+      out.write(R"({
+        "version": 1, "tempo": 120, "master": { "gain": 1 },
+        "channels": [
+          { "name": "Ghost", "isBus": false, "width": 2, "sends": [],
+            "inserts": [
+              { "format": "Internal", "uid": "nirbija.fxpad" },
+              { "format": "LV2", "uid": "urn:nobody:has:this", "bypassed": true,
+                "state": "AAECAw==" }
+            ] }
+        ]
+      })");
+      out.close();
+
+      QString reported;
+      const auto link = QObject::connect(
+          &mixer, &nirbija::MixerModel::errorOccurred,
+          [&reported](const QString& message) { reported += message; });
+      const bool ok = mixer.loadSessionFrom(QUrl::fromLocalFile(path));
+      QObject::disconnect(link);
+      if (!ok) {
+        fail("a session with a missing plugin refused to load");
+      } else {
+        if (!reported.contains(QStringLiteral("urn:nobody:has:this")))
+          fail("the missing plugin was not named on load: \"" +
+               reported.toStdString() + "\"");
+        const QVariantList details =
+            field(mixer, 0, nirbija::MixerModel::InsertDetailsRole).toList();
+        if (details.size() != 2) {
+          fail("insert details did not carry the missing plugin, size " +
+               std::to_string(details.size()));
+        } else {
+          const QVariantMap live = details.value(0).toMap();
+          const QVariantMap ghost = details.value(1).toMap();
+          if (!live.value(QStringLiteral("filled")).toBool() ||
+              live.value(QStringLiteral("missing")).toBool())
+            fail("the installed plugin was not reported as a filled slot");
+          if (!ghost.value(QStringLiteral("missing")).toBool() ||
+              ghost.value(QStringLiteral("uid")).toString() !=
+                  QStringLiteral("urn:nobody:has:this"))
+            fail("the missing plugin was not reported as missing");
+          if (!ghost.value(QStringLiteral("bypassed")).toBool())
+            fail("the missing plugin lost its bypass flag");
+        }
+
+        // A hole left by a removal is not a filled slot.
+        mixer.removeInsert(0, 0);
+        const QVariantMap hole =
+            field(mixer, 0, nirbija::MixerModel::InsertDetailsRole)
+                .toList().value(0).toMap();
+        if (hole.value(QStringLiteral("filled")).toBool())
+          fail("a removed insert still reads as filled");
+
+        // The ghost survives a save with its blob intact.
+        const QString saved = dir.path() + QStringLiteral("/ghost-out.json");
+        mixer.saveSessionAs(QUrl::fromLocalFile(saved));
+        QFile in(saved);
+        if (!in.open(QIODevice::ReadOnly)) {
+          fail("saving the ghost session failed");
+        } else {
+          const QString text = QString::fromUtf8(in.readAll());
+          in.close();
+          if (!text.contains(QStringLiteral("urn:nobody:has:this")) ||
+              !text.contains(QStringLiteral("AAECAw==")))
+            fail("the missing plugin's entry did not survive a save");
+        }
+
+        // Forgetting it goes through removeInsert on the slot past the chain.
+        mixer.removeInsert(0, 1);
+        if (field(mixer, 0, nirbija::MixerModel::InsertDetailsRole).toList().size() != 1)
+          fail("forgetting the missing plugin did not drop its entry");
+      }
+    }
+  }
+
+  // --- the poll is quiet when the mixer is ---------------------------------
+  //
+  // Meter roles used to be announced for every row thirty times a second,
+  // silence or not, and the insert details rebuilt with them. Now a row is
+  // only announced when a bar or a held mark actually moved, and the
+  // details only when a flag flipped - which, with nothing playing and no
+  // input, is never.
+  {
+    while (mixer.rowCount() > 0) mixer.removeChannel(0);
+    mixer.addChannel(QStringLiteral("Quiet"), 2);
+    const int fx = mixer.plugins()->rowFor(nirbija::PluginFormat::Internal,
+                                           "nirbija.fxpad");
+    if (fx >= 0) mixer.addInsert(0, fx);
+    if (mixer.playing()) mixer.togglePlay();
+
+    // Let the meters fall to the floor first: a channel that just had
+    // audio takes a couple of seconds to settle.
+    QElapsedTimer clock;
+    clock.start();
+    while (clock.elapsed() < 3500) QCoreApplication::processEvents();
+
+    int meter_emits = 0;
+    int detail_emits = 0;
+    const auto link = QObject::connect(
+        &mixer, &QAbstractItemModel::dataChanged,
+        [&](const QModelIndex&, const QModelIndex&, const QList<int>& roles) {
+          if (roles.contains(nirbija::MixerModel::PositionLeftRole)) ++meter_emits;
+          if (roles.contains(nirbija::MixerModel::InsertDetailsRole)) ++detail_emits;
+        });
+    clock.restart();
+    while (clock.elapsed() < 1000) QCoreApplication::processEvents();
+    QObject::disconnect(link);
+    if (meter_emits > 0)
+      fail("a silent strip announced its meters " + std::to_string(meter_emits) +
+           " times in a second");
+    if (detail_emits > 0)
+      fail("an idle chain announced its details " + std::to_string(detail_emits) +
+           " times in a second");
+  }
+
+  // --- the sequencer's version moves with its cells, not with its heads ----
+  {
+    const int sequencer =
+        mixer.plugins()->rowFor(nirbija::PluginFormat::Internal, "nirbija.stepseq");
+    if (sequencer >= 0 && mixer.addInsert(0, sequencer)) {
+      const int slot = field(mixer, 0, nirbija::MixerModel::InsertsRole)
+                           .toStringList().indexOf(QStringLiteral("Step Sequencer"));
+      const int first = mixer.sequencerVersion(0, slot);
+      if (first <= 0) fail("a sequencer reported no version");
+      if (mixer.sequencerVersion(0, slot) != first)
+        fail("the sequencer version moved with nothing changed");
+      mixer.setSequencerCell(0, slot, 0, 0, 3, 60, 100, true, 1.0, false, false);
+      const int edited = mixer.sequencerVersion(0, slot);
+      if (edited == first) fail("editing a cell did not move the version");
+      if (mixer.sequencerVersion(0, slot) != edited)
+        fail("the version moved again with nothing changed");
+      if (mixer.insertSequencerHeads(0, slot).size() !=
+          nirbija::StepSequencerInstance::kLanes +
+              nirbija::StepSequencerInstance::kExtraHeads)
+        fail("insertSequencerHeads did not list every head");
+      if (mixer.sequencerVersion(0, -1) != 0)
+        fail("a non-sequencer reported a version");
     }
   }
 

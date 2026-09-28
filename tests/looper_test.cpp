@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // Drives the looper the way a player would: record a phrase, close the loop,
 // hear it repeat, overdub on top, clear it away.
 
@@ -69,8 +71,11 @@ int main() {
   for (int i = 0; i < 16; ++i) dubbed = std::max(dubbed, run_block(looper, 0.0f));
   if (dubbed < loop_peak + 0.3f) fail("overdub did not add a layer");
 
-  // Play off mutes the loop without touching the live input.
+  // Play off mutes the loop without touching the live input. The cut is a
+  // ~5 ms ramp, not a step, so the block that takes the press still carries
+  // its tail; the one after is silent.
   looper.set_parameter(1, 0.0);
+  run_block(looper, 0.0f);
   if (run_block(looper, 0.0f) > 1e-6f) fail("play off still sounds the loop");
   if (run_block(looper, 0.5f) < 0.45f) fail("play off swallowed the live input");
   looper.set_parameter(1, 1.0);
@@ -105,9 +110,31 @@ int main() {
   if (!waveform_has_signal) fail("waveform() came back silent for a loud loop");
 
   looper.set_trim(0.5, 1.0);  // keep only the silent half
-  float silent_half = 0.0f;
-  for (int i = 0; i < 16; ++i) silent_half = std::max(silent_half, run_block(looper, 0.0f));
-  if (silent_half > 1e-6f) fail("trim did not cut the loud half out of playback");
+  // The window's wrap crossfades its last ~5 ms into the material just
+  // before its start - here the tail of the loud half - so the jump back to
+  // the start is continuous with what precedes it. Everything else in the
+  // window has to stay silent: the loud half is cut, bar that crossfade.
+  {
+    std::vector<float> in(kBlock, 0.0f), out_l(kBlock), out_r(kBlock);
+    const float* ins[2] = {in.data(), in.data()};
+    float* outs[2] = {out_l.data(), out_r.data()};
+    nirbija::TransportInfo transport;
+    transport.playing = true;
+    transport.tempo_bpm = 120.0;
+    transport.numerator = 4;
+    looper.set_transport(transport);
+    int loud = 0;
+    for (int i = 0; i < 16; ++i) {
+      looper.process(ins, outs, kBlock);
+      for (float s : out_l) loud += std::fabs(s) > 1e-6f ? 1 : 0;
+    }
+    // 16 blocks of a 2048-frame loop trimmed to 1024 frames: four wraps,
+    // each allowed its 240-frame crossfade.
+    if (loud > 4 * 240 + 4)
+      fail("trim did not cut the loud half out of playback (" +
+           std::to_string(loud) + " loud samples)");
+    if (loud == 0) fail("the wrap crossfade never brought the pre-roll in");
+  }
 
   looper.set_trim(0.0, 0.5);  // keep only the loud half
   float loud_half = 0.0f;
@@ -390,21 +417,25 @@ int main() {
     layer.activate(kRate, kBlock);
     layer.set_parameter(3, 0.0);
 
-    layer.capture_undo_empty();
+    // Undo and redo are requests the audio thread carries out at the next
+    // block; the snapshot itself is taken by the head as it writes, so no
+    // capture call and no parked graph. Every request is followed by a
+    // block here so it has landed before the check.
     layer.set_parameter(0, 1.0);
     for (int i = 0; i < 8; ++i) run_block(layer, 0.6f);
     layer.set_parameter(0, 0.0);
     run_block(layer, 0.0f);
     if (!layer.can_undo()) fail("first take left nothing to undo");
-    layer.undo();
+    layer.request_undo();
+    run_block(layer, 0.0f);
     if (layer.loop_closed()) fail("undo did not peel the first take");
     if (!layer.can_redo()) fail("undo did not arm redo");
-    layer.redo();
+    layer.request_redo();
+    run_block(layer, 0.0f);
     if (!layer.loop_closed()) fail("redo did not put the first take back");
 
     float before = 0.0f;
     for (int i = 0; i < 8; ++i) before = std::max(before, run_block(layer, 0.0f));
-    layer.capture_undo();
     layer.set_parameter(0, 1.0);
     for (int i = 0; i < 8; ++i) run_block(layer, 0.6f);
     layer.set_parameter(0, 0.0);
@@ -412,16 +443,21 @@ int main() {
     float dubbed = 0.0f;
     for (int i = 0; i < 8; ++i) dubbed = std::max(dubbed, run_block(layer, 0.0f));
     if (dubbed < before + 0.2f) fail("overdub before undo was too quiet");
-    layer.undo();
+    layer.request_undo();
+    run_block(layer, 0.0f);
     float peeled = 0.0f;
     for (int i = 0; i < 8; ++i) peeled = std::max(peeled, run_block(layer, 0.0f));
     if (peeled > before + 0.15f) fail("undo did not peel the overdub");
-    layer.capture_undo();
-    layer.set_parameter(2, 1.0);
+    layer.request_clear();
     run_block(layer, 0.0f);
     if (layer.loop_closed()) fail("clear left a loop");
-    layer.undo();
+    layer.request_undo();
+    run_block(layer, 0.0f);
     if (!layer.loop_closed()) fail("undo did not restore a cleared loop");
+    float restored = 0.0f;
+    for (int i = 0; i < 8; ++i)
+      restored = std::max(restored, run_block(layer, 0.0f));
+    if (restored < before - 0.05f) fail("the loop that came back from clear was quiet");
   }
 
   // Two phrases in one Rec pass, split by silence. Undo has to drop only
@@ -431,7 +467,6 @@ int main() {
     split.set_channel_layout(2);
     split.activate(kRate, kBlock);
     split.set_parameter(3, 0.0);
-    split.capture_undo_empty();
     split.set_parameter(0, 1.0);
     for (int i = 0; i < 8; ++i) run_block(split, 0.7f);
     for (int i = 0; i < 32; ++i) run_block(split, 0.0f);
@@ -443,7 +478,8 @@ int main() {
     if (whole.size() < 8 || whole.front() < 0.4f || whole.back() < 0.4f)
       fail("two-phrase take did not land both licks on the tape");
 
-    split.undo();
+    split.request_undo();
+    run_block(split, 0.0f);
     if (!split.loop_closed()) fail("undo of the last phrase dropped the loop");
     const auto peaks = split.waveform(8);
     if (peaks.size() < 8) fail("waveform of the split take was empty");
@@ -452,13 +488,16 @@ int main() {
     if (peaks.back() > 0.05f)
       fail("the last phrase was still on the tape after undo");
 
-    split.redo();
+    split.request_redo();
+    run_block(split, 0.0f);
     const auto back = split.waveform(8);
     if (back.size() < 8 || back.back() < 0.4f)
       fail("redo did not put the last phrase back");
 
-    split.undo();
-    split.undo();
+    split.request_undo();
+    run_block(split, 0.0f);
+    split.request_undo();
+    run_block(split, 0.0f);
     if (split.loop_closed())
       fail("undo of the remaining phrase did not drop an empty take");
   }
@@ -545,6 +584,7 @@ int main() {
     float first = 0.0f;
     for (int i = 0; i < 8; ++i) first = std::max(first, run_block(once, 0.0f));
     if (first < 0.5f) fail("once muted the first pass");
+    run_block(once, 0.0f);  // the ~5 ms ramp out after the wrap
     float after = 0.0f;
     for (int i = 0; i < 8; ++i) after = std::max(after, run_block(once, 0.0f));
     if (after > 1e-4f) fail("once kept playing after the wrap");
@@ -562,7 +602,8 @@ int main() {
     run_block(doubled, 0.0f);
     const double beats = doubled.loop_beats();
     if (!doubled.can_multiply()) fail("a short take could not be multiplied");
-    doubled.multiply();
+    doubled.request_multiply();
+    run_block(doubled, 0.0f);
     if (doubled.loop_beats() < beats * 1.9)
       fail("multiply did not double the loop");
     float peak = 0.0f;
@@ -715,8 +756,10 @@ int main() {
     }
     if (meter_peak < 0.4f) fail("loop_peak did not track the closed loop");
 
-    // Play off silences the loop's own contribution, dry pass-through aside.
+    // Play off silences the loop's own contribution, dry pass-through aside
+    // (after the ~5 ms ramp out, which sits inside the first block).
     meter.set_parameter(1, 0.0);
+    run_block(meter, 0.0f);
     run_block(meter, 0.0f);
     if (meter.loop_peak() > 1e-6f) fail("loop_peak stayed hot with Play off");
   }

@@ -1,7 +1,7 @@
 pragma ComponentBehavior: Bound
+// SPDX-License-Identifier: GPL-3.0-only
 
 import QtQuick
-import QtQuick.Controls.Basic
 import QtQuick.Layouts
 import Nirbija
 
@@ -15,7 +15,7 @@ import Nirbija
 // hue around a colour wheel instead of one accent shared by all sixteen: a
 // row of tall, same-coloured bars is the first thing every pad sampler
 // reaches for, and it is what made this one look like a copy of the others.
-Popup {
+EditorPopup {
     id: root
 
     property int targetRow: -1
@@ -28,9 +28,6 @@ Popup {
     property var mapped: [false, false, false, false, false, false, false, false,
                           false, false, false, false, false, false, false, false]
     property bool holdMapped: false
-    // Set once, the first time this ever opens - after that the popup stays
-    // wherever it was last dragged, the same as a real tool window would.
-    property bool positioned: false
 
     readonly property var names: [
         "CRUSH", "PITCH", "COMB", "RING",
@@ -66,62 +63,22 @@ Popup {
 
     width: Px.px(620)
     height: Px.px(640)
-    // Not modal: the mixer behind it stays live, so a fader or the transport
-    // is still reachable with this open - the whole point of it being a tool
-    // window rather than a dialog. Dragging the empty background moves it;
-    // see the DragHandler below.
-    modal: false
-    padding: Skin.spacingL
-    closePolicy: (root.mapping || Mixer.learning)
-                 ? Popup.NoAutoClose
-                 : Popup.CloseOnEscape
-
-    background: Rectangle {
-        gradient: Gradient {
-            GradientStop { position: 0.0; color: Qt.lighter(Skin.popup, 1.08) }
-            GradientStop { position: 1.0; color: Skin.popup }
-        }
-        border.width: 1
-        border.color: Skin.border
-        radius: Skin.radiusL
-        HoverHandler {}
-        TapHandler {}
-        // Empty chrome is not a handler on its own, so without this a press
-        // on the padding falls through onto the strip behind - and, now
-        // that the popup can sit anywhere, doubles as how it moves.
-        DragHandler {
-            target: null
-            grabPermissions: PointerHandler.TakeOverForbidden
-            onCentroidChanged: if (active) {
-                const nx = root.x + centroid.position.x - centroid.pressPosition.x
-                const ny = root.y + centroid.position.y - centroid.pressPosition.y
-                const maxX = Overlay.overlay
-                    ? Math.max(0, Overlay.overlay.width - root.width) : nx
-                const maxY = Overlay.overlay
-                    ? Math.max(0, Overlay.overlay.height - root.height) : ny
-                root.x = Math.max(0, Math.min(nx, maxX))
-                root.y = Math.max(0, Math.min(ny, maxY))
-            }
-        }
-    }
+    // The chrome, the glow and the drag are EditorPopup's; what the glow
+    // says is this editor's.
+    holdOpen: root.mapping || Mixer.learning
+    glowHue: Skin.accent
+    glowOpacity: 0
+    eatsWheel: false
 
     function openFor(row, slot) {
         root.targetRow = row
         root.targetSlot = slot
         root.refresh()
-        if (!root.positioned) {
-            root.x = Math.round((Overlay.overlay.width - root.width) / 2)
-            root.y = Math.round((Overlay.overlay.height - root.height) / 2)
-            root.positioned = true
-        }
+        root.place()
         root.open()
     }
 
-    onOpened: poll.start()
-    onClosed: {
-        poll.stop()
-        root.stopMapping()
-    }
+    onClosed: root.stopMapping()
 
     function refresh() {
         root.hold = Mixer.fxPadHold(root.targetRow, root.targetSlot)
@@ -172,11 +129,15 @@ Popup {
         root.amounts = next
     }
 
-    Timer {
-        id: poll
-        interval: 66
-        repeat: true
-        onTriggered: root.refresh()
+    // Every other beat of the mixer's 30 Hz tick, which is the 66 ms this
+    // used to poll on with a timer of its own.
+    property int ticks: 0
+    Connections {
+        target: Mixer
+        enabled: root.visible
+        function onTick() {
+            if (++root.ticks % 2 === 0) root.refresh()
+        }
     }
 
     contentItem: ColumnLayout {
@@ -462,8 +423,8 @@ Popup {
                         enabled: !root.mapping
                         target: null
                         dragThreshold: 0
+                        // No Approves bit: once this handler has the grab nobody may take it.
                         grabPermissions: PointerHandler.CanTakeOverFromAnything
-                                         | PointerHandler.ApprovesTakeOverByNothing
                         property real pressY: 0
                         property real pressAmount: 0
                         property bool armedToggle: false

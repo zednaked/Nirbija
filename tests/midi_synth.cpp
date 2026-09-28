@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // Sends a note to a real synth plugin through a channel strip and checks that
 // audio comes out. This is the whole MIDI path end to end, minus JACK: strip →
 // insert → plugin event queue → plugin.
@@ -119,11 +121,11 @@ int main(int argc, char* argv[]) {
 
   if (synth == nullptr) {
     std::printf("%s not installed, skipping\n", wanted.c_str());
-    return 0;
+    return 77;  // CTest marks it Skipped rather than Passed
   }
   if (!synth->descriptor().has_midi_input) {
     std::printf("%s reports no MIDI input, skipping\n", wanted.c_str());
-    return 0;
+    return 77;
   }
 
   nirbija::ChannelStrip strip("synth", 2);

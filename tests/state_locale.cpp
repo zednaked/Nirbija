@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // State blobs are text, and text with numbers in it is at the mercy of the C
 // locale: Qt sets it to the user's on startup, and under pt_BR "%.4f" prints
 // "0,5000". Read back by a parser that stops at the comma, that is 0 - and a

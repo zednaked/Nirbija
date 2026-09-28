@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // A plugin that changes its own state — a sampler handed a new kit from its
 // own window — goes through none of MixerModel's setters. Nothing marked the
 // session dirty, so the autosave never fired and the change only survived if
@@ -88,9 +90,10 @@ int main(int argc, char* argv[]) {
   qputenv("NIRBIJA_SESSION", (dir.path() + "/session.json").toLocal8Bit());
 
   nirbija::MixerModel mixer;
+  mixer.waitForScan();
   if (!mixer.running()) {
     std::printf("no audio server available, skipping\n");
-    return 0;
+    return 77;  // CTest marks it Skipped rather than Passed
   }
 
   mixer.addChannel(QStringLiteral("Ch"), 2);

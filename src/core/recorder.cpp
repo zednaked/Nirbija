@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #include "core/recorder.h"
 
 #include <sndfile.h>
@@ -103,12 +105,18 @@ void Recorder::stop() {
   if (!recording()) return;
 
   // The audio thread stops first, then the writer drains what is left.
-  recording_.store(false, std::memory_order_release);
+  //
+  // This store and the in-flight load below, against write()'s increment and
+  // its load of recording_, are a store-then-load on each side (Dekker's
+  // pattern). With release/acquire both sides can read the stale value at
+  // once - this thread sees no writer in flight while write() still sees
+  // recording - so all four are sequentially consistent.
+  recording_.store(false, std::memory_order_seq_cst);
 
   // Any write() already past its check still holds a Track. Freeing them now
   // would pull the ring out from under it, so wait for the last one out. This
   // is the UI thread; a block is the longest it can possibly take.
-  while (writers_in_flight_.load(std::memory_order_acquire) != 0)
+  while (writers_in_flight_.load(std::memory_order_seq_cst) != 0)
     std::this_thread::yield();
 
   writer_running_.store(false, std::memory_order_release);
@@ -126,20 +134,25 @@ void Recorder::write(size_t track_index, const float* const* channels,
                      int channel_count, uint32_t frames) {
   // Announce first, check second. The other order leaves a window where stop()
   // sees no writers, frees the tracks, and this call then walks into them.
-  writers_in_flight_.fetch_add(1, std::memory_order_acq_rel);
-  if (recording() && track_index < tracks_.size()) {
+  // Sequentially consistent for the same reason as in stop(): see there.
+  writers_in_flight_.fetch_add(1, std::memory_order_seq_cst);
+  if (recording_.load(std::memory_order_seq_cst) && track_index < tracks_.size() &&
+      channel_count > 0) {
     Track& track = *tracks_[track_index];
     const size_t capacity = track.ring_frames();
     const size_t write_frame = track.write_frame.load(std::memory_order_relaxed);
     size_t slot = (write_frame % capacity) * static_cast<size_t>(track.channels);
     const size_t wrap = track.ring.size();
+    float* ring = track.ring.data();
+
+    // The source of each side chosen once, outside the loop. A mono channel
+    // is written to both sides rather than to half a file.
+    const int width = std::min(track.channels, 2);
+    const float* source[2] = {channels[0],
+                              channels[std::min(1, channel_count - 1)]};
 
     for (uint32_t f = 0; f < frames; ++f) {
-      for (int ch = 0; ch < track.channels; ++ch) {
-        // A mono channel is written to both sides rather than to half a file.
-        const int source = std::min(ch, channel_count - 1);
-        track.ring[slot + ch] = channels[source][f];
-      }
+      for (int ch = 0; ch < width; ++ch) ring[slot + ch] = source[ch][f];
       // Walked rather than recomputed: the modulo per sample per channel was
       // a division in the innermost loop of the audio thread.
       slot += static_cast<size_t>(track.channels);

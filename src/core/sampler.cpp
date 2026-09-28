@@ -1,6 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #include "core/sampler.h"
-
-#include <sndfile.h>
 
 #include <algorithm>
 #include <cmath>
@@ -29,7 +29,7 @@ enum Params : uint32_t {
 constexpr char kMagic1[] = "NJSMP01\n";
 constexpr char kMagic2[] = "NJSMP02\n";
 constexpr char kPackMagic[] = "NJSMPK1\n";
-constexpr double kPi = 3.14159265358979323846;
+constexpr float kFadeInv = 1.0f / static_cast<float>(SamplerInstance::kFade);
 
 struct Seed {
   int note;
@@ -66,38 +66,6 @@ bool read_pod(const uint8_t*& cursor, const uint8_t* end, T* value) {
   std::memcpy(value, cursor, sizeof(T));
   cursor += sizeof(T);
   return true;
-}
-
-std::shared_ptr<SamplerInstance::Buffer> decode_file(const std::string& path) {
-  SF_INFO info{};
-  SNDFILE* file = sf_open(path.c_str(), SFM_READ, &info);
-  if (file == nullptr || info.frames <= 0 || info.channels <= 0) {
-    if (file != nullptr) sf_close(file);
-    return nullptr;
-  }
-
-  auto buffer = std::make_shared<SamplerInstance::Buffer>();
-  buffer->frames = static_cast<uint64_t>(info.frames);
-  buffer->sample_rate = info.samplerate;
-  buffer->samples.resize(static_cast<size_t>(info.frames) * 2);
-
-  std::vector<float> chunk(4096 * static_cast<size_t>(info.channels));
-  sf_count_t read = 0;
-  uint64_t frame = 0;
-  while ((read = sf_readf_float(file, chunk.data(), 4096)) > 0) {
-    for (sf_count_t i = 0; i < read; ++i) {
-      const float left = chunk[i * info.channels];
-      const float right =
-          info.channels > 1 ? chunk[i * info.channels + 1] : left;
-      buffer->samples[(frame + i) * 2] = left;
-      buffer->samples[(frame + i) * 2 + 1] = right;
-    }
-    frame += static_cast<uint64_t>(read);
-  }
-  sf_close(file);
-  buffer->frames = frame;
-  buffer->samples.resize(static_cast<size_t>(frame) * 2);
-  return buffer;
 }
 
 float read_sample(const SamplerInstance::Buffer& buffer, uint64_t index,
@@ -172,26 +140,45 @@ void SamplerInstance::reclaim_retired(bool audio_running) {
   // Sem thread de audio nenhuma nao ha o que esperar: o portao conta blocos de
   // process(), e sem eles ele nunca abre. O app segue inteiro sem servidor de
   // audio, entao sem isto tudo o que fosse trocado ali ficaria ate o fim.
-  if (!audio_running) {
-    retired_.clear();
-    return;
-  }
+  if (!audio_running)
+    reclaimed_without_audio_.store(true, std::memory_order_release);
   const uint64_t now = process_generation_.load(std::memory_order_acquire);
-  std::erase_if(retired_, [now](const auto& item) {
-    return now >= item.generation + 2;
-  });
+  retired_.reclaim(now, audio_running);
 }
 
 void SamplerInstance::publish(int pad, std::shared_ptr<Buffer> buffer) {
   if (pad < 0 || pad >= kPads) return;
-  stop_mask_.fetch_or(1u << pad, std::memory_order_relaxed);
   reclaim_retired(/*audio_running=*/true);
-  const uint64_t now = process_generation_.load(std::memory_order_acquire);
   Pad& target = pads_[pad];
-  if (target.owned != nullptr) retired_.push_back({target.owned, now});
+  // The order is dsp::RetiredList's: publish, then read the generation that
+  // may still hold the old buffer, then retire against it. Reading the
+  // generation first left a window in which a voice started on the old
+  // buffer after the read and kept it past the generation it was retired
+  // against. The audio thread notices the swap itself, by pointer, and
+  // fades the voice out inside the block that first sees it.
+  std::shared_ptr<Buffer> old = std::move(target.owned);
   target.owned = std::move(buffer);
   target.live.store(target.owned.get(), std::memory_order_release);
+  const uint64_t now = process_generation_.load(std::memory_order_acquire);
+  retired_.retire(std::move(old), now);
   target.version.fetch_add(1, std::memory_order_relaxed);
+}
+
+std::shared_ptr<SamplerInstance::Buffer> SamplerInstance::decode_for_pad(
+    const std::string& path) const {
+  // A pad holds kMaxSeconds at most. Before activate() the engine rate is
+  // unknown, so the cap is taken at the file's own rate.
+  auto buffer = decode_audio_file(path, rec_capacity_);
+  if (buffer == nullptr) return nullptr;
+  const uint64_t cap =
+      rec_capacity_ > 0
+          ? rec_capacity_
+          : static_cast<uint64_t>(std::max(1.0, buffer->sample_rate) * kMaxSeconds);
+  if (buffer->frames > cap) {
+    buffer->frames = cap;
+    buffer->samples.resize(static_cast<size_t>(cap) * 2);
+  }
+  return buffer;
 }
 
 float SamplerInstance::pad_position(int pad) const {
@@ -210,17 +197,8 @@ bool SamplerInstance::load(int pad, const std::string& path) {
   // Remember the name even if the file is missing: a session can travel
   // ahead of its samples folder, and resolve_paths fills the pad later.
   pads_[pad].path = path;
-  auto buffer = decode_file(path);
+  auto buffer = decode_for_pad(path);
   if (buffer == nullptr) return false;
-  const uint64_t cap =
-      rec_capacity_ > 0
-          ? rec_capacity_
-          : static_cast<uint64_t>(
-                std::max(1.0, buffer->sample_rate) * kMaxSeconds);
-  if (buffer->frames > cap) {
-    buffer->frames = cap;
-    buffer->samples.resize(static_cast<size_t>(cap) * 2);
-  }
   publish(pad, std::move(buffer));
   return true;
 }
@@ -326,17 +304,8 @@ void SamplerInstance::resolve_paths(std::string_view base_dir) {
     }
     if (found.empty()) continue;
 
-    auto buffer = decode_file(found.string());
+    auto buffer = decode_for_pad(found.string());
     if (buffer == nullptr) continue;
-    const uint64_t cap =
-        rec_capacity_ > 0
-            ? rec_capacity_
-            : static_cast<uint64_t>(
-                  std::max(1.0, buffer->sample_rate) * kMaxSeconds);
-    if (buffer->frames > cap) {
-      buffer->frames = cap;
-      buffer->samples.resize(static_cast<size_t>(cap) * 2);
-    }
     // The pad remembers where the file actually was, in full. A relative
     // name kept as written only ever resolved against the folder of the
     // file it came from - and the autosave lives in the user's data folder,
@@ -506,7 +475,7 @@ bool SamplerInstance::activate(double sample_rate, uint32_t) {
   recording_.store(false, std::memory_order_relaxed);
   counting_ = false;
   count_in_left_.store(0, std::memory_order_relaxed);
-  click_remaining_ = 0;
+  click_ = {};
   hit_flash_frames_ = {};
   hit_flash_mask_.store(0, std::memory_order_relaxed);
   ping_mask_.store(0, std::memory_order_relaxed);
@@ -523,7 +492,7 @@ void SamplerInstance::deactivate() {
   sounding_mask_.store(0, std::memory_order_relaxed);
   counting_ = false;
   count_in_left_.store(0, std::memory_order_relaxed);
-  click_remaining_ = 0;
+  click_ = {};
   hit_flash_frames_ = {};
   hit_flash_mask_.store(0, std::memory_order_relaxed);
   ping_mask_.store(0, std::memory_order_relaxed);
@@ -554,9 +523,44 @@ int SamplerInstance::pad_for_note(int note) const {
   return mapped * 4 + col;
 }
 
-void SamplerInstance::chase_pad(int pad) {
-  if (pad < 0 || pad >= kPads) return;
-  voices_[static_cast<size_t>(pad)] = Voice{};
+void SamplerInstance::shorten_release(Voice& voice, int frames) {
+  // Refit the release to finish within `frames`, starting from the level it
+  // is at now, so the change is a steeper slope and not a step.
+  frames = std::max(1, frames);
+  if (!voice.releasing) {
+    voice.releasing = true;
+    voice.release_left = std::min(kFade, frames);
+    voice.release_inv = 1.0f / static_cast<float>(voice.release_left);
+    return;
+  }
+  if (voice.release_left <= frames) return;
+  const float level =
+      static_cast<float>(std::max(0, voice.release_left)) * voice.release_inv;
+  voice.release_left = frames;
+  voice.release_inv = level / static_cast<float>(frames);
+}
+
+void SamplerInstance::refresh_voice_fades(Voice& voice) const {
+  const Pad& pad = pads_[static_cast<size_t>(voice.pad)];
+  const uint64_t span =
+      voice.end_frame > voice.start_frame ? voice.end_frame - voice.start_frame : 0;
+  const double fade_in_frac =
+      std::clamp(pad.fade_in.load(std::memory_order_relaxed), 0.0, 1.0);
+  const double fade_out_frac =
+      std::clamp(pad.fade_out.load(std::memory_order_relaxed), 0.0, 1.0);
+  // Each fade is capped at half the trim window, the same as the looper's,
+  // so a short pad with both turned up crossfades through the middle
+  // instead of one swallowing the other's tail.
+  voice.fade_in_frames =
+      static_cast<uint64_t>(fade_in_frac * static_cast<double>(span) / 2.0);
+  voice.fade_out_frames =
+      static_cast<uint64_t>(fade_out_frac * static_cast<double>(span) / 2.0);
+  voice.fade_in_inv = voice.fade_in_frames > 0
+                          ? 1.0f / static_cast<float>(voice.fade_in_frames)
+                          : 0.0f;
+  voice.fade_out_inv = voice.fade_out_frames > 0
+                           ? 1.0f / static_cast<float>(voice.fade_out_frames)
+                           : 0.0f;
 }
 
 void SamplerInstance::start_voice(int pad, int velocity, uint32_t /*frame*/) {
@@ -589,7 +593,28 @@ void SamplerInstance::start_voice(int pad, int velocity, uint32_t /*frame*/) {
   const double ratio = engine_rate_ > 0.0 ? rate / engine_rate_ : 1.0;
   const double step = ratio * std::pow(2.0, static_cast<double>(pitch) / 12.0);
 
-  Voice& voice = voices_[static_cast<size_t>(pad)];
+  // A retrigger does not restart the sounding voice in place - that cut the
+  // wave wherever it was. It goes to its short release and the new hit takes
+  // another slot, the two overlapping for kFade frames.
+  Voice* slot = nullptr;
+  Voice* oldest = nullptr;
+  Voice* shortest = nullptr;
+  for (Voice& voice : voices_) {
+    if (voice.pad < 0) {
+      if (slot == nullptr) slot = &voice;
+      continue;
+    }
+    if (voice.pad == pad && !voice.releasing) shorten_release(voice, kFade);
+    if (oldest == nullptr || voice.serial < oldest->serial) oldest = &voice;
+    if (voice.releasing &&
+        (shortest == nullptr || voice.release_left < shortest->release_left))
+      shortest = &voice;
+  }
+  // Pool full: steal the release nearest its end, else the oldest voice.
+  if (slot == nullptr) slot = shortest != nullptr ? shortest : oldest;
+  if (slot == nullptr) return;
+
+  Voice& voice = *slot;
   voice.pad = pad;
   voice.buffer = buffer;
   voice.position = static_cast<double>(start_frame);
@@ -599,53 +624,23 @@ void SamplerInstance::start_voice(int pad, int velocity, uint32_t /*frame*/) {
   voice.gain_l = amp * pan_l;
   voice.gain_r = amp * pan_r;
   voice.attack = 0;
-  voice.release = kFade;
+  voice.release_left = kFade;
+  voice.release_inv = kFadeInv;
   voice.releasing = false;
-}
-
-float SamplerInstance::fade_gain(int pad, uint64_t position, uint64_t start,
-                                 uint64_t end) const {
-  if (pad < 0 || pad >= kPads || end <= start) return 1.0f;
-  const uint64_t span = end - start;
-  const uint64_t into = position >= start ? position - start : 0;
-  const uint64_t remaining = position < end ? end - position : 0;
-
-  const double fade_in_frac =
-      std::clamp(pads_[pad].fade_in.load(std::memory_order_relaxed), 0.0, 1.0);
-  const double fade_out_frac = std::clamp(
-      pads_[pad].fade_out.load(std::memory_order_relaxed), 0.0, 1.0);
-  // Each fade is capped at half the trim window, the same as the looper's,
-  // so a short pad with both turned up crossfades through the middle
-  // instead of one swallowing the other's tail.
-  const uint64_t fade_in_frames =
-      static_cast<uint64_t>(fade_in_frac * static_cast<double>(span) / 2.0);
-  const uint64_t fade_out_frames =
-      static_cast<uint64_t>(fade_out_frac * static_cast<double>(span) / 2.0);
-
-  float gain = 1.0f;
-  if (fade_in_frames > 0 && into < fade_in_frames)
-    gain = std::min(gain, static_cast<float>(into) /
-                              static_cast<float>(fade_in_frames));
-  if (fade_out_frames > 0 && remaining < fade_out_frames)
-    gain = std::min(gain, static_cast<float>(remaining) /
-                              static_cast<float>(fade_out_frames));
-  return gain;
+  voice.serial = ++voice_serial_;
+  refresh_voice_fades(voice);
 }
 
 void SamplerInstance::release_voice(int pad) {
   if (pad < 0 || pad >= kPads) return;
-  Voice& voice = voices_[static_cast<size_t>(pad)];
-  if (voice.pad < 0) return;
   if (pads_[pad].one_shot.load(std::memory_order_relaxed)) return;
-  voice.releasing = true;
+  for (Voice& voice : voices_)
+    if (voice.pad == pad && !voice.releasing) shorten_release(voice, kFade);
 }
 
 void SamplerInstance::fire_count_click(bool downbeat) {
   if (engine_rate_ <= 0.0) return;
-  click_length_ = static_cast<uint32_t>(engine_rate_ * 0.03);
-  click_remaining_ = click_length_;
-  click_phase_ = 0.0;
-  click_step_ = 2.0 * kPi * (downbeat ? 1568.0 : 1046.5) / engine_rate_;
+  click_.start(engine_rate_, downbeat);
 }
 
 void SamplerInstance::flash_pad(int pad) {
@@ -701,9 +696,24 @@ void SamplerInstance::process(const float* const* inputs, float* const* outputs,
       std::fill_n(outputs[ch], frames, 0.0f);
   }
 
-  const uint32_t stops = stop_mask_.exchange(0, std::memory_order_relaxed);
-  for (int p = 0; p < kPads; ++p)
-    if ((stops & (1u << p)) != 0) chase_pad(p);
+  // A pad whose audio changed hands since the voice started: the voice fades
+  // out on the buffer it holds, which is alive for this block and no longer,
+  // so the fade must finish inside it. With no audio thread the host may
+  // already have freed that buffer; then the voice is dropped outright -
+  // nothing was sounding to click.
+  const bool dropped =
+      reclaimed_without_audio_.exchange(false, std::memory_order_acquire);
+  for (Voice& voice : voices_) {
+    if (voice.pad < 0) continue;
+    Buffer* live = pads_[static_cast<size_t>(voice.pad)].live.load(
+        std::memory_order_acquire);
+    if (voice.buffer != live) {
+      if (dropped)
+        voice = Voice{};
+      else
+        shorten_release(voice, static_cast<int>(frames));
+    }
+  }
 
   const uint32_t pings = ping_mask_.exchange(0, std::memory_order_relaxed);
   for (int p = 0; p < kPads; ++p)
@@ -741,22 +751,14 @@ void SamplerInstance::process(const float* const* inputs, float* const* outputs,
     fire_count_click(true);
   }
 
+  // The frame inside this block where the quantize grid next falls, on the
+  // same arithmetic the looper uses, so the two punch on the same sample.
   auto boundary_frame = [&](uint32_t from) -> uint32_t {
-    if (quantize <= 0 || !rolling || transport_.tempo_bpm <= 0.0 ||
-        engine_rate_ <= 0.0)
-      return from;
+    if (quantize <= 0 || !rolling) return from;
     const double unit =
         quantize == 1 ? 1.0 : static_cast<double>(std::max(1, transport_.numerator));
-    const double beats_per_frame =
-        (transport_.tempo_bpm / 60.0) / engine_rate_;
-    if (beats_per_frame <= 0.0) return from;
-    const double now = transport_.beats + static_cast<double>(from) * beats_per_frame;
-    double next = std::ceil(now / unit) * unit;
-    if (next <= now + 1e-9) next += unit;
-    const double delta = (next - transport_.beats) / beats_per_frame;
-    if (delta <= 0.0) return from;
-    if (delta >= static_cast<double>(frames)) return frames;
-    return static_cast<uint32_t>(delta);
+    return dsp::boundary_frame(transport_.beats, transport_.tempo_bpm,
+                               engine_rate_, unit, from, frames);
   };
 
   if (!want_rec) {
@@ -780,6 +782,10 @@ void SamplerInstance::process(const float* const* inputs, float* const* outputs,
       recording_.store(true, std::memory_order_relaxed);
     }
   }
+
+  // The pad fades are read once a block per voice, not once a sample.
+  for (Voice& voice : voices_)
+    if (voice.pad >= 0) refresh_voice_fades(voice);
 
   size_t midi_i = 0;
   uint32_t sounding = 0;
@@ -854,56 +860,51 @@ void SamplerInstance::process(const float* const* inputs, float* const* outputs,
     float out_l = recording_.load(std::memory_order_relaxed) ? in_l : 0.0f;
     float out_r = recording_.load(std::memory_order_relaxed) ? in_r : 0.0f;
 
-    for (int p = 0; p < kPads; ++p) {
-      Voice& voice = voices_[static_cast<size_t>(p)];
+    for (Voice& voice : voices_) {
       if (voice.pad < 0 || voice.buffer == nullptr) continue;
-      if (voice.position >= static_cast<double>(voice.end_frame) ||
-          voice.position >= static_cast<double>(voice.buffer->frames)) {
-        voice.releasing = true;
-      }
+      // The trim end and the buffer end both start the release; the read
+      // past them returns silence, so the release covers the cut.
+      if (!voice.releasing &&
+          (voice.position >= static_cast<double>(voice.end_frame) ||
+           voice.position >= static_cast<double>(voice.buffer->frames)))
+        shorten_release(voice, kFade);
 
       float env = 1.0f;
       if (voice.attack < kFade) {
-        env *= static_cast<float>(voice.attack + 1) / static_cast<float>(kFade);
+        env *= static_cast<float>(voice.attack + 1) * kFadeInv;
         ++voice.attack;
       }
       if (voice.releasing) {
-        env *= static_cast<float>(std::max(0, voice.release)) /
-               static_cast<float>(kFade);
-        --voice.release;
-        if (voice.release < 0) {
+        env *= static_cast<float>(std::max(0, voice.release_left)) *
+               voice.release_inv;
+        --voice.release_left;
+        if (voice.release_left < 0) {
           voice = Voice{};
           continue;
         }
       }
 
       const uint64_t index = static_cast<uint64_t>(voice.position);
-      const double fraction = voice.position - static_cast<double>(index);
-      const uint64_t next =
-          (index + 1 < voice.buffer->frames) ? index + 1 : index;
-      const float a_l = read_sample(*voice.buffer, index, 0);
-      const float b_l = read_sample(*voice.buffer, next, 0);
-      const float a_r = read_sample(*voice.buffer, index, 1);
-      const float b_r = read_sample(*voice.buffer, next, 1);
-      const float s_l = static_cast<float>(a_l + (b_l - a_l) * fraction);
-      const float s_r = static_cast<float>(a_r + (b_r - a_r) * fraction);
-      env *= fade_gain(p, index, voice.start_frame, voice.end_frame);
+      const float s_l = read_interpolated(*voice.buffer, voice.position, 0);
+      const float s_r = read_interpolated(*voice.buffer, voice.position, 1);
+      if (voice.fade_in_frames > 0 && index >= voice.start_frame) {
+        const uint64_t into = index - voice.start_frame;
+        if (into < voice.fade_in_frames)
+          env *= static_cast<float>(into) * voice.fade_in_inv;
+      }
+      if (voice.fade_out_frames > 0 && index < voice.end_frame) {
+        const uint64_t remaining = voice.end_frame - index;
+        if (remaining < voice.fade_out_frames)
+          env *= static_cast<float>(remaining) * voice.fade_out_inv;
+      }
       out_l += s_l * voice.gain_l * env;
       out_r += s_r * voice.gain_r * env;
       voice.position += voice.step;
-      sounding |= 1u << p;
+      sounding |= 1u << voice.pad;
     }
 
-    if (click_remaining_ > 0 && click_length_ > 0) {
-      const float envelope = static_cast<float>(click_remaining_) /
-                             static_cast<float>(click_length_);
-      const float click =
-          static_cast<float>(std::sin(click_phase_)) * envelope * envelope * 0.4f;
-      click_phase_ += click_step_;
-      --click_remaining_;
-      out_l += click;
-      out_r += click;
-    }
+    // One sample of the count-in click, on the exact frame the beat fell.
+    click_.render(&out_l, &out_r, 1, engine_rate_);
 
     block_peak = std::max(block_peak, std::max(std::fabs(out_l), std::fabs(out_r)));
 
@@ -922,16 +923,24 @@ void SamplerInstance::process(const float* const* inputs, float* const* outputs,
   sounding_mask_.store(sounding, std::memory_order_relaxed);
   level_.store(block_peak, std::memory_order_relaxed);
 
-  // Mirrors for the editor, once a block: where each voice is in its pad,
-  // whether Rec is still waiting for the grid, how full the take is.
-  for (int p = 0; p < kPads; ++p) {
-    const Voice& voice = voices_[static_cast<size_t>(p)];
-    float at = -1.0f;
-    if (voice.pad >= 0 && voice.buffer != nullptr && voice.buffer->frames > 0)
-      at = static_cast<float>(std::clamp(
-          voice.position / static_cast<double>(voice.buffer->frames), 0.0, 1.0));
-    pads_[static_cast<size_t>(p)].position.store(at, std::memory_order_relaxed);
+  // Mirrors for the editor, once a block: where each pad's newest voice is
+  // in its audio, whether Rec is still waiting for the grid, how full the
+  // take is.
+  std::array<float, kPads> at;
+  std::array<uint64_t, kPads> at_serial{};
+  at.fill(-1.0f);
+  for (const Voice& voice : voices_) {
+    if (voice.pad < 0 || voice.buffer == nullptr || voice.buffer->frames == 0)
+      continue;
+    const size_t p = static_cast<size_t>(voice.pad);
+    if (at[p] >= 0.0f && voice.serial < at_serial[p]) continue;
+    at_serial[p] = voice.serial;
+    at[p] = static_cast<float>(std::clamp(
+        voice.position / static_cast<double>(voice.buffer->frames), 0.0, 1.0));
   }
+  for (int p = 0; p < kPads; ++p)
+    pads_[static_cast<size_t>(p)].position.store(at[static_cast<size_t>(p)],
+                                                 std::memory_order_relaxed);
   armed_.store(want_rec && rec_waiting_ &&
                    !recording_.load(std::memory_order_relaxed) && !counting_,
                std::memory_order_relaxed);
@@ -1164,7 +1173,7 @@ bool SamplerInstance::read_pads_from(const uint8_t*& cursor, const uint8_t* end,
       cursor += bytes;
       publish(i, std::move(buffer));
     } else if (!path.empty()) {
-      auto loaded = decode_file(path);
+      auto loaded = decode_for_pad(path);
       if (loaded != nullptr) publish(i, std::move(loaded));
       else publish(i, nullptr);
     } else {

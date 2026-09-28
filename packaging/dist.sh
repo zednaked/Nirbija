@@ -36,10 +36,23 @@ do_src() {
 
 # --- build -------------------------------------------------------------------
 
+# Release with link-time optimisation; the top-level CMakeLists turns LTO on
+# for Release when the toolchain has it. Ninja when it is on PATH, since the
+# Makefile generator is a good deal slower on a tree this size and needs no
+# other difference.
+#
+# -march=x86-64-v2 rather than native: the AppImage runs on any machine, and
+# v2 (SSE4.2, POPCNT) is every x86-64 CPU of the last fifteen years, which is
+# what a binary handed out has to assume. Not applied on other arches.
 build_release() {
   say "building"
-  cmake -S "$repo" -B "$repo/build-release" \
-    -DCMAKE_BUILD_TYPE=Release -DNIRBIJA_TESTS=OFF > /dev/null
+  local gen=()
+  command -v ninja > /dev/null 2>&1 && gen=(-G Ninja)
+  local march=""
+  [ "$arch" = x86_64 ] && march="-march=x86-64-v2"
+  cmake -S "$repo" -B "$repo/build-release" "${gen[@]}" \
+    -DCMAKE_BUILD_TYPE=Release -DNIRBIJA_TESTS=OFF \
+    -DCMAKE_CXX_FLAGS="$march" > /dev/null
   cmake --build "$repo/build-release" -j"$(nproc)"
 }
 
@@ -52,7 +65,7 @@ do_bin() {
   say "binary tarball"
   local stage=$out/nirbija-$version-$arch
   rm -rf "$stage"
-  DESTDIR="$stage" cmake --install "$repo/build-release" --prefix /usr > /dev/null
+  DESTDIR="$stage" cmake --install "$repo/build-release" --prefix /usr --strip > /dev/null
 
   # Relocatable: the prefix is wherever the user unpacks it, so install.sh
   # rewrites Exec= rather than leaving the .desktop pointing at /usr/bin.
@@ -132,7 +145,10 @@ do_appimage() {
 
   local root=$out/AppDir
   rm -rf "$root"
-  DESTDIR="$root" cmake --install "$repo/build-release" --prefix /usr > /dev/null
+  # --strip here uses the system's strip on our own binary (11 MB down to 6),
+  # which sidesteps the older binutils inside linuxdeploy: NO_STRIP below only
+  # has to cover the libraries it copies in.
+  DESTDIR="$root" cmake --install "$repo/build-release" --prefix /usr --strip > /dev/null
 
   # QMAKE is not optional: left to itself the qt plugin takes whichever qmake is
   # first on PATH, here a Qt 5 one, finds none of the Qt 6 this actually links

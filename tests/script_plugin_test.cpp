@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // Drives the scriptable MIDI plugin: a script goes in, notes go through, and
 // what comes out is what the script's tables say. No JACK, no display.
 //
@@ -5,6 +7,7 @@
 // happen: the audio path must not run Lua. A script that loops forever has to
 // be caught while it is being built, on the thread that is allowed to wait.
 
+#include <chrono>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -279,6 +282,68 @@ int main() {
     else expect(off[0].data[1] == 60,
                 "the off went to " + std::to_string(off[0].data[1]) +
                     " after the rebuild, not the pitch that sounded");
+  }
+
+  // --- a slider drag is one rebuild, not a hundred ---------------------------
+  //
+  // Each rebuild is a new lua_State and two pcalls. A knob streaming moves
+  // rebuilds at once only when the last build is older than the interval;
+  // the rest mark a rebuild pending, and host_idle() runs it once.
+  {
+    nirbija::ScriptInstance script;
+    script.activate(48000.0, 256);
+    auto t = nirbija::ScriptInstance::Clock::time_point(std::chrono::seconds(10));
+    script.set_clock_for_tests([&t] { return t; });
+    script.set_script(
+        "function build(knob)\n"
+        "  local m = {}\n"
+        "  for n = 0, 127 do m[n] = math.floor(knob[1] * 100) end\n"
+        "  return { note_map = m }\n"
+        "end");
+    const uint64_t base = script.rebuild_count();
+
+    for (int i = 1; i <= 100; ++i) script.set_parameter(0, i / 100.0);
+    expect(script.rebuild_count() == base,
+           "knob moves right after a build rebuilt " +
+               std::to_string(script.rebuild_count() - base) + " time(s)");
+    // The audio side keeps the last published tables meanwhile.
+    auto out = through(script, {note(60)});
+    expect(out.size() == 1 && out[0].data[1] == 0,
+           "the old tables did not stay live while the rebuild waited");
+
+    t += std::chrono::milliseconds(31);
+    script.host_idle();
+    expect(script.rebuild_count() == base + 1,
+           "one idle after a hundred moves rebuilt " +
+               std::to_string(script.rebuild_count() - base) + " time(s), wanted 1");
+    out = through(script, {note(60)});
+    expect(out.size() == 1 && out[0].data[1] == 100,
+           "the rebuild did not see the last knob value");
+    script.host_idle();
+    expect(script.rebuild_count() == base + 1, "an idle with nothing pending rebuilt");
+
+    // Quiet for a while, then one move: that one builds on the spot.
+    t += std::chrono::seconds(1);
+    script.set_parameter(0, 0.5);
+    expect(script.rebuild_count() == base + 2,
+           "a knob moved after a quiet spell waited for idle");
+    out = through(script, {note(60)});
+    expect(out.size() == 1 && out[0].data[1] == 50, "the immediate rebuild was stale");
+  }
+
+  // --- a full block keeps room for note-offs ----------------------------------
+  {
+    nirbija::ScriptInstance script;
+    script.activate(48000.0, 256);
+    for (int i = 0; i < 100; ++i) script.queue_midi(note(60 + i % 12));
+    script.queue_midi(note(60, 0, 0, false));
+    nirbija::MidiEvent buffer[128];
+    const size_t count = script.take_midi_output(buffer, 128);
+    expect(count < 100, "the block took more than it can hold");
+    bool saw_off = false;
+    for (size_t i = 0; i < count; ++i)
+      if ((buffer[i].data[0] & 0xf0) == 0x80) saw_off = true;
+    expect(saw_off, "a note-off was dropped from a full block");
   }
 
   if (failures > 0) {

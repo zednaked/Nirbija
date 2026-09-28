@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #pragma once
 
 #include <array>
@@ -5,6 +7,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "core/dsp.h"
 #include "core/plugin.h"
 
 namespace nirbija {
@@ -70,6 +73,11 @@ class FxPadInstance : public PluginInstance {
   bool hold() const { return hold_.load(std::memory_order_relaxed); }
   void set_hold(bool on);
 
+  // How long an on/off edge (gate, cutter) or a seam (stutter, reverse) is
+  // ramped or crossfaded over. One and a half milliseconds: still a chop to
+  // the ear, no longer a click.
+  static constexpr double kEdgeSeconds = 0.0015;
+
  private:
   static constexpr uint32_t kHoldId = 16;
 
@@ -82,7 +90,43 @@ class FxPadInstance : public PluginInstance {
     float tap_lerp(float delay) const;
   };
 
+  // Everything process_sample needs that only changes once per block: the
+  // wet weights and every coefficient derived from an amount or the tempo.
+  // The amounts themselves only move once per block (mix_), so per-sample
+  // exp2 and divisions were recomputing the same numbers 256 times.
+  struct BlockCoefs {
+    float wet[kPads] = {};
+    uint32_t crush_period = 2;
+    float crush_steps = 48.0f;
+    float pitch_rate = 1.0f;
+    float pitch_grain = 64.0f;
+    float comb_delay = 2.0f;
+    float comb_fb = 0.5f;
+    float ring_inc = 0.0f;
+    float reverb_decay = 0.5f;
+    uint32_t stutter_play = 32;
+    uint32_t stutter_xf = 0;
+    double gate_step = 0.0;
+    float gate_duty = 0.5f;
+    float filter_f = 0.01f;
+    float filter_q = 0.2f;
+    bool filter_low = true;
+    double cutter_step = 0.0;
+    float cutter_duty = 0.5f;
+    float dub_delay = 2.0f;
+    float dub_fb = 0.35f;
+    float echo_delay = 2.0f;
+    float echo_fb = 0.18f;
+    float talk_freqs[3] = {};
+    float vib_inc = 0.0f;
+    float vib_depth = 6.0f;
+    float dirty_drive = 1.4f;
+    float comp_thresh = 0.55f;
+    float comp_makeup = 1.05f;
+  };
+
   void attack(int pad);
+  void prepare_block(uint32_t frames);
   void process_sample(float* left, float* right);
 
   PluginDescriptor descriptor_;
@@ -97,6 +141,7 @@ class FxPadInstance : public PluginInstance {
   // slams in clicks, so this is what process_sample reads, not the atomic.
   std::array<float, kPads> mix_{};
   std::array<bool, kPads> was_on_{};
+  BlockCoefs co_;
 
   Delay hist_[2];
   Delay delay_[2];
@@ -120,10 +165,16 @@ class FxPadInstance : public PluginInstance {
   float vib_phase_ = 0.0f;
   float talk_phase_ = 0.0f;
   double gate_phase_ = 0.0;
-  uint32_t stutter_len_ = 0;
-  uint32_t stutter_cap_ = 0;
+  double cutter_phase_ = 0.0;
+  dsp::LinearRamp gate_ramp_;
+  dsp::LinearRamp cutter_ramp_;
+  uint32_t edge_frames_ = 72;
+  uint32_t stutter_cap_ = 0;       // frames of slice the pad can play
+  uint32_t stutter_captured_ = 0;  // frames actually captured, cap + seam
   uint32_t stutter_pos_ = 0;
+  bool stutter_first_ = true;
   size_t reverse_play_ = 0;
+  size_t reverse_alt_ = 0;  // the fresh tap fading in as the old one runs out
 };
 
 }  // namespace nirbija

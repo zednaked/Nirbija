@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 // A pad sampler: load a file, fire a note, hear it; Rec from the strip input
 // lands on a pad and plays back; names survive a state round trip.
 
@@ -29,6 +31,33 @@ void fail(const std::string& what) {
 
 void expect(bool condition, const std::string& what) {
   if (!condition) fail(what);
+}
+
+// A one second 440 Hz tone at the engine rate, loud, for the tests that
+// listen for a step: long enough to still be sounding when it is hit again
+// or swapped out, and at the engine rate so there is no resampling in the
+// way of the arithmetic.
+fs::path write_long_tone(const char* name, double hz) {
+  const fs::path path = fs::temp_directory_path() / name;
+  SF_INFO info{};
+  info.samplerate = 48000;
+  info.channels = 1;
+  info.format = SF_FORMAT_WAV | SF_FORMAT_FLOAT;
+  SNDFILE* file = sf_open(path.c_str(), SFM_WRITE, &info);
+  std::vector<float> tone(48000);
+  for (size_t i = 0; i < tone.size(); ++i)
+    tone[i] = 0.9f * std::sin(2.0 * M_PI * hz * i / 48000.0);
+  sf_writef_float(file, tone.data(), static_cast<sf_count_t>(tone.size()));
+  sf_close(file);
+  return path;
+}
+
+// Largest sample-to-sample step in a capture, from `from` on.
+float max_step(const std::vector<float>& v, size_t from = 1) {
+  float worst = 0.0f;
+  for (size_t i = std::max<size_t>(from, 1); i < v.size(); ++i)
+    worst = std::max(worst, std::fabs(v[i] - v[i - 1]));
+  return worst;
 }
 
 fs::path write_tone() {
@@ -766,6 +795,65 @@ int main() {
     expect(sampler->retired_count() == 5,
            "a sampler that has not rendered yet must keep its retired buffers "
            "(kept " + std::to_string(sampler->retired_count()) + " of 5)");
+  }
+
+  // --- a retrigger overlaps the hit it interrupts instead of cutting it ------
+  // A 440 Hz sine at 0.9 moves at most 0.052 a sample; two of them under the
+  // 64-sample crossfade stay under 0.15. Restarting the voice in place, as
+  // it used to, jumped from wherever the wave was to zero: up to 0.9.
+  {
+    const fs::path long_tone = write_long_tone("nirbija-sampler-long.wav", 440.0);
+    nirbija::SamplerInstance sampler;
+    sampler.set_channel_layout(2);
+    sampler.activate(kRate, kBlock);
+    expect(sampler.load(0, long_tone.string()), "could not load the long tone");
+    note_on(sampler, 36, 127);
+    run_capture(sampler, kBlock * 40);
+    // Hit again on a frame chosen to land near a peak of the wave.
+    note_on(sampler, 36, 127, 27);
+    const auto around = run_capture(sampler, kBlock * 4);
+    expect(max_step(around) < 0.15f,
+           "a retrigger stepped by " + std::to_string(max_step(around)));
+    expect((sampler.sounding_mask() & 1u) != 0, "the retriggered pad went quiet");
+
+    // Swapping the pad's audio under a sounding voice fades the old take
+    // out inside the block that sees the swap, rather than dropping it.
+    const fs::path other = write_long_tone("nirbija-sampler-long2.wav", 330.0);
+    run_capture(sampler, kBlock * 20);
+    expect(sampler.load(0, other.string()), "could not load the second tone");
+    const auto swapped = run_capture(sampler, kBlock * 2);
+    expect(max_step(swapped) < 0.15f,
+           "a swap under a voice stepped by " + std::to_string(max_step(swapped)));
+    // And the old buffer is let go once the audio thread has left it.
+    run_capture(sampler, kBlock * 3);
+    sampler.reclaim_retired(/*audio_running=*/true);
+    expect(sampler.retired_count() == 0,
+           "the swapped-out take was not reclaimed (" +
+               std::to_string(sampler.retired_count()) + " retired)");
+    note_on(sampler, 36, 127);
+    expect(run(sampler) > 0.2f, "the pad did not play its new audio after a swap");
+
+    // Clearing a sounding pad fades it too.
+    sampler.clear_pad(0);
+    const auto cleared = run_capture(sampler, kBlock * 2);
+    expect(max_step(cleared) < 0.15f,
+           "clearing a sounding pad stepped by " + std::to_string(max_step(cleared)));
+    run_capture(sampler, kBlock);
+    expect(run(sampler) < 1e-6f, "a cleared pad kept sounding");
+
+    // Two hits in one block on a hold pad: both voices run, the note-off
+    // releases both.
+    sampler.load(0, long_tone.string());
+    sampler.set_parameter(5, 0.0);  // one-shot off on focused pad 0
+    note_on(sampler, 36, 127, 0);
+    note_on(sampler, 36, 127, 100);
+    run(sampler);
+    note_off(sampler, 36);
+    run(sampler);
+    run(sampler);
+    expect(run(sampler) < 1e-5f, "a note-off left a retriggered hold voice sounding");
+    fs::remove(long_tone);
+    fs::remove(other);
   }
 
   fs::remove(tone);

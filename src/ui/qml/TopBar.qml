@@ -1,4 +1,5 @@
 pragma ComponentBehavior: Bound
+// SPDX-License-Identifier: GPL-3.0-only
 
 import QtQuick
 import QtQuick.Layouts
@@ -24,6 +25,8 @@ Rectangle {
     property real holdRight: 0
     property string status: ""
     property string masterSink: ""
+    // The plugin scan and the session are still on their way in.
+    property bool loading: false
 
     signal masterOutputClicked
     signal menuRequested(var item)
@@ -292,10 +295,13 @@ Rectangle {
                 Layout.fillWidth: true
                 text: Mixer.learning
                       ? qsTr("MIDI learn: move a control… (Esc cancels)")
+                      : root.loading
+                      ? qsTr("loading plugins and session…")
                       : Mixer.xruns > 0
                       ? root.status + qsTr(" · %n xrun(s)", "", Mixer.xruns)
                       : root.status
                 color: Mixer.learning ? Skin.solo
+                     : root.loading ? Skin.accent
                      : Mixer.xruns > 0 ? Skin.arm
                      : Skin.textDim
                 font.pixelSize: Skin.fontXS

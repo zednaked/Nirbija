@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #pragma once
 
 #include <array>
@@ -5,6 +7,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "core/midi_out.h"
 #include "core/plugin.h"
 
 namespace nirbija {
@@ -125,6 +128,11 @@ class StepSequencerInstance : public PluginInstance {
   // Euclid is a bang — mute/channel here must not repaint Toussaint.
   void set_lane(int lane, int note, int length, int division, int direction,
                 int channel, bool mute, double gate);
+  // Euclid, nudge and mutate rewrite many cells one atomic at a time, so a
+  // block that runs in the middle of one can read a row half old, half new.
+  // That is one odd step, once, and only while a hand is on the control; a
+  // double-buffered grid would cost 256 KB more and a swap protocol for a
+  // glitch nobody hears, so the cells stay single and the edit stays simple.
   void set_lane_euclid(int lane, int pulses);
   void set_extra_head(int extra, int lane, int rate, int direction, int start,
                       int length, int transpose, bool mute);
@@ -217,10 +225,71 @@ class StepSequencerInstance : public PluginInstance {
     bool locked = false;
   };
 
+  // Everything process() reads once and every head then shares: the block's
+  // span in beats, the macro values, and the snapshot of last_fired_/last_on_
+  // that Pre/Nei conditions compare against (the snapshot, not the live
+  // arrays, so a lane earlier in the walk cannot change what a later lane
+  // sees in the same block).
+  struct Block {
+    uint32_t frames = 0;
+    double start_beat = 0.0;
+    double end_beat = 0.0;
+    double block_beats = 0.0;
+    bool armed = false;
+    bool fill = false;
+    int scale = Chromatic;
+    int root = 0;
+    int transpose = 0;
+    int focused = 0;
+    float density = 1.0f;
+    float chaos = 0.0f;
+    float ratchet_macro = 0.0f;
+    float master_prob = 1.0f;
+    int pattern = 0;           // the pattern this block started in
+    int next_pattern = -1;     // queued for the bar line, or -1
+    double next_bar_beat = 0;  // where `next_pattern` takes over
+    int focused_playhead = -1;
+    std::array<bool, kVoiceSlots> snap_fired{};
+    std::array<std::array<bool, kMaxSteps>, kLanes> snap_on{};
+  };
+
+  // One playhead's walk: a native lane, or an extra head that reads a lane
+  // through its own window, rate and transpose.
+  struct HeadWalk {
+    int voice = 0;
+    int lane = 0;
+    bool extra = false;
+    int extra_idx = 0;
+    double rate = 1.0;
+    int window_length = kVisibleSteps;
+    int window_start = 0;
+    int direction = Forward;
+    int extra_transpose = 0;
+    bool extra_mute = false;
+  };
+
   double beat_of(double index, double step_beats) const;
   int map_step(int index, int length, int direction);
   void emit(uint32_t frame, uint8_t status, uint8_t data1, uint8_t data2);
   void stop_sounding(int head, uint32_t frame);
+  // The note-off a head owes, if it falls before `before_beat`. Called before
+  // every pulse and step and once at the end of the block, so an off that
+  // lands between two ons in the same block is placed on its own frame
+  // rather than on the next on's.
+  void release_due(int head, double before_beat, const Block& block);
+  // process(), in the order it runs them.
+  bool begin_block(uint32_t frames, Block& block);
+  uint32_t frame_for(double beat, const Block& block) const;
+  void drain_ratchet(int voice, bool muted, const Block& block);
+  bool cond_ok(int voice, int lane, int step, int cond, uint8_t arg, int cycle,
+               const Block& block) const;
+  void walk_head(const HeadWalk& head, Block& block);
+  // The step's own decision: does it hit, and with what. Returns true when a
+  // note (or a ratchet's first pulse) went out.
+  bool trigger_step(const HeadWalk& head, int step, int pattern, double index,
+                    double step_beats, double sound_beat, uint32_t frame,
+                    uint8_t channel, double gate, Block& block);
+  void end_block(const Block& block);
   int focused_index() const;
   uint32_t next_rng();      // audio thread
   uint32_t next_ui_rng();   // UI thread — pattern ops, not process()
@@ -287,8 +356,9 @@ class StepSequencerInstance : public PluginInstance {
   std::array<std::atomic<int>, kLanes> head_steps_{};
   std::array<std::atomic<int>, kExtraHeads> extra_head_steps_{};
 
-  std::array<MidiEvent, kMaxEvents> events_{};
-  size_t event_count_ = 0;
+  // What goes out this block: the grid's own notes and whatever came in
+  // from earlier in the chain, on one queue with one note-off reserve.
+  MidiOutBlock<kMaxEvents> out_;
 };
 
 }  // namespace nirbija

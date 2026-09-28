@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #pragma once
 
 #include <QAbstractListModel>
@@ -5,6 +7,7 @@
 #include <QSortFilterProxyModel>
 #include <qqmlintegration.h>
 
+#include <future>
 #include <memory>
 #include <vector>
 
@@ -14,7 +17,10 @@ namespace nirbija {
 
 // Every plugin the compiled-in backends can see, scanned once at startup.
 // Scanning walks the disk and dlopens modules, so it never happens on demand
-// from a QML binding.
+// from a QML binding - and it never happens on the GUI thread either: the
+// scan runs on a worker and the list fills in when it returns, so the window
+// is on screen while the disk is being walked instead of black until then.
+// The backends keep an on-disk scan cache, so the second start is quick.
 class PluginListModel : public QAbstractListModel {
   Q_OBJECT
   QML_ELEMENT
@@ -22,6 +28,7 @@ class PluginListModel : public QAbstractListModel {
   // it through Mixer.plugins.
   QML_UNCREATABLE("Reach the plugin list through Mixer.plugins.")
   Q_PROPERTY(int count READ rowCount NOTIFY countChanged)
+  Q_PROPERTY(bool scanning READ scanning NOTIFY scanningChanged)
 
  public:
   enum Roles {
@@ -34,23 +41,33 @@ class PluginListModel : public QAbstractListModel {
   };
 
   explicit PluginListModel(QObject* parent = nullptr);
+  ~PluginListModel() override;
 
   int rowCount(const QModelIndex& parent = {}) const override;
   QVariant data(const QModelIndex& index, int role) const override;
   QHash<int, QByteArray> roleNames() const override;
 
+  // Starts a scan on the worker; the model resets when it comes back and
+  // scanFinished() says so. A scan already running is waited for first.
   Q_INVOKABLE void rescan();
+  bool scanning() const { return scanning_; }
+  // Blocks the caller until the running scan has been applied. Negative
+  // waits as long as it takes; returns false if the time ran out first.
+  Q_INVOKABLE bool waitForScan(int milliseconds = -1);
 
   // Finds the row holding a given plugin, for restoring a saved session.
   // Returns -1 when the plugin is no longer installed.
   int rowFor(PluginFormat format, const std::string& uid) const;
 
-  // Used by MixerModel to turn a picker row into a live plugin.
-  std::unique_ptr<PluginInstance> instantiate(int row) const;
+  // Used by MixerModel to turn a picker row into a live plugin. Waits for a
+  // running scan first: the backends are the worker's while it scans.
+  std::unique_ptr<PluginInstance> instantiate(int row);
   const PluginDescriptor* descriptor(int row) const;
 
  signals:
   void countChanged();
+  void scanningChanged();
+  void scanFinished();
 
  private:
   static QString format_name(PluginFormat format);
@@ -61,6 +78,15 @@ class PluginListModel : public QAbstractListModel {
     size_t backend_index;
   };
   std::vector<Entry> entries_;
+
+  // Takes the worker's result into the model. `generation` names the scan it
+  // came from: the queued completion and an explicit waitForScan() can both
+  // arrive with the same result, and only the first may apply it.
+  void applyScan(int generation);
+  std::future<std::vector<Entry>> pending_;
+  int scan_generation_ = 0;
+  int applied_generation_ = 0;
+  bool scanning_ = false;
 };
 
 // The picker's search, done by the model instead of by the delegate.

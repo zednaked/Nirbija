@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Nirbija contributors
 #pragma once
 
 #include <array>
@@ -65,6 +67,17 @@ class DroneInstance : public PluginInstance {
   static double interval_ratio(int semitones, bool just);
   static double midi_to_hz(double note);
 
+  // sin(2π·phase) from a 1024-point table with linear interpolation, the
+  // oscillator's sine. Twelve std::sin calls a sample were the drone's
+  // single largest cost; the table's error is below 1e-5, two orders under
+  // what the test for it demands.
+  static float fast_sin(double phase01);
+
+  // The shape of the saturator: x(27 + x²)/(27 + 9x²), held at ±1 past |x| = 3.
+  // Within two percent of tanh over the range the drone drives it, the same
+  // odd, monotone knee, and its slope is already zero where it is clamped.
+  static float soft_clip(float x);
+
   // A set of strings with a name. Presets are the strings and the tuning
   // only: root, swell and the weather are the performance and stay where
   // they were, so a preset can be changed under a drone that is sounding.
@@ -85,6 +98,10 @@ class DroneInstance : public PluginInstance {
   void set_channel_layout(int channels) override { channels_ = channels; }
   bool activate(double sample_rate, uint32_t max_block_frames) override;
   void deactivate() override {}
+  // Back to silence at the current sample rate without allocating: the
+  // buffers are cleared, not resized. For a host's reset() on the audio
+  // thread, where activate() - which sizes the reverb - may not be called.
+  void reset();
 
   void queue_midi(const MidiEvent& event) override;
   void process(const float* const* inputs, float* const* outputs,
@@ -140,6 +157,7 @@ class DroneInstance : public PluginInstance {
   };
 
   static float osc(double phase, double inc, float shape);
+  static constexpr int kHzInterval = 32;  // samples between pitch recomputes
   void step_walker(Walker& w, float seconds_per_sample, float period_seconds,
                    float coeff);
   float reverb(int ch, float in);
