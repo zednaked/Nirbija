@@ -63,8 +63,13 @@ ApplicationWindow {
     // ever runs on Linux, forced onto X11 in platform.cpp - so listing both
     // registered two shortcuts on the identical key. Qt saw that as ambiguous
     // and fired neither: Escape did not cancel MIDI learn at all.
+    //
+    // Every StandardKey here is more than one key on xcb (Escape and the
+    // Cancel key, Ctrl+Z and F14 and Undo...), and `sequence:` binds only the
+    // first and warns about the rest at every start; `sequences: [...]` binds
+    // them all, and they are different keys, so nothing is ambiguous.
     Shortcut {
-        sequence: StandardKey.Cancel
+        sequences: [StandardKey.Cancel]
         onActivated: Mixer.cancelLearn()
     }
     Shortcut {
@@ -72,18 +77,18 @@ ApplicationWindow {
         onActivated: Mixer.togglePlay()
     }
     Shortcut {
-        sequence: StandardKey.Undo
+        sequences: [StandardKey.Undo]
         onActivated: Mixer.undo()
     }
     Shortcut {
-        sequence: StandardKey.Redo
+        sequences: [StandardKey.Redo]
         onActivated: Mixer.redo()
     }
     // Same duplicate-registration bug as Cancel above: StandardKey.HelpContents
     // already is "F1" here, so the literal alongside it made F1 ambiguous and
     // the shortcut sheet never opened from the keyboard.
     Shortcut {
-        sequence: StandardKey.HelpContents
+        sequences: [StandardKey.HelpContents]
         onActivated: window.openShortcuts()
     }
 
@@ -120,7 +125,7 @@ ApplicationWindow {
         onActivated: window.zoom(() => Skin.zoomIn())
     }
     Shortcut {
-        sequence: StandardKey.ZoomOut
+        sequences: [StandardKey.ZoomOut]
         onActivated: window.zoom(() => Skin.zoomOut())
     }
     Shortcut {
