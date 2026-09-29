@@ -101,6 +101,11 @@ int main() {
          std::to_string(params.size()) + ")");
   else if (params[nirbija::DroneInstance::Swell].name != "Swell")
     fail("parameter 24 through CLAP is not Swell");
+  // What a scene jumps rather than walks, read from CLAP_PARAM_IS_STEPPED.
+  if (params.size() == nirbija::DroneInstance::kParamCount &&
+      (!params[nirbija::DroneInstance::Root].stepped ||
+       params[nirbija::DroneInstance::Swell].stepped))
+    fail("CLAP_PARAM_IS_STEPPED did not come through as ParameterInfo::stepped");
 
   // One sine string at A2, swell straight up: sound, at 110 Hz.
   for (int v = 0; v < nirbija::DroneInstance::kVoices; ++v) {
@@ -144,6 +149,33 @@ int main() {
          std::to_string(moved.zc_per_sec) + ")");
   if (std::fabs(plugin->parameter_value(nirbija::DroneInstance::Root) - 57.0) > 1e-9)
     fail("the root a note set is not visible through CLAP params");
+
+  // The plugin said so itself, as a PARAM_VALUE out event: to the host that
+  // is a hand on the knob, for a scene to record or yield to.
+  {
+    nirbija::TouchedParam touched[8];
+    const size_t n = plugin->take_touched(touched, 8);
+    bool root = false;
+    for (size_t i = 0; i < n; ++i)
+      if (touched[i].id == nirbija::DroneInstance::Root &&
+          std::fabs(touched[i].value - 57.0) < 1e-9)
+        root = true;
+    if (!root) fail("the root the plugin reported did not come out of take_touched");
+    if (plugin->take_touched(touched, 8) != 0) fail("take_touched gave the same move twice");
+  }
+
+  // A scene's value, set from the audio thread: it reaches the plugin on the
+  // next block, and only the UI thread may read it back.
+  if (plugin->parameter_value_rt_safe())
+    fail("a CLAP plugin claims its parameter_value is safe on the audio thread");
+  plugin->set_parameter_rt(nirbija::DroneInstance::Swell, 0.25);
+  plugin->set_parameter_rt(nirbija::DroneInstance::Swell, 0.5);  // the later one wins
+  run(*plugin, 1);
+  if (std::fabs(plugin->parameter_value(nirbija::DroneInstance::Swell) - 0.5) > 1e-9)
+    fail("set_parameter_rt did not reach the plugin on the next block: " +
+         std::to_string(plugin->parameter_value(nirbija::DroneInstance::Swell)));
+  plugin->set_parameter_rt(nirbija::DroneInstance::Swell, 1.0);
+  run(*plugin, 1);
 
   // State through the CLAP stream, into a second instance.
   const std::vector<uint8_t> blob = plugin->save_state();

@@ -46,9 +46,13 @@ turns to dashes). Touching a control a scene is walking takes it back until
 the next scene starts.
 
 Scenes ride plugin knobs too: the FX Pad's sixteen amounts, the Drone, the
-Arpeggiator, the Chord and any LV2 parameter walk from where they are to
-where the scene wants them over its fade, and a mode or a division jumps on
-the line. The FX Pad's editor shows its pads moving by themselves.
+Arpeggiator, the Chord and any LV2, CLAP or VST3 parameter walk from where
+they are to where the scene wants them over its fade, and a mode, a waveform
+or a switch jumps on the line - each format says which parameters those
+are. The plugin's own editor follows the walk (the FX Pad's pads move by
+themselves, a VST3's knobs turn), and a knob turned in the plugin's own
+window is recorded into the scene, or taken from it, like one turned in
+Nirbija's.
 
 The change lands on the frame of the bar line. A strip switched off fades
 along a raised cosine over the scene's bars, a fader walks in decibels, and

@@ -848,6 +848,12 @@ class Vst3Instance : public PluginInstance {
     param_changes_.count = 0;
     ParamEdit edit;
     while (param_edits_.pop(edit)) add_param_change(edit.id, edit.value);
+    // The scene's walk, after the UI's edits: it is the newer value. The
+    // controller hears of it from host_idle, so the editor's knob moves too.
+    rt_params_.drain([&](const auto& entry) {
+      add_param_change(entry.id, entry.value);
+      rt_mirror_.publish(entry.id, entry.value);
+    });
 
     events_.count = 0;
     MidiEvent midi;
@@ -972,7 +978,8 @@ class Vst3Instance : public PluginInstance {
       // Everything is presented normalised: it is the only scale the interface
       // guarantees for every parameter.
       out.push_back({static_cast<uint32_t>(info.id), utf16_to_utf8(info.title),
-                     0.0, 1.0, info.defaultNormalizedValue});
+                     0.0, 1.0, info.defaultNormalizedValue,
+                     info.stepCount > 0 || (info.flags & Vst::ParameterInfo::kIsList) != 0});
     }
     return out;
   }
@@ -981,6 +988,15 @@ class Vst3Instance : public PluginInstance {
     if (controller_ == nullptr) return 0.0;
     return controller_->getParamNormalized(id);
   }
+
+  void set_parameter_rt(uint32_t id, double value) override {
+    rt_params_.set(id, std::clamp(value, 0.0, 1.0));
+  }
+  size_t take_touched(TouchedParam* out, size_t capacity) override {
+    return touched_.take(out, capacity);
+  }
+  // The value lives in the edit controller, which is the UI thread's.
+  bool parameter_value_rt_safe() const override { return false; }
 
   void set_parameter(uint32_t id, double value) override {
     const double clamped = std::clamp(value, 0.0, 1.0);
@@ -1089,6 +1105,13 @@ class Vst3Instance : public PluginInstance {
     // audio thread is not also in process(): a whole idle interval with the
     // block counter still says it is not, and the graph is only changed from
     // this same thread, so it cannot start on us in between.
+    // What a scene walked on the audio thread, told to the controller - the
+    // editor draws from it, and parameter_value() reads it.
+    if (controller_ != nullptr)
+      rt_mirror_.collect([this](uint32_t id, double value) {
+        controller_->setParamNormalized(id, value);
+      });
+
     const uint64_t generation = process_generation_.load(std::memory_order_acquire);
     if (active_.load(std::memory_order_acquire) &&
         generation == idle_seen_generation_ && param_edits_.size() > 0)
@@ -1275,6 +1298,7 @@ class Vst3Instance : public PluginInstance {
     // the plugin is worth asking for its state again.
     tresult PLUGIN_API performEdit(Vst::ParamID id, Vst::ParamValue value) override {
       owner->param_edits_.push({id, value});
+      owner->touched_.note(id, value);
       owner->state_dirty_.store(true, std::memory_order_release);
       return kResultOk;
     }
@@ -1336,6 +1360,11 @@ class Vst3Instance : public PluginInstance {
   Vst::IMidiMapping* midi_mapping_ = nullptr;
   std::array<std::array<Vst::ParamID, Vst::kCountCtrlNumber>, 16> midi_map_cache_{};
   RtQueue<ParamEdit, 256> param_edits_;
+  // The scene conductor's values: audio thread only, then mirrored for the
+  // controller.
+  hosting::RtParamBuffer<64> rt_params_;
+  hosting::RtParamMirror<256> rt_mirror_;
+  hosting::TouchedList touched_;  // UI thread: what the editor moved
   RtQueue<MidiEvent, 1024> pending_midi_;
   TransportInfo transport_;
 

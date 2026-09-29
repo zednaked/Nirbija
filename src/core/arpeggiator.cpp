@@ -275,14 +275,14 @@ size_t ArpeggiatorInstance::take_midi_output(MidiEvent* out, size_t capacity) {
 std::vector<ParameterInfo> ArpeggiatorInstance::parameters() const {
   return {
       {kDivision, "Division (0 1/4, 1 1/8, 2 1/16, 3 1/32, 4 1/4T, 5 1/8T)", 0.0,
-       kStepDivisionCount - 1.0, 2.0},
+       kStepDivisionCount - 1.0, 2.0, true},
       {kMode, "Mode (0 up, 1 down, 2 up-down, 3 down-up, 4 played, 5 random, 6 chord)",
-       0.0, static_cast<double>(ModeCount) - 1.0, 0.0},
-      {kOctaves, "Octaves", 1.0, 4.0, 1.0},
+       0.0, static_cast<double>(ModeCount) - 1.0, 0.0, true},
+      {kOctaves, "Octaves", 1.0, 4.0, 1.0, true},
       {kGate, "Gate", 0.05, 1.0, 0.5},
-      {kTranspose, "Transpose", -24.0, 24.0, 0.0},
-      {kLatch, "Latch", 0.0, 1.0, 0.0},
-      {kThru, "Pass input through", 0.0, 1.0, 0.0},
+      {kTranspose, "Transpose", -24.0, 24.0, 0.0, true},
+      {kLatch, "Latch", 0.0, 1.0, 0.0, true},
+      {kThru, "Pass input through", 0.0, 1.0, 0.0, true},
   };
 }
 

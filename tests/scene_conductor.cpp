@@ -301,6 +301,59 @@ int main() {
            "the scene kept walking a parameter the player took");
   }
 
+  // --- a plugin only the UI thread may read (CLAP, VST3) -----------------------
+  // The conductor must write through set_parameter_rt and start a walk from
+  // where the UI last saw the parameter (SceneTable::now), never from
+  // parameter_value() on the audio thread.
+  {
+    class UiOnly : public nirbija::FxPadInstance {
+     public:
+      int reads = 0, ui_writes = 0, rt_writes = 0;
+      double parameter_value(uint32_t id) const override {
+        ++const_cast<UiOnly*>(this)->reads;
+        return FxPadInstance::parameter_value(id);
+      }
+      void set_parameter(uint32_t id, double value) override {
+        ++ui_writes;
+        FxPadInstance::set_parameter(id, value);
+      }
+      void set_parameter_rt(uint32_t id, double value) override {
+        ++rt_writes;
+        FxPadInstance::set_parameter(id, value);
+      }
+      bool parameter_value_rt_safe() const override { return false; }
+      double stored(uint32_t id) const { return FxPadInstance::parameter_value(id); }
+    };
+    Rig rig(110.0);
+    auto fx = std::make_unique<UiOnly>();
+    UiOnly* raw = fx.get();
+    rig.graph.channel(rig.strip).add_insert(std::move(fx));
+    const uint32_t tag = rig.graph.channel(rig.strip).insert_tag(0);
+    const uint32_t filter = nirbija::FxPadInstance::Filter;
+    SceneTarget t;
+    t.what = SceneTarget::What::Param;
+    t.strip = static_cast<uint16_t>(rig.strip);
+    t.insert_tag = tag;
+    t.param = filter;
+    t.polled = true;
+    auto table = std::make_shared<SceneTable>();
+    t.value = 0.8f;
+    add_scene(*table, 0, 2, {t});
+    table->now = std::make_unique<std::atomic<float>[]>(table->targets.size());
+    table->now[0].store(0.2f);  // where the UI last saw it
+    rig.scenes.publish(table);
+    raw->reads = raw->ui_writes = raw->rt_writes = 0;
+
+    rig.run_bars(1.0);  // the scene starts on the line at the top
+    const double mid = raw->stored(filter);
+    expect(mid > 0.45 && mid < 0.55,
+           "a bar into a two-bar walk from what the UI saw (0.2) to 0.8 is not halfway: " +
+               std::to_string(mid));
+    expect(raw->reads == 0, "the conductor read a UI-thread-only parameter on the audio thread");
+    expect(raw->ui_writes == 0 && raw->rt_writes > 0,
+           "the conductor did not write through set_parameter_rt");
+  }
+
   // --- the list: walk, hold, stay on the last ----------------------------------
   {
     Rig rig(120.0);

@@ -273,7 +273,11 @@ void MixerModel::setFollowScenes(int row, bool on) {
 bool MixerModel::sceneParamAllowed(const PluginInstance* insert) {
   if (insert == nullptr) return false;
   const PluginDescriptor& descriptor = insert->descriptor();
-  if (descriptor.format == PluginFormat::Lv2) return true;
+  // LV2 is a store on a control port; CLAP and VST3 take the conductor's
+  // values through a buffer of their own (set_parameter_rt).
+  if (descriptor.format == PluginFormat::Lv2 || descriptor.format == PluginFormat::Clap ||
+      descriptor.format == PluginFormat::Vst3)
+    return true;
   if (descriptor.format != PluginFormat::Internal) return false;
   // The built-ins whose parameters are settings. The sequencer, looper and
   // sampler have parameters that are buttons (clear, record, mutate): a
@@ -288,18 +292,11 @@ bool MixerModel::sceneParamAllowed(const PluginInstance* insert) {
 }
 
 bool MixerModel::sceneParamStepped(const PluginInstance* insert, uint32_t id) {
-  if (insert == nullptr || insert->descriptor().format != PluginFormat::Internal)
-    return false;
-  // Nothing says which parameters take whole values (design/scenes.md,
-  // phase 3 reads it from the formats that know). For the built-ins a range
-  // of whole numbers wider than 0..1 is a mode, a division or a note - and
-  // a mode walked through its neighbours on the way is not a fade.
-  for (const ParameterInfo& info : insert->parameters()) {
-    if (info.id != id) continue;
-    auto whole = [](double v) { return std::floor(v) == v; };
-    return whole(info.min_value) && whole(info.max_value) &&
-           whole(info.default_value) && info.max_value - info.min_value >= 2.0;
-  }
+  if (insert == nullptr) return false;
+  // What the plugin says: each format has a flag for it, and the built-ins
+  // mark their modes, divisions, notes and switches.
+  for (const ParameterInfo& info : insert->parameters())
+    if (info.id == id) return info.stepped;
   return false;
 }
 
@@ -404,6 +401,7 @@ quint64 MixerModel::sceneTableSignature() const {
 void MixerModel::publishScenes() {
   auto table = std::make_shared<SceneTable>();
   table->scenes.reserve(scenes_.size());
+  scene_polled_.clear();
   for (const SceneUi& scene : scenes_) {
     SceneTable::Scene entry;
     entry.id = scene.id;
@@ -423,13 +421,41 @@ void MixerModel::publishScenes() {
       out.param = target.param;
       out.stepped = target.stepped;
       out.value = target.value;
+      if (target.what == SceneTarget::What::Param) {
+        const ChannelStrip* strip = stripFor(row);
+        const PluginInstance* insert =
+            strip != nullptr ? strip->insert_by_tag(target.insert_tag) : nullptr;
+        out.polled = insert != nullptr && !insert->parameter_value_rt_safe();
+        if (out.polled)
+          scene_polled_.push_back(
+              {table->targets.size(), channel.uid, target.insert_tag, target.param});
+      }
       table->targets.push_back(out);
     }
     entry.count = static_cast<uint32_t>(table->targets.size()) - entry.first;
     table->scenes.push_back(entry);
   }
+  if (!scene_polled_.empty()) {
+    table->now = std::make_unique<std::atomic<float>[]>(table->targets.size());
+    scene_table_ = table;
+    pollSceneParams();
+  } else {
+    scene_table_.reset();
+  }
   engine_.scenes().publish(std::move(table));
   scene_table_signature_ = sceneTableSignature();
+}
+
+void MixerModel::pollSceneParams() {
+  if (scene_table_ == nullptr || scene_table_->now == nullptr) return;
+  for (const PolledParam& polled : scene_polled_) {
+    const ChannelStrip* strip = stripFor(rowForUid(polled.strip));
+    if (const PluginInstance* insert =
+            strip != nullptr ? strip->insert_by_tag(polled.insert_tag) : nullptr)
+      scene_table_->now[polled.index].store(
+          static_cast<float>(insert->parameter_value(polled.param)),
+          std::memory_order_relaxed);
+  }
 }
 
 void MixerModel::pollScenes() {
@@ -438,6 +464,7 @@ void MixerModel::pollScenes() {
   // Strips came, went, moved or stopped following: the table names graph
   // slots, so it is rebuilt before a scene can start on the old picture.
   if (sceneTableSignature() != scene_table_signature_) publishScenes();
+  pollSceneParams();
 
   bool changed = false;
   const uint32_t changes = conductor.scene_changes();

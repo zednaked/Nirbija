@@ -269,19 +269,19 @@ size_t ChordInstance::take_midi_output(MidiEvent* out, size_t capacity) {
 
 std::vector<ParameterInfo> ChordInstance::parameters() const {
   return {
-      {kRoot, "Root (0 C .. 11 B)", 0.0, 11.0, 0.0},
+      {kRoot, "Root (0 C .. 11 B)", 0.0, 11.0, 0.0, true},
       {kScale,
        "Scale (0 major, 1 dorian, 2 phrygian, 3 lydian, 4 mixolydian, "
        "5 minor, 6 locrian, 7 harm.minor, 8 mel.minor, 9 penta maj, "
        "10 penta min, 11 blues)",
-       0.0, static_cast<double>(ScaleCount) - 1.0, 0.0},
-      {kSplit, "Split point (MIDI note)", 0.0, 127.0, 60.0},
-      {kOctave, "Performance octave", -3.0, 3.0, 0.0},
-      {kInversion, "Inversion (0 root .. 3)", 0.0, 3.0, 0.0},
-      {kVoices, "Voices (3 triad, 4 seventh)", 3.0, 4.0, 3.0},
-      {kSpread, "Spread (0 closed, 1 open)", 0.0, 1.0, 0.0},
-      {kPassthrough, "Passthrough quantize", 0.0, 1.0, 0.0},
-      {kChannel, "MIDI channel", 0.0, 15.0, 0.0},
+       0.0, static_cast<double>(ScaleCount) - 1.0, 0.0, true},
+      {kSplit, "Split point (MIDI note)", 0.0, 127.0, 60.0, true},
+      {kOctave, "Performance octave", -3.0, 3.0, 0.0, true},
+      {kInversion, "Inversion (0 root .. 3)", 0.0, 3.0, 0.0, true},
+      {kVoices, "Voices (3 triad, 4 seventh)", 3.0, 4.0, 3.0, true},
+      {kSpread, "Spread (0 closed, 1 open)", 0.0, 1.0, 0.0, true},
+      {kPassthrough, "Passthrough quantize", 0.0, 1.0, 0.0, true},
+      {kChannel, "MIDI channel", 0.0, 15.0, 0.0, true},
   };
 }
 

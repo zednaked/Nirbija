@@ -58,6 +58,11 @@ class DroneInstance : public PluginInstance {
   static const char* param_name(uint32_t id);
   static double param_min(uint32_t id);
   static double param_max(uint32_t id);
+  // The pitches in whole steps and the tuning switch. The drone glides a
+  // pitch by itself, so a scene sets the note and lets the glide walk.
+  static bool param_stepped(uint32_t id) {
+    return (id < Swell && id % kVoiceStride == Interval) || id == Root || id == Just;
+  }
   static double param_default(uint32_t id);
 
   // The frequency multiplier an interval stands for. Just intonation keeps a

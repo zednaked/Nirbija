@@ -266,20 +266,35 @@ void SceneConductor::start(AudioGraph& graph, const SceneTable& table, int scene
         if (target.stepped || fade_samples < 1.0) {
           // On the line, and nothing still walking it the other way.
           if (ParamRamp* ramp = param_ramp_for(target, false)) ramp->active = false;
-          plugin->set_parameter(target.param, target.value);
+          plugin->set_parameter_rt(target.param, target.value);
           break;
         }
         ParamRamp* ramp = param_ramp_for(target, true);
         if (ramp == nullptr) {  // more walks at once than there is room for
-          plugin->set_parameter(target.param, target.value);
+          plugin->set_parameter_rt(target.param, target.value);
           break;
+        }
+        // A walk already under way on this parameter goes on from where it
+        // got to; otherwise from where the plugin is - which, for a plugin
+        // whose value only the UI thread may read, the UI last saw.
+        if (ramp->active) {
+          const uint64_t at = clock_ + frame;
+          const double t =
+              at <= ramp->start ? 0.0
+                                : std::min(1.0, static_cast<double>(at - ramp->start) /
+                                                    static_cast<double>(std::max<uint64_t>(
+                                                        1, ramp->length)));
+          ramp->from = ramp->from + (ramp->to - ramp->from) * static_cast<float>(t);
+        } else {
+          ramp->from = target.polled && table.now != nullptr
+                           ? table.now[i].load(std::memory_order_relaxed)
+                           : static_cast<float>(plugin->parameter_value(target.param));
         }
         ramp->active = true;
         ramp->bus = target.bus;
         ramp->strip = target.strip;
         ramp->tag = target.insert_tag;
         ramp->param = target.param;
-        ramp->from = static_cast<float>(plugin->parameter_value(target.param));
         ramp->to = target.value;
         ramp->start = clock_ + frame;
         ramp->length = static_cast<uint64_t>(fade_samples);
@@ -374,7 +389,7 @@ void SceneConductor::walk_params(AudioGraph& graph, uint32_t frames) {
                                        static_cast<double>(std::max<uint64_t>(1, ramp.length)));
     const float value = t >= 1.0 ? ramp.to
                                  : ramp.from + (ramp.to - ramp.from) * static_cast<float>(t);
-    plugin->set_parameter(ramp.param, value);
+    plugin->set_parameter_rt(ramp.param, value);
     if (t >= 1.0) ramp.active = false;
   }
 }

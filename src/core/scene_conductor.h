@@ -34,19 +34,22 @@ struct SceneTarget {
   // A parameter that only takes whole values (a mode, a division) jumps on
   // the bar line; every other one walks over the fade.
   bool stepped = false;
+  // Param: the plugin's parameter_value() is the UI thread's (CLAP, VST3);
+  // where the parameter is now comes from SceneTable::now instead.
+  bool polled = false;
   uint16_t strip = 0;       // graph slot
   uint32_t insert_tag = 0;  // Pattern and Param: the plugin, by chain tag
   uint32_t param = 0;       // Param: its id
   float value = 0.0f;
 };
 
-// Only a plugin whose set_parameter is a plain store may be reached from the
-// audio thread: the built-in ones and LV2 (a control port). The UI builds
-// Param targets for nothing else; CLAP and VST3 need a queue of their own
-// first (design/scenes.md, phase 3).
+// A plugin parameter is set through PluginInstance::set_parameter_rt: a plain
+// store for the built-ins and LV2, a buffer the next process() reads for CLAP
+// and VST3 (design/scenes.md, phase 3).
 
 // Built whole on the UI thread and never written again once published: the
-// audio thread reads it without a lock for as long as it is live.
+// audio thread reads it without a lock for as long as it is live. The one
+// exception is `now`, which is atomics.
 struct SceneTable {
   struct Scene {
     // Who the scene is, across tables: the UI hands each one an id that
@@ -61,6 +64,10 @@ struct SceneTable {
   };
   std::vector<Scene> scenes;
   std::vector<SceneTarget> targets;
+  // Indexed like `targets`, for the polled ones: where the parameter is,
+  // written by the UI's poll, read when a fade starts from it. Empty when no
+  // target is polled.
+  std::unique_ptr<std::atomic<float>[]> now;
 };
 
 class SceneConductor {

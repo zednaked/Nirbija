@@ -2017,6 +2017,13 @@ void MixerModel::pollLevels() {
       // none of this model's setters, so without asking, the session would
       // never learn it had anything new to write.
       if (insert->take_state_dirty()) plugin_state_moved = true;
+      // A knob turned in the plugin's own window: recorded into the scene,
+      // or taken from it, like the same knob turned in ours.
+      TouchedParam touched[256];
+      const size_t moved = insert->take_touched(touched, std::size(touched));
+      for (size_t i = 0; i < moved; ++i)
+        sceneParamTouched(static_cast<int>(row), static_cast<int>(slot), touched[i].id,
+                          static_cast<float>(touched[i].value));
       // Length reading Sync: this instance never looks at the graph around
       // it, so the host measures the target here once a poll and hands the
       // number in. A target with no closed loop of its own reads as 0, the

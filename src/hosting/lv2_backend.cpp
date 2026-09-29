@@ -192,6 +192,8 @@ struct PortInfo {
   uint32_t minimum_size = 0;
   // Atom ports: atom:supports midi:MidiEvent.
   bool supports_midi = false;
+  // Control ports: lv2:integer, lv2:toggled or lv2:enumeration.
+  bool stepped = false;
 };
 
 // Cached lilv URIs, built once per world.
@@ -204,11 +206,14 @@ struct PortClasses {
         input(lilv_new_uri(world, LV2_CORE__InputPort)),
         output(lilv_new_uri(world, LV2_CORE__OutputPort)),
         midi_event(lilv_new_uri(world, LV2_MIDI__MidiEvent)),
-        minimum_size(lilv_new_uri(world, LV2_RESIZE_PORT__minimumSize)) {}
+        minimum_size(lilv_new_uri(world, LV2_RESIZE_PORT__minimumSize)),
+        integer(lilv_new_uri(world, LV2_CORE__integer)),
+        toggled(lilv_new_uri(world, LV2_CORE__toggled)),
+        enumeration(lilv_new_uri(world, LV2_CORE__enumeration)) {}
 
   ~PortClasses() {
     for (LilvNode* node : {audio, control, cv, atom, input, output, midi_event,
-                           minimum_size})
+                           minimum_size, integer, toggled, enumeration})
       lilv_node_free(node);
   }
 
@@ -220,6 +225,9 @@ struct PortClasses {
   LilvNode* output;
   LilvNode* midi_event;
   LilvNode* minimum_size;
+  LilvNode* integer;
+  LilvNode* toggled;
+  LilvNode* enumeration;
 };
 
 // The lilv world, its cached URIs and the URID map, kept alive by every
@@ -255,7 +263,7 @@ class Lv2Gui : public PluginGui {
          std::vector<PortInfo> control_ports,
          std::vector<float>* control_out_values,
          std::vector<PortInfo> control_out_ports, AtomBridge* bridge,
-         std::atomic<bool>* state_dirty)
+         std::atomic<bool>* state_dirty, hosting::TouchedList* touched)
       : owner_(owner),
         world_(std::move(world)),
         plugin_(plugin),
@@ -265,6 +273,7 @@ class Lv2Gui : public PluginGui {
         control_out_ports_(std::move(control_out_ports)),
         bridge_(bridge),
         state_dirty_(state_dirty),
+        touched_(touched),
         event_transfer_urid_(world_->urids.map_string(LV2_ATOM__eventTransfer)) {}
 
   ~Lv2Gui() override { detach(); }
@@ -539,6 +548,8 @@ class Lv2Gui : public PluginGui {
       // connected to; the store is atomic so it never sees half of it.
       std::atomic_ref<float>((*self->control_values_)[i])
           .store(value, std::memory_order_relaxed);
+      // The parameter id is the control port's place among the inputs.
+      if (self->touched_ != nullptr) self->touched_->note(static_cast<uint32_t>(i), value);
       return;
     }
   }
@@ -563,6 +574,7 @@ class Lv2Gui : public PluginGui {
   std::vector<float> last_sent_out_;
   AtomBridge* bridge_;
   std::atomic<bool>* state_dirty_;
+  hosting::TouchedList* touched_;
   LV2_URID event_transfer_urid_;
   LV2_Feature parent_feature_{}, instance_feature_{}, idle_feature_{};
   LV2_Feature resize_feature_{}, map_feature_{}, unmap_feature_{};
@@ -784,7 +796,7 @@ class Lv2Instance : public PluginInstance {
     for (size_t i = 0; i < control_in_.size(); ++i) {
       const PortInfo& port = control_in_[i];
       out.push_back({static_cast<uint32_t>(i), port.name, port.min_value,
-                     port.max_value, port.default_value});
+                     port.max_value, port.default_value, port.stepped});
     }
     return out;
   }
@@ -882,7 +894,12 @@ class Lv2Instance : public PluginInstance {
     }
     return std::make_unique<Lv2Gui>(this, world_, plugin_, &control_values_,
                                     control_in_, &control_outputs_scratch_,
-                                    control_out_, bridge_.get(), &state_dirty_);
+                                    control_out_, bridge_.get(), &state_dirty_,
+                                    &touched_);
+  }
+
+  size_t take_touched(TouchedParam* out, size_t capacity) override {
+    return touched_.take(out, capacity);
   }
 
   bool take_state_dirty() override {
@@ -993,6 +1010,9 @@ class Lv2Instance : public PluginInstance {
       }
       if (const LilvNode* symbol = lilv_port_get_symbol(plugin_, port))
         info.symbol = lilv_node_as_string(symbol);
+      info.stepped = lilv_port_has_property(plugin_, port, classes.integer) ||
+                     lilv_port_has_property(plugin_, port, classes.toggled) ||
+                     lilv_port_has_property(plugin_, port, classes.enumeration);
 
       if (lilv_port_is_a(plugin_, port, classes.audio)) {
         (is_input ? audio_in_ : audio_out_).push_back(info);
@@ -1453,6 +1473,7 @@ class Lv2Instance : public PluginInstance {
   // thread has the instance (restore, deactivate, buffer change).
   std::atomic<bool> quiet_{true};
   std::atomic<bool> state_dirty_{false};
+  hosting::TouchedList touched_;  // UI thread: what the editor moved
   std::atomic<uint64_t> processed_generation_{0};
 
   // Fixed so queueing never allocates on the audio thread. A block carrying

@@ -604,7 +604,7 @@ std::vector<ParameterInfo> FxPadInstance::parameters() const {
     info.push_back({static_cast<uint32_t>(p), pad_name(p),
                     bi ? -1.0 : 0.0, 1.0, 0.0});
   }
-  info.push_back({kHoldId, "Hold", 0.0, 1.0, 0.0});
+  info.push_back({kHoldId, "Hold", 0.0, 1.0, 0.0, true});
   return info;
 }
 

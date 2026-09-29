@@ -109,11 +109,22 @@ struct ParameterInfo {
   double min_value;
   double max_value;
   double default_value;
+  // Takes only whole steps - a mode, a waveform, a switch - as the format
+  // says (CLAP_PARAM_IS_STEPPED, a VST3 step count or list, lv2:integer,
+  // lv2:toggled or lv2:enumeration). A scene jumps it on the bar line: a
+  // mode walked through its neighbours on the way is not a fade.
+  bool stepped = false;
 };
 
 // A named key the plugin publishes, UI thread only. Drum samplers list the
 // pads they actually have; a synth that says nothing leaves this empty and
 // the host writes C3 rather than guessing "clap".
+// A parameter the plugin's own editor moved, and where it left it.
+struct TouchedParam {
+  uint32_t id = 0;
+  double value = 0.0;
+};
+
 struct NoteName {
   int key = -1;  // MIDI note 0–127. -1 means every key, which is not a pad.
   std::string name;
@@ -194,6 +205,15 @@ class PluginInstance {
   virtual double parameter_value(uint32_t id) const = 0;
   virtual void set_parameter(uint32_t id, double value) = 0;
 
+  // The scene conductor's way in, on the audio thread, one value a block.
+  // The built-ins and LV2 store a parameter atomically, so the default is
+  // their set_parameter; CLAP and VST3, whose queue to the plugin belongs to
+  // the UI thread, keep a buffer of their own that the next process() reads.
+  virtual void set_parameter_rt(uint32_t id, double value) { set_parameter(id, value); }
+  // Whether parameter_value() may be read from the audio thread. When not,
+  // the UI reads it for the conductor (SceneTable::now).
+  virtual bool parameter_value_rt_safe() const { return true; }
+
   // Named notes this instance currently answers to. Empty when it publishes
   // none. Main thread; a kit load can change the list between calls.
   virtual std::vector<NoteName> note_names() const { return {}; }
@@ -269,6 +289,16 @@ class PluginInstance {
   // Reading clears it. Backends that have no way to be told return false and
   // rely on the editor closing to stand in for the notification.
   virtual bool take_state_dirty() { return false; }
+
+  // Parameters the plugin's own editor moved since the last call, each with
+  // its latest value: the player's hand, which a scene records while Record
+  // scene is lit and otherwise stops walking. UI thread. Returns how many
+  // were written; the rest wait for the next call.
+  virtual size_t take_touched(TouchedParam* out, size_t capacity) {
+    (void)out;
+    (void)capacity;
+    return 0;
+  }
 };
 
 // One per format. Scanning walks the disk, so it never runs on the audio thread.

@@ -345,7 +345,8 @@ e Chord, e qualquer parâmetro de um LV2. Um alvo `param` é
   VST3 continuam para a fase 3.
 - **Degrau.** Ainda sem `ParameterInfo::stepped`: para os internos, uma
   faixa de números inteiros mais larga que 0..1 é um modo, uma divisão ou
-  uma nota, e pula na linha. LV2 anda sempre.
+  uma nota, e pula na linha. LV2 anda sempre. (A fase 3 trocou isso pelo
+  que o plugin declara.)
 - **Rampa.** Linear no valor do parâmetro, um valor por bloco, do valor que
   o plugin tem no momento da linha até o alvo. O FX Pad já suaviza cada
   quantidade em 8 ms por bloco, que liga os degraus.
@@ -353,6 +354,42 @@ e Chord, e qualquer parâmetro de um LV2. Um alvo `param` é
   id; a rampa daquele parâmetro para.
 - **Gravar.** `setFxPad`, `setFxPadAmount`, `setDroneParam` e o
   `setInsertParameter` genérico gravam pelo mesmo `sceneTouched`.
+
+## A fase 3, como ficou
+
+CLAP e VST3 entram nas cenas, o editor do próprio plugin grava e toma a mão,
+e o degrau vem do plugin.
+
+- **Escrever da thread de áudio.** `PluginInstance::set_parameter_rt`. Nos
+  internos e no LV2 é o `set_parameter` de sempre (um store). No CLAP e no
+  VST3 é um `hosting::RtParamBuffer`: um array da própria thread de áudio,
+  não uma fila, porque o regente roda antes do render no mesmo callback que
+  o `process` que o lê. Um parâmetro escrito duas vezes antes do bloco é uma
+  entrada, com o valor mais novo, e entra depois das edições da UI.
+- **Ler de onde a rampa começa.** `params.get_value` do CLAP e o
+  `getParamNormalized` do VST3 são da thread da UI, então o plugin diz
+  `parameter_value_rt_safe() == false`. Para esses alvos (`polled`), a
+  `SceneTable` tem `now`, um atômico por alvo que o `pollScenes` da UI
+  atualiza; o regente lê dali. Uma rampa já andando no mesmo parâmetro
+  continua de onde chegou.
+- **O editor do VST3 vê a rampa.** O que o regente escreveu vai para um
+  `hosting::RtParamMirror`: uma vaga por parâmetro com o último valor e um
+  contador, e o `host_idle` passa ao controller o que mudou. Fila não serve:
+  um fade escreve a cada bloco, a UI olha umas dezenas de vezes por segundo,
+  e uma fila cheia perderia justamente o valor onde o fade parou. No CLAP
+  o plugin move o próprio editor pelos eventos do `process`.
+- **Gravar pelo editor do plugin.** `PluginInstance::take_touched`, lido no
+  mesmo timer do estado sujo, entra no `sceneParamTouched` como um knob
+  mexido no editor do Nirbija: grava com Gravar cena aceso, e é mão fora
+  dele. VST3 anota no `performEdit`, LV2 no `write_port` (as duas na thread
+  da UI, `hosting::TouchedList`); CLAP pega o `PARAM_VALUE` dos eventos de
+  saída do `process` num `RtParamMirror`. Uma nota que muda o Root do Drone
+  CLAP sai como `PARAM_VALUE` e conta como mão no Root, que é o que ela é.
+- **Degrau.** `ParameterInfo::stepped`, de `CLAP_PARAM_IS_STEPPED`, de
+  `stepCount > 0` ou `kIsList` no VST3, e de `lv2:integer`, `lv2:toggled` ou
+  `lv2:enumeration`. Os internos marcam os seus: modos, divisões, notas e
+  interruptores. O palpite pela faixa de valores saiu; ele errava nos
+  interruptores de 0..1 (Latch, Hold) e no Detune do Drone, que é contínuo.
 
 ## Testes
 

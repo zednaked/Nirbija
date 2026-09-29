@@ -117,12 +117,6 @@ void handle_events(Plugin& p, const clap_input_events_t* events) {
 
 // --- params -----------------------------------------------------------------------
 
-bool param_is_stepped(clap_id id) {
-  return (id < DroneInstance::Swell &&
-          id % DroneInstance::kVoiceStride == DroneInstance::Interval) ||
-         id == DroneInstance::Root || id == DroneInstance::Just;
-}
-
 bool param_is_unit(clap_id id) {
   return DroneInstance::param_min(id) == 0.0 && DroneInstance::param_max(id) == 1.0 &&
          id != DroneInstance::Just;
@@ -136,7 +130,7 @@ bool params_get_info(const clap_plugin_t*, uint32_t index,
   const clap_id id = index;
   info->id = id;
   info->flags = CLAP_PARAM_IS_AUTOMATABLE;
-  if (param_is_stepped(id)) info->flags |= CLAP_PARAM_IS_STEPPED;
+  if (DroneInstance::param_stepped(id)) info->flags |= CLAP_PARAM_IS_STEPPED;
   info->cookie = nullptr;
   std::snprintf(info->name, sizeof(info->name), "%s", DroneInstance::param_name(id));
   if (id < DroneInstance::Swell)

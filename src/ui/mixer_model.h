@@ -763,6 +763,7 @@ class MixerModel : public QAbstractListModel {
   QString claimUid(const QString& wanted, int row) const;
   // Rebuilds the conductor's table from scenes_ and publishes it.
   void publishScenes();
+  void pollSceneParams();
   // Once per poll: what the conductor did, the faders it moved, and a table
   // rebuilt if strips came, went or stopped following since the last one.
   void pollScenes();
@@ -900,6 +901,16 @@ class MixerModel : public QAbstractListModel {
   int xruns_ = 0;
   std::vector<SceneUi> scenes_;
   uint32_t next_scene_id_ = 1;
+  // The published table's parameters that only this thread may read (CLAP,
+  // VST3): pollScenes() writes where each one is into SceneTable::now.
+  struct PolledParam {
+    size_t index = 0;  // into the table's targets
+    QString strip;
+    uint32_t insert_tag = 0;
+    uint32_t param = 0;
+  };
+  std::shared_ptr<const SceneTable> scene_table_;
+  std::vector<PolledParam> scene_polled_;
   bool scene_recording_ = false;
   int scene_current_ = -1;
   int scene_armed_ = -1;

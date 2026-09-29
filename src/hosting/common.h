@@ -716,4 +716,103 @@ class ScanCache {
   bool dirty_ = false;
 };
 
+// Parameter values the scene conductor sets from the audio thread, for a
+// backend whose own parameter queue has the UI thread as its producer. The
+// conductor runs before the graph renders, on the same thread as process(),
+// so this is a plain array and not a queue; a parameter set twice before the
+// plugin's next block is one entry, holding the later value.
+template <size_t Capacity>
+struct RtParamBuffer {
+  struct Entry {
+    uint32_t id = 0;
+    double value = 0.0;
+  };
+  std::array<Entry, Capacity> entries{};
+  size_t count = 0;
+  uint32_t drops = 0;  // read by the audio thread only; for a test or a log
+
+  void set(uint32_t id, double value) {
+    for (size_t i = 0; i < count; ++i) {
+      if (entries[i].id == id) {
+        entries[i].value = value;
+        return;
+      }
+    }
+    if (count < Capacity) entries[count++] = {id, value};
+    else ++drops;
+  }
+  template <typename Fn>
+  void drain(Fn&& fn) {
+    for (size_t i = 0; i < count; ++i) fn(entries[i]);
+    count = 0;
+  }
+};
+
+// The last value the audio thread gave each parameter, for the UI thread to
+// pass on to something only it may touch (a VST3 edit controller, which is
+// what the plugin's editor draws from). Latest-value slots, not a queue: a
+// fade writes every block, the UI looks a few dozen times a second, and
+// only where the knob ended up matters - a queue would fill, and drop the
+// value the fade stopped on. A slot belongs to one parameter for good;
+// past Capacity distinct ones, the rest go unmirrored.
+template <size_t Capacity>
+class RtParamMirror {
+ public:
+  // Audio thread.
+  void publish(uint32_t id, double value) {
+    size_t i = 0;
+    while (i < used_ && ids_[i].load(std::memory_order_relaxed) != id) ++i;
+    if (i == used_) {
+      if (used_ == Capacity) return;
+      ids_[i].store(id, std::memory_order_relaxed);
+      ++used_;
+    }
+    values_[i].store(value, std::memory_order_relaxed);
+    seq_[i].fetch_add(1, std::memory_order_release);
+  }
+  // UI thread: `fn(id, value)` for every parameter moved since last time.
+  template <typename Fn>
+  void collect(Fn&& fn) {
+    for (size_t i = 0; i < Capacity; ++i) {
+      const uint32_t seq = seq_[i].load(std::memory_order_acquire);
+      if (seq == seen_[i]) continue;
+      seen_[i] = seq;
+      fn(ids_[i].load(std::memory_order_relaxed), values_[i].load(std::memory_order_relaxed));
+    }
+  }
+
+ private:
+  std::array<std::atomic<uint32_t>, Capacity> ids_{};
+  std::array<std::atomic<double>, Capacity> values_{};
+  std::array<std::atomic<uint32_t>, Capacity> seq_{};
+  size_t used_ = 0;                          // audio thread
+  std::array<uint32_t, Capacity> seen_{};    // UI thread
+};
+
+// What a plugin's own editor moved, for take_touched(). UI thread only: the
+// LV2 write_port and the VST3 performEdit both arrive there. A knob dragged
+// across a poll is one entry holding where it got to.
+class TouchedList {
+ public:
+  void note(uint32_t id, double value) {
+    for (TouchedParam& item : items_) {
+      if (item.id == id) {
+        item.value = value;
+        return;
+      }
+    }
+    if (items_.size() < kMax) items_.push_back({id, value});
+  }
+  size_t take(TouchedParam* out, size_t capacity) {
+    const size_t n = std::min(capacity, items_.size());
+    std::copy_n(items_.begin(), n, out);
+    items_.erase(items_.begin(), items_.begin() + static_cast<std::ptrdiff_t>(n));
+    return n;
+  }
+
+ private:
+  static constexpr size_t kMax = 256;
+  std::vector<TouchedParam> items_;
+};
+
 }  // namespace nirbija::hosting

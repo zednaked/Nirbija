@@ -366,6 +366,11 @@ class ClapInstance : public PluginInstance {
     PendingParam incoming;
     while (pending_n < kMaxBlockMidi && param_queue_.pop(incoming))
       pending[pending_n++] = incoming;
+    // After the UI's: the scene's walk is the newer value. The plugin moves
+    // its own editor's knobs from these events.
+    rt_params_.drain([&](const auto& entry) {
+      if (pending_n < kMaxBlockMidi) pending[pending_n++] = {entry.id, entry.value};
+    });
     in_events_.rebuild(pending, pending_n, pending_midi_.data(),
                        pending_midi_count_, dialect_);
     pending_midi_count_ = 0;
@@ -391,8 +396,8 @@ class ClapInstance : public PluginInstance {
       clap_param_info_t info{};
       if (!params_->get_info(plugin_, i, &info)) continue;
       params_cache_.push_back({static_cast<uint32_t>(info.id), info.name,
-                               info.min_value, info.max_value,
-                               info.default_value});
+                               info.min_value, info.max_value, info.default_value,
+                               (info.flags & CLAP_PARAM_IS_STEPPED) != 0});
     }
     params_cache_valid_ = true;
     return params_cache_;
@@ -463,6 +468,17 @@ class ClapInstance : public PluginInstance {
     if (!param_queue_.push({id, value}))
       param_drops_.fetch_add(1, std::memory_order_relaxed);
   }
+
+  void set_parameter_rt(uint32_t id, double value) override { rt_params_.set(id, value); }
+  size_t take_touched(TouchedParam* out, size_t capacity) override {
+    size_t n = 0;
+    touched_.collect([&](uint32_t id, double value) {
+      if (n < capacity) out[n++] = {id, value};
+    });
+    return n;
+  }
+  // params.get_value is [main-thread].
+  bool parameter_value_rt_safe() const override { return false; }
 
   bool take_state_dirty() override {
     const bool dirty = state_dirty_.exchange(false, std::memory_order_acq_rel);
@@ -697,13 +713,19 @@ class ClapInstance : public PluginInstance {
   };
 
   // Plugins push their own events here during process: parameter gestures,
-  // latency changes, and MIDI from anything that generates notes. Only the MIDI
-  // is kept, since that is what the insert chain below can use.
+  // latency changes, and MIDI from anything that generates notes. The MIDI is
+  // kept for the insert chain below; a parameter value is the plugin's own
+  // editor being moved, which a scene records or yields to (take_touched).
   static bool out_event_push(const clap_output_events_t* list,
                              const clap_event_header_t* header) {
     auto* self = static_cast<ClapInstance*>(list->ctx);
     if (self == nullptr || header == nullptr) return true;
     if (header->space_id != CLAP_CORE_EVENT_SPACE_ID) return true;
+    if (header->type == CLAP_EVENT_PARAM_VALUE) {
+      const auto* param = reinterpret_cast<const clap_event_param_value_t*>(header);
+      self->touched_.publish(param->param_id, param->value);
+      return true;
+    }
     if (self->produced_midi_count_ >= kMaxBlockMidi) return false;
 
     MidiEvent event;
@@ -1048,6 +1070,11 @@ class ClapInstance : public PluginInstance {
   std::vector<float*> input_ptrs_, output_ptrs_;
   static constexpr size_t kMaxBlockMidi = 1024;
   RtQueue<PendingParam, 256> param_queue_;
+  // The scene conductor's values, audio thread only.
+  hosting::RtParamBuffer<64> rt_params_;
+  // What the plugin's editor moved, as its out events in process() said
+  // (flush() hands its out events to discard_out_events_).
+  hosting::RtParamMirror<256> touched_;
   std::array<MidiEvent, kMaxBlockMidi> pending_midi_{};
   size_t pending_midi_count_ = 0;
   std::array<MidiEvent, kMaxBlockMidi> produced_midi_{};

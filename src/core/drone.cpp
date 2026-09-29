@@ -670,8 +670,8 @@ std::vector<ParameterInfo> DroneInstance::parameters() const {
   std::vector<ParameterInfo> info;
   info.reserve(kParamCount);
   for (uint32_t id = 0; id < kParamCount; ++id)
-    info.push_back({id, param_name(id), param_min(id), param_max(id),
-                    param_default(id)});
+    info.push_back({id, param_name(id), param_min(id), param_max(id), param_default(id),
+                    param_stepped(id)});
   return info;
 }
 
