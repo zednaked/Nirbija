@@ -97,20 +97,30 @@ inline size_t ring_back(size_t index, size_t delay, size_t size) {
 // inside a block of `frames` where the next boundary of `unit_beats` falls,
 // looking from frame `from`. Returns `frames` when the boundary is beyond
 // this block and `from` when quantisation is off. Sample-exact: the looper,
-// the sampler and anything else that punches on the grid share this so they
-// agree to the frame.
+// the sampler, the metronome and anything else that punches on the grid
+// share this so they agree to the frame.
+//
+// A line lands on the frame nearest to it, and one within half a frame of
+// the block's start is this block's frame 0 - the block before stopped half
+// a frame short of it. So every line falls in exactly one block. The beat
+// count is summed block by block and drifts a hair either side of a line
+// that should sit exactly on a block edge (125 BPM at 256 frames puts every
+// beat there); asking for the line strictly ahead, as this used to, lost
+// every one of those.
 inline uint32_t boundary_frame(double beats, double tempo_bpm, double sample_rate,
                                double unit_beats, uint32_t from, uint32_t frames) {
   if (unit_beats <= 0.0 || tempo_bpm <= 0.0 || sample_rate <= 0.0) return from;
   const double beats_per_frame = (tempo_bpm / 60.0) / sample_rate;
   if (beats_per_frame <= 0.0) return from;
   const double now = beats + static_cast<double>(from) * beats_per_frame;
-  double next = std::ceil(now / unit_beats) * unit_beats;
-  if (next <= now + 1e-9) next += unit_beats;
-  const double delta = (next - beats) / beats_per_frame;
-  if (delta <= 0.0) return from;
-  if (delta >= static_cast<double>(frames)) return frames;
-  return static_cast<uint32_t>(delta);
+  double line = std::ceil((now - 0.5 * beats_per_frame) / unit_beats) * unit_beats;
+  double at = std::floor((line - beats) / beats_per_frame + 0.5);
+  if (at < static_cast<double>(from)) {
+    line += unit_beats;
+    at = std::floor((line - beats) / beats_per_frame + 0.5);
+  }
+  if (at >= static_cast<double>(frames)) return frames;
+  return static_cast<uint32_t>(std::max(at, static_cast<double>(from)));
 }
 
 // Whether a block of `frames` starting at transport `beats` crosses a

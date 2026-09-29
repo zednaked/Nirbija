@@ -11,6 +11,17 @@ Internal. The cache now stamps the format back on what it reads
 (`tests/scan_cache.cpp`), and a session saved by 0.4.0 finds its plugins by
 uid.
 
+### The metronome and the sampler on every beat
+
+The grid the metronome, the sampler and the looper punch on looked for the
+next line strictly ahead of each block, and the beat count, summed block by
+block, drifts a hair either side of a line that should sit on a block's
+edge. Every such beat was lost: at 125 BPM with 256-frame blocks the click
+dropped them all, at 93.75 BPM on 64 frames it clicked 8 times in 454, and a
+quantised sampler take started a beat late. A line now lands on its nearest
+frame and belongs to exactly one block (`tests/beat_grid.cpp`); the looper
+already worked that way and now shares the code.
+
 ### Scenes
 
 A song is now a row of scenes across the top of the mixer, each as wide as

@@ -1139,14 +1139,7 @@ void Engine::schedule_metronome(uint32_t frames, double tempo, double start_beat
   if (!metronome_.load(std::memory_order_relaxed)) return;
   if (sample_rate_ <= 0.0 || tempo <= 0.0) return;
 
-  // boundary_frame() looks for the next boundary strictly ahead of the start,
-  // so the very first beat of a run from zero is asked for separately.
-  uint32_t at = frames;
-  if (start_beats == 0.0) {
-    at = 0;
-  } else {
-    at = dsp::boundary_frame(start_beats, tempo, sample_rate_, 1.0, 0, frames);
-  }
+  const uint32_t at = dsp::boundary_frame(start_beats, tempo, sample_rate_, 1.0, 0, frames);
   if (at >= frames) return;
 
   const double beats_per_frame = tempo / 60.0 / sample_rate_;

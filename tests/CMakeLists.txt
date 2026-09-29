@@ -38,6 +38,10 @@ add_executable(nirbija_scene_conductor scene_conductor.cpp)
 target_link_libraries(nirbija_scene_conductor PRIVATE nirbija_core)
 add_test(NAME scene_conductor COMMAND nirbija_scene_conductor)
 
+add_executable(nirbija_beat_grid beat_grid.cpp)
+target_link_libraries(nirbija_beat_grid PRIVATE nirbija_core)
+add_test(NAME beat_grid COMMAND nirbija_beat_grid)
+
 add_executable(nirbija_graph_click graph_click.cpp)
 target_link_libraries(nirbija_graph_click PRIVATE nirbija_core)
 add_test(NAME graph_click COMMAND nirbija_graph_click)

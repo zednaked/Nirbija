@@ -343,28 +343,12 @@ uint32_t LooperInstance::punch_frame(uint32_t frames) const {
   const bool grid = transport_.rolling || transport_.playing;
   if (quantize == 0 || !grid) return 0;
   if (transport_.tempo_bpm <= 0.0 || sample_rate_ <= 0.0) return 0;
-  // The transport just started: the downbeat is this frame.
-  if (transport_.beats == 0.0) return 0;
-
   // Start and stop wait on the beat or the bar, not on a 4- or 8-bar
   // downbeat: waiting that long to punch in is unplayable. Length is
   // what snaps to 2/4/8 bars, in snap_length().
   const double unit = quantize == 1 ? 1.0 : std::max(1, transport_.numerator);
-  const double beats_per_frame = transport_.tempo_bpm / 60.0 / sample_rate_;
-
-  // A line within half a frame of the block start belongs to frame 0 - the
-  // block before stopped half a frame short of it (see below), so nothing
-  // is punched twice and nothing falls between two blocks.
-  const double into = transport_.beats -
-                      std::floor(transport_.beats / unit) * unit;
-  const double half = 0.5 * beats_per_frame;
-  if (into < half || unit - into < half) return 0;
-
-  // boundary_frame() truncates the distance to the line; asking from half a
-  // frame earlier turns that into rounding to the nearest frame, which is
-  // what the rule above assumes.
-  return dsp::boundary_frame(transport_.beats - half, transport_.tempo_bpm,
-                             sample_rate_, unit, 0, frames);
+  return dsp::boundary_frame(transport_.beats, transport_.tempo_bpm, sample_rate_,
+                             unit, 0, frames);
 }
 
 void LooperInstance::apply_clear() {
