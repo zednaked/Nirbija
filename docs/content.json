@@ -76,6 +76,7 @@
   "does": [
     "host the plugins you already have",
     "play them from sequencers of its own",
+    "play a song as scenes, part to part on the bar line",
     "sample into pads, mix, send, loop, record",
     "talk to pipewire, jack, and a clock from outside",
     "keep a session \u2014 or one strip, on its own"

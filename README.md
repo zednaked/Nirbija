@@ -41,6 +41,17 @@ for other hosts. Copy it into `~/.clap`; it is not part of the install.
 
 ## Made to be played
 
+**Scenes.** A song is a row of scenes across the top of the mixer: intro,
+groove, break, drop. A scene holds only what changes from one part to the
+next — which strips play, where their faders sit, which pattern each
+sequencer is on, where a plugin's knobs are, built-in, LV2, CLAP or VST3 —
+and how many bars the way there takes. You record one by touching: light
+Record scene and move what should change, on the mixer or in the plugin's
+own window. The list walks on by itself at the end of each part; a click or
+Alt+1…9 jumps to another on the next bar line, and Hold repeats the one
+playing. Touching a control while a scene walks it takes it back until the
+next part.
+
 The bar for the audio path is a live set: you edit while it plays and nothing
 may click, step or drop out.
 
@@ -52,12 +63,12 @@ may click, step or drop out.
   plugin delay compensation, the looper's wrap and punch edges, a sampler pad
   retriggered — each walks or crossfades instead of jumping, and a test in
   `tests/` measures the largest sample-to-sample step and fails above it.
-- **Sample-accurate time.** Pattern changes land on the downbeat, gates and
-  ratchets on their frame, the looper's punch on the bar line rather than the
-  start of the block.
+- **Sample-accurate time.** Scenes and pattern changes land on the frame of
+  the bar line, gates and ratchets on their frame, the looper's punch and
+  the metronome's click on their beat rather than the start of the block.
 - **A cheap callback.** Sixteen strips with inserts and sends render a
-  256-frame block in about 0.1 ms, 2% of its time
-  (`tests/render_bench.cpp`). No allocation, no lock, no log on the audio
+  256-frame block in about 0.1 ms, 2% of its time, and a scene fading 64
+  controls at once adds under a microsecond (`tests/render_bench.cpp`). No allocation, no lock, no log on the audio
   thread; memory is locked and the graph's own latency is reported to JACK.
 
 ## Also in the box
