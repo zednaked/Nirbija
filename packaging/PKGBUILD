@@ -3,7 +3,7 @@
 # push it to the AUR as nirbija-git. Runtime is what the binary links against;
 # jack is satisfied by pipewire-jack on a PipeWire machine.
 pkgname=nirbija-git
-pkgver=0.5.0.r0
+pkgver=0.5.1.r0
 pkgrel=1
 pkgdesc="A Linux mixer that is also an instrument: drone, sampler, looper, sequencer, plus LV2/CLAP/VST3 hosting"
 arch=('x86_64' 'aarch64')

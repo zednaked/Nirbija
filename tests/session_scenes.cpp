@@ -82,6 +82,13 @@ int main(int argc, char* argv[]) {
     const int fx = plugin_row(mixer, "nirbija.fxpad");
     if (fx < 0 || !mixer.addInsert(1, fx)) fail("could not load an FX Pad");
 
+    // Scenes start switched off: nothing records until the menu turns them on.
+    if (mixer.scenesEnabled()) fail("a new session starts with scenes on");
+    mixer.setSceneRecording(true);
+    if (mixer.sceneRecording() || !mixer.scenes().isEmpty())
+      fail("recording a scene worked with scenes switched off");
+    mixer.setScenesEnabled(true);
+
     // Recording with no scene makes one, and each touch lands in it once.
     mixer.setSceneRecording(true);
     if (mixer.scenes().size() != 1) fail("recording did not make a first scene");
@@ -143,6 +150,7 @@ int main(int argc, char* argv[]) {
         fail("a scene's length or fade was not kept");
     }
     if (mixer.sceneAuto()) fail("the queue switch was not kept");
+    if (!mixer.scenesEnabled()) fail("the scenes switch was not kept");
     if (field(mixer, 2, MixerModel::FollowScenesRole).toBool())
       fail("a strip that ignores scenes follows them again");
     if (field(mixer, 1, MixerModel::SceneOnRole).toBool())
@@ -209,6 +217,25 @@ int main(int argc, char* argv[]) {
     if (mixer.currentScene() != 0)
       fail("removing the scene before the playing one moved it: " +
            std::to_string(mixer.currentScene()));
+
+    // Switched off, the scenes let go: the strip one switched off plays
+    // again, nothing plays or arms, and the list waits for the switch.
+    if (field(mixer, 1, MixerModel::SceneOnRole).toBool())
+      fail("the strip the first scene switched off is on before switching scenes off");
+    mixer.setScenesEnabled(false);
+    settle();
+    if (!field(mixer, 1, MixerModel::SceneOnRole).toBool())
+      fail("switching scenes off left a strip off");
+    if (mixer.currentScene() >= 0) fail("a scene still plays with scenes switched off");
+    mixer.armScene(0);
+    settle();
+    if (mixer.currentScene() >= 0 || mixer.armedScene() >= 0)
+      fail("a scene armed with scenes switched off");
+    if ((field(mixer, 0, MixerModel::SceneMarksRole).toInt()) != 0)
+      fail("a strip is marked with scenes switched off");
+    mixer.undo();
+    if (!mixer.scenesEnabled() || mixer.scenes().size() != 1)
+      fail("undo did not switch the scenes back on with the list whole");
   }
 
   if (failures == 0) std::puts("session_scenes: ok");

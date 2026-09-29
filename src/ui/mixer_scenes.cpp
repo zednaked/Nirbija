@@ -210,7 +210,7 @@ void MixerModel::clearScene(int scene) {
 // --- playing -----------------------------------------------------------------
 
 void MixerModel::armScene(int scene) {
-  if (scene >= static_cast<int>(scenes_.size())) return;
+  if (!scenes_enabled_ || scene >= static_cast<int>(scenes_.size())) return;
   if (scene >= 0 && scene == scene_armed_) scene = -1;
   EngineCommand command;
   command.kind = EngineCommand::Kind::SceneArm;
@@ -238,12 +238,37 @@ void MixerModel::setSceneHold(bool on) {
 }
 
 void MixerModel::setSceneRecording(bool on) {
-  if (on == scene_recording_) return;
+  if (on == scene_recording_ || (on && !scenes_enabled_)) return;
   // Recording with no scene yet makes the first one to record into.
   if (on && scenes_.empty()) addScene();
   scene_recording_ = on;
   emit sceneStateChanged();
   announceSceneMarks();
+}
+
+void MixerModel::setScenesEnabled(bool on) {
+  if (on == scenes_enabled_) return;
+  pushUndo();
+  scenes_enabled_ = on;
+  if (!on) {
+    setSceneRecording(false);
+    setSceneHold(false);
+    // Nothing on screen says OFF any more, so no strip may stay silent for
+    // it: each one the scenes switched off fades back in, on the short
+    // slope of its own ON/OFF.
+    for (size_t row = 0; row < channels_.size(); ++row) {
+      ChannelUi& channel = channels_[row];
+      channel.scene_hands = 0;
+      channel.scene_hand_tags.clear();
+      if (channel.scene_on) continue;
+      channel.scene_on = true;
+      post(EngineCommand::Kind::SetSceneGate, static_cast<int>(row), 1.0f);
+      const QModelIndex idx = index(static_cast<int>(row));
+      emit dataChanged(idx, idx, {SceneOnRole});
+    }
+  }
+  emit scenesEnabledChanged();
+  scenesEdited();
 }
 
 void MixerModel::toggleSceneOn(int row) {
@@ -312,7 +337,8 @@ void MixerModel::sceneParamTouched(int row, int slot, uint32_t id, float value) 
 
 void MixerModel::sceneTouched(int row, SceneTarget::What what, float value,
                               uint32_t insert_tag, uint32_t param, bool stepped) {
-  if (restoring_ || row < 0 || row >= static_cast<int>(channels_.size())) return;
+  if (restoring_ || !scenes_enabled_ || row < 0 || row >= static_cast<int>(channels_.size()))
+    return;
   ChannelUi& channel = channels_[static_cast<size_t>(row)];
   if (!channel.follow_scenes) return;
 
@@ -373,7 +399,7 @@ bool MixerModel::sceneHoldsInsert(int row, int slot) const {
   if (row < 0 || row >= static_cast<int>(channels_.size()) || slot < 0) return false;
   const ChannelUi& channel = channels_[static_cast<size_t>(row)];
   const ChannelStrip* strip = stripFor(row);
-  if (!channel.follow_scenes || strip == nullptr) return false;
+  if (!scenes_enabled_ || !channel.follow_scenes || strip == nullptr) return false;
   const int shown = scene_recording_ ? recordScene() : scene_current_;
   if (shown < 0 || shown >= static_cast<int>(scenes_.size())) return false;
   const uint32_t tag = strip->insert_tag(static_cast<size_t>(slot));
@@ -396,7 +422,7 @@ bool MixerModel::sceneHandOnInsert(int row, int slot) const {
 int MixerModel::sceneMarksFor(int row) const {
   if (row < 0 || row >= static_cast<int>(channels_.size())) return 0;
   const ChannelUi& channel = channels_[static_cast<size_t>(row)];
-  if (!channel.follow_scenes) return 0;
+  if (!scenes_enabled_ || !channel.follow_scenes) return 0;
   const int shown = scene_recording_ ? recordScene() : scene_current_;
   if (shown < 0 || shown >= static_cast<int>(scenes_.size())) return 0;
   int marks = 0;
@@ -432,7 +458,10 @@ void MixerModel::publishScenes() {
   auto table = std::make_shared<SceneTable>();
   table->scenes.reserve(scenes_.size());
   scene_polled_.clear();
-  for (const SceneUi& scene : scenes_) {
+  // Switched off, the conductor gets a table with no scenes: whatever was
+  // playing or armed is let go, and no bar line starts anything.
+  const std::vector<SceneUi> none;
+  for (const SceneUi& scene : scenes_enabled_ ? scenes_ : none) {
     SceneTable::Scene entry;
     entry.id = scene.id;
     entry.bars = static_cast<uint32_t>(std::max(0, scene.bars));
@@ -595,6 +624,7 @@ QJsonObject MixerModel::scenesJson() const {
     items.append(entry);
   }
   QJsonObject json;
+  json[QStringLiteral("enabled")] = scenes_enabled_;
   json[QStringLiteral("auto")] = sceneAuto();
   json[QStringLiteral("items")] = items;
   return json;
@@ -658,6 +688,14 @@ void MixerModel::applyScenesJson(const QJsonObject& json, bool keep_ids) {
     scenes_.push_back(std::move(scene));
   }
   engine_.scenes().set_auto(json[QStringLiteral("auto")].toBool(true));
+  // Off unless asked for; a session saved before the switch existed is on
+  // when it has scenes, since whoever made them was using them.
+  const bool enabled = json[QStringLiteral("enabled")].toBool(!scenes_.empty());
+  if (enabled != scenes_enabled_) {
+    scenes_enabled_ = enabled;
+    if (!enabled) scene_recording_ = false;
+    emit scenesEnabledChanged();
+  }
   publishScenes();
   emit scenesChanged();
   emit sceneStateChanged();

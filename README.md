@@ -41,7 +41,7 @@ for other hosts. Copy it into `~/.clap`; it is not part of the install.
 
 ## Made to be played
 
-**Scenes.** A song is a row of scenes across the top of the mixer: intro,
+**Scenes.** Switched on from the session menu (**Scenes: on**), a song is a row of scenes across the top of the mixer: intro,
 groove, break, drop. A scene holds only what changes from one part to the
 next — which strips play, where their faders sit, which pattern each
 sequencer is on, where a plugin's knobs are, built-in, LV2, CLAP or VST3 —
@@ -94,7 +94,7 @@ The [releases page](https://github.com/zednaked/Nirbija/releases) has an
 AppImage that carries its own Qt and runs anywhere:
 
 ```sh
-chmod +x nirbija-0.5.0-x86_64.AppImage && ./nirbija-0.5.0-x86_64.AppImage
+chmod +x nirbija-0.5.1-x86_64.AppImage && ./nirbija-0.5.1-x86_64.AppImage
 ```
 
 On Arch, `makepkg -si` in `packaging/` builds a package from git.

@@ -392,6 +392,18 @@ e o degrau vem do plugin.
   interruptores. O palpite pela faixa de valores saiu; ele errava nos
   interruptores de 0..1 (Latch, Hold) e no Detune do Drone, que é contínuo.
 
+## A chave
+
+Depois da fase 3, as cenas viraram opcionais: **Scenes: on/off** no menu da
+sessão, desligada numa sessão nova. `MixerModel::scenesEnabled` vai no JSON
+como `scenes.enabled`; uma sessão salva antes da chave abre ligada se tiver
+cenas. Desligada, a faixa some, o ON/OFF e os pontos dos strips somem, e o
+regente recebe uma tabela sem cenas: o que tocava ou estava armado é solto e
+nenhuma linha de compasso começa nada. Gravar, armar e os `Alt` não fazem
+nada. Todo strip que uma cena tinha desligado volta com a rampa curta do
+próprio ON/OFF, porque não sobra nada na tela que explique um strip mudo. As
+cenas ficam na sessão; desligar entra no desfazer.
+
 ## Testes
 
 Todos `quick`, offline, no mesmo estilo dos que já medem o maior degrau entre

@@ -40,7 +40,9 @@ Rectangle {
     property bool isBus: false
     property var sends: []
     property color accent: Skin.accent
-    // Scenes: see MixerModel::SceneMarksRole for the bits.
+    // Scenes: see MixerModel::SceneMarksRole for the bits. With scenes
+    // switched off in the session menu none of it shows.
+    property bool scenesEnabled: true
     property bool followScenes: true
     property bool sceneOn: true
     property int sceneMarks: 0
@@ -116,7 +118,7 @@ Rectangle {
         height: Px.px(3)
         radius: Skin.radiusS
         color: root.accent
-        visible: root.followScenes
+        visible: root.followScenes || !root.scenesEnabled
     }
     Row {
         anchors.top: parent.top
@@ -125,7 +127,7 @@ Rectangle {
         height: Px.px(3)
         spacing: Px.px(4)
         clip: true
-        visible: !root.followScenes
+        visible: !root.followScenes && root.scenesEnabled
         Repeater {
             model: Math.ceil(root.width / Px.px(10))
             Rectangle {
@@ -264,6 +266,7 @@ Rectangle {
                 // The strip's own on/off, the switch a scene fades: apart
                 // from M, which stays the player's.
                 StripButton {
+                    visible: root.scenesEnabled
                     Layout.fillWidth: true
                     Layout.preferredHeight: Px.px(26)
                     label: root.sceneOn ? qsTr("ON") : qsTr("OFF")

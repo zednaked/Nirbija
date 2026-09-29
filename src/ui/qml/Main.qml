@@ -99,15 +99,18 @@ ApplicationWindow {
         delegate: Shortcut {
             required property int index
             sequence: "Alt+" + (index + 1)
+            enabled: Mixer.scenesEnabled
             onActivated: Mixer.armScene(index)
         }
     }
     Shortcut {
         sequence: "Alt+H"
+        enabled: Mixer.scenesEnabled
         onActivated: Mixer.sceneHold = !Mixer.sceneHold
     }
     Shortcut {
         sequence: "Alt+R"
+        enabled: Mixer.scenesEnabled
         onActivated: Mixer.sceneRecording = !Mixer.sceneRecording
     }
 
@@ -241,8 +244,9 @@ ApplicationWindow {
         return [
             { label: qsTr("Rename…"),
               action: () => window.openRename(row, name) },
+            ...(Mixer.scenesEnabled ? [
             { label: followScenes ? qsTr("Ignore scenes") : qsTr("Follow scenes"),
-              action: () => Mixer.setFollowScenes(row, !followScenes) },
+              action: () => Mixer.setFollowScenes(row, !followScenes) }] : []),
             { label: qsTr("MIDI learn: fader"),
               action: () => Mixer.learnGain(row) },
             { label: qsTr("MIDI learn: pan"),
@@ -316,6 +320,8 @@ ApplicationWindow {
               action: () => Mixer.redo() },
             { label: qsTr("Rescan plugins"),
               action: () => Mixer.plugins.rescan() },
+            { label: Mixer.scenesEnabled ? qsTr("Scenes: on") : qsTr("Scenes: off"),
+              action: () => { Mixer.scenesEnabled = !Mixer.scenesEnabled } },
             { label: qsTr("Recordings folder"),
               action: () => Qt.openUrlExternally(Mixer.recordingsUrl()) },
             { label: qsTr("Keyboard shortcuts"),
@@ -499,6 +505,9 @@ ApplicationWindow {
         id: sceneRibbon
         anchors.top: topBar.bottom
         width: parent.width
+        // Off, the ribbon folds away and the strips move up to the top bar.
+        visible: Mixer.scenesEnabled
+        height: visible ? implicitHeight : 0
         onSceneMenuRequested: (scene, item) => slotMenu.openAt(
             item, window.sceneMenu(scene), Mixer.scenes[scene].name)
     }
@@ -585,6 +594,7 @@ ApplicationWindow {
                     accent: strip.model.accent
                     isBus: strip.model.isBus
                     sends: strip.model.sends
+                    scenesEnabled: Mixer.scenesEnabled
                     followScenes: strip.model.followScenes
                     sceneOn: strip.model.sceneOn
                     sceneMarks: strip.model.sceneMarks

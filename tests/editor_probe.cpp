@@ -131,6 +131,7 @@ int main(int argc, char* argv[]) {
     // `at=` is a hand on a knob the scene holds - the slot's ring.
     if (pair[0] == QStringLiteral("record")) {
       const bool on = pair[1].toInt() != 0;
+      mixer->setScenesEnabled(true);
       mixer->setSceneRecording(on);
       if (!on) mixer->armScene(0);
       continue;

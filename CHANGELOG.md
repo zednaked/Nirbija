@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1 — 2026-09-29
+
+- Scenes are a switch in the session menu (**Scenes: on/off**), off in a new
+  session. Off, the ribbon and the strips' ON/OFF are hidden, nothing plays
+  or records a scene, and every strip a scene had switched off fades back
+  in; the scenes stay in the session for when they are switched on. A
+  session saved with scenes opens with them on.
+
 ## 0.5.0 — 2026-09-29
 
 Scenes: a song played part to part on the bar line. Also the fix for 0.4.0's

@@ -38,7 +38,7 @@ const clap_plugin_descriptor_t kDescriptor = {
     "https://zednaked.github.io/nirbija-site/",
     "",
     "",
-    "0.5.0",
+    "0.5.1",
     "Six strings that never stop sounding: a drone instrument with a swell, "
     "just intonation, slow drift and a long room.",
     kFeatures,

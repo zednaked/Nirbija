@@ -104,6 +104,11 @@ class MixerModel : public QAbstractListModel {
   Q_PROPERTY(bool sceneHold READ sceneHold WRITE setSceneHold NOTIFY sceneStateChanged)
   Q_PROPERTY(bool sceneRecording READ sceneRecording WRITE setSceneRecording NOTIFY
                  sceneStateChanged)
+  // The whole feature, on or off, from the session menu. Off hides the
+  // ribbon and the strips' ON/OFF, and the conductor plays nothing; the
+  // scenes stay in the session for when it is switched back on.
+  Q_PROPERTY(bool scenesEnabled READ scenesEnabled WRITE setScenesEnabled NOTIFY
+                 scenesEnabledChanged)
 
  public:
   enum Roles {
@@ -571,6 +576,8 @@ class MixerModel : public QAbstractListModel {
   bool sceneHold() const { return engine_.scenes().hold(); }
   void setSceneHold(bool on);
   bool sceneRecording() const { return scene_recording_; }
+  bool scenesEnabled() const { return scenes_enabled_; }
+  void setScenesEnabled(bool on);
   void setSceneRecording(bool on);
   // A new, empty scene at the end of the list. Returns its index.
   Q_INVOKABLE int addScene();
@@ -611,6 +618,7 @@ class MixerModel : public QAbstractListModel {
   void loadingChanged();
   void scenesChanged();
   void sceneStateChanged();
+  void scenesEnabledChanged();
   // The plugin list is complete (again). The session load waits for it.
   void scanFinished();
   // One beat of the 30 Hz poll, for editors that redraw something live - a
@@ -919,6 +927,7 @@ class MixerModel : public QAbstractListModel {
   std::shared_ptr<const SceneTable> scene_table_;
   std::vector<PolledParam> scene_polled_;
   bool scene_recording_ = false;
+  bool scenes_enabled_ = false;
   int scene_current_ = -1;
   int scene_armed_ = -1;
   int scene_bar_ = -1;
