@@ -278,10 +278,12 @@ QVector<quint32> MixerModel::insertDetailsSignature(int row) const {
       }
       if (insertIsStepSequencer(row, slot))
         bits |= sequencerRecording(row, slot) ? 512u : 0u;
+      bits |= (sceneHoldsInsert(row, slot) ? 1024u : 0u) |
+              (sceneHandOnInsert(row, slot) ? 2048u : 0u);
     }
     // The name is part of the fingerprint too: a replace keeps every flag
     // and changes only that.
-    bits ^= static_cast<quint32>(qHash(name)) << 10;
+    bits ^= static_cast<quint32>(qHash(name)) << 12;
     signature.append(bits);
   }
   for (const ChannelUi::MissingInsert& ghost : channel.missing)
@@ -323,6 +325,8 @@ QVariantList MixerModel::buildInsertDetails(int row) const {
         entry.insert(QStringLiteral("sequencerRecording"),
                      sequencerRecording(row, slot));
       }
+      entry.insert(QStringLiteral("sceneMark"), sceneHoldsInsert(row, slot));
+      entry.insert(QStringLiteral("sceneHand"), sceneHandOnInsert(row, slot));
     }
     details.append(entry);
   }

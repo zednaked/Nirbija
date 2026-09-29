@@ -29,6 +29,12 @@ AbstractButton {
     // A Step Sequencer's Rec: MIDI played into the strip is being written
     // onto its steps, and the pattern is quiet meanwhile.
     property bool sequencerRecording: false
+    // Scenes: the scene in view holds this plugin's pattern or a knob of it
+    // (a dot in the strip's colour), or the player took it back (an amber
+    // ring) - the fader's dot, in the corner the Rec dot does not use.
+    property bool sceneMark: false
+    property bool sceneHand: false
+    property color sceneTint: Skin.accent
     readonly property bool empty: pluginName.length === 0
 
     signal menuRequested
@@ -120,6 +126,20 @@ AbstractButton {
                 NumberAnimation { from: 0.35; to: 1.0; duration: Skin.fast * 3 }
             }
         }
+    }
+
+    Rectangle {
+        visible: !root.empty && (root.sceneMark || root.sceneHand)
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.margins: 4
+        width: Px.px(6)
+        height: width
+        radius: width / 2
+        z: 2
+        color: root.sceneHand ? "transparent" : root.sceneTint
+        border.width: root.sceneHand ? Px.px(1.5) : Mixer.sceneRecording ? 1 : 0
+        border.color: root.sceneHand ? Skin.solo : Skin.arm
     }
 
     contentItem: Item {

@@ -173,6 +173,18 @@ int main(int argc, char* argv[]) {
     if ((field(mixer, 0, MixerModel::SceneMarksRole).toInt() & 2) == 0)
       fail("the playing scene's fader is not marked on its strip");
 
+    // The FX Pad's slot says the scene holds a knob of it, and a ring once
+    // the player takes that knob back.
+    auto slot_detail = [&](const char* key) {
+      const QVariantList details = field(mixer, 1, MixerModel::InsertDetailsRole).toList();
+      return !details.isEmpty() && details.at(0).toMap().value(QString::fromLatin1(key)).toBool();
+    };
+    if (!slot_detail("sceneMark")) fail("the FX Pad's slot is not marked by the scene holding it");
+    if (slot_detail("sceneHand")) fail("the FX Pad's slot shows a hand nobody put on it");
+    mixer.setFxPadAmount(1, 0, 7, 0.2);
+    settle();
+    if (!slot_detail("sceneHand")) fail("taking the FX Pad knob did not ring its slot");
+
     // A hand takes the fader; the next scene clears it.
     mixer.setGain(0, 0.7);
     if ((field(mixer, 0, MixerModel::SceneHandsRole).toInt() & 2) == 0)

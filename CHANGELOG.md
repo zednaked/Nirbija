@@ -1,6 +1,47 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 — 2026-09-29
+
+Scenes: a song played part to part on the bar line. Also the fix for 0.4.0's
+scan cache, which listed every CLAP and VST3 plugin as not installed from the
+second launch on.
+
+### Scenes
+
+A song is now a row of scenes across the top of the mixer, each as wide as
+it is long. A scene holds what changes from one part to the next - which
+strips play, where their faders sit, which pattern each Step Sequencer is on
+- and how many bars the way there takes. The list walks on by itself at the
+end of each scene; a click or Alt+1…9 plays another from the next bar line,
+Hold repeats the one playing, and the last one stays.
+
+A scene is recorded by touching: with Record scene lit, every fader, ON/OFF
+and pattern you move on a strip that follows scenes goes into it, and
+nothing else does. A strip can ignore scenes altogether (its colour stripe
+turns to dashes). Touching a control a scene is walking takes it back until
+the next scene starts. Scenes are followed by who they are, not where they
+sit: moving or removing one while the song plays leaves the one playing
+alone, and removing the one playing hands the song to the next on the bar
+line.
+
+Scenes ride plugin knobs too: the FX Pad's sixteen amounts, the Drone, the
+Arpeggiator, the Chord and any LV2, CLAP or VST3 parameter walk from where
+they are to where the scene wants them over its fade, and a mode, a waveform
+or a switch jumps on the line - each format says which parameters those
+are. The plugin's own editor follows the walk (the FX Pad's pads move by
+themselves, a VST3's knobs turn), and a knob turned in the plugin's own
+window is recorded into the scene, or taken from it, like one turned in
+Nirbija's. A plugin slot whose pattern or knobs the scene holds carries the
+fader's dot in its corner, and a ring once you take it back.
+
+The change lands on the frame of the bar line. A strip switched off fades
+along a raised cosine over the scene's bars, a fader walks in decibels, and
+a pattern switches on the same frame the scene starts; `tests/scene_conductor.cpp`
+measures the largest step between samples through all of it, with bar lines
+both mid-block and on a block edge. The strip's new ON/OFF is its own gain,
+apart from the fader and from M, which stays the player's. Scenes live in
+the session and in undo; `design/scenes.md` has the whole design, and the
+plugin parameters of phase two and three.
 
 ### CLAP and VST3 plugins from a warm scan cache
 
@@ -21,47 +62,6 @@ dropped them all, at 93.75 BPM on 64 frames it clicked 8 times in 454, and a
 quantised sampler take started a beat late. A line now lands on its nearest
 frame and belongs to exactly one block (`tests/beat_grid.cpp`); the looper
 already worked that way and now shares the code.
-
-### Scenes moved or removed while the song plays
-
-The conductor counted scenes by position, so moving or removing one while
-the song played could leave it pointing at the neighbour. Scenes now carry
-an id the conductor follows through moves, removals and undo. Removing the
-scene that is playing hands the song to the one after it on the next bar
-line.
-
-### Scenes
-
-A song is now a row of scenes across the top of the mixer, each as wide as
-it is long. A scene holds what changes from one part to the next - which
-strips play, where their faders sit, which pattern each Step Sequencer is on
-- and how many bars the way there takes. The list walks on by itself at the
-end of each scene; a click or Alt+1…9 plays another from the next bar line,
-Hold repeats the one playing, and the last one stays.
-
-A scene is recorded by touching: with Record scene lit, every fader, ON/OFF
-and pattern you move on a strip that follows scenes goes into it, and
-nothing else does. A strip can ignore scenes altogether (its colour stripe
-turns to dashes). Touching a control a scene is walking takes it back until
-the next scene starts.
-
-Scenes ride plugin knobs too: the FX Pad's sixteen amounts, the Drone, the
-Arpeggiator, the Chord and any LV2, CLAP or VST3 parameter walk from where
-they are to where the scene wants them over its fade, and a mode, a waveform
-or a switch jumps on the line - each format says which parameters those
-are. The plugin's own editor follows the walk (the FX Pad's pads move by
-themselves, a VST3's knobs turn), and a knob turned in the plugin's own
-window is recorded into the scene, or taken from it, like one turned in
-Nirbija's.
-
-The change lands on the frame of the bar line. A strip switched off fades
-along a raised cosine over the scene's bars, a fader walks in decibels, and
-a pattern switches on the same frame the scene starts; `tests/scene_conductor.cpp`
-measures the largest step between samples through all of it, with bar lines
-both mid-block and on a block edge. The strip's new ON/OFF is its own gain,
-apart from the fader and from M, which stays the player's. Scenes live in
-the session and in undo; `design/scenes.md` has the whole design, and the
-plugin parameters of phase two and three.
 
 ## 0.4.0 — 2026-09-27
 

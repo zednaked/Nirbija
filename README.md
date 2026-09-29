@@ -94,7 +94,7 @@ The [releases page](https://github.com/zednaked/Nirbija/releases) has an
 AppImage that carries its own Qt and runs anywhere:
 
 ```sh
-chmod +x nirbija-0.4.0-x86_64.AppImage && ./nirbija-0.4.0-x86_64.AppImage
+chmod +x nirbija-0.5.0-x86_64.AppImage && ./nirbija-0.5.0-x86_64.AppImage
 ```
 
 On Arch, `makepkg -si` in `packaging/` builds a package from git.

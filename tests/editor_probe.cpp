@@ -126,6 +126,15 @@ int main(int argc, char* argv[]) {
       delay = pair[1].toInt();
       continue;
     }
+    // `record=1` lights Record scene, so the pairs after it go into a scene;
+    // `record=0` puts it out and plays that scene. A pair after that with
+    // `at=` is a hand on a knob the scene holds - the slot's ring.
+    if (pair[0] == QStringLiteral("record")) {
+      const bool on = pair[1].toInt() != 0;
+      mixer->setSceneRecording(on);
+      if (!on) mixer->armScene(0);
+      continue;
+    }
     if (pair[0] == QStringLiteral("editor")) {
       openEditor = pair[1].toInt() != 0;
       continue;

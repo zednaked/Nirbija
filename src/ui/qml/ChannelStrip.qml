@@ -364,6 +364,11 @@ Rectangle {
                                   && root.inserts[index].samplerRecording === true
                 sequencerRecording: index < root.inserts.length
                                     && root.inserts[index].sequencerRecording === true
+                sceneMark: index < root.inserts.length
+                           && root.inserts[index].sceneMark === true
+                sceneHand: index < root.inserts.length
+                           && root.inserts[index].sceneHand === true
+                sceneTint: root.accent
                 onClicked: root.insertSlotClicked(slot.index, slot)
                 onMenuRequested: {
                     if (slot.present) root.insertMenuRequested(slot.index, slot)

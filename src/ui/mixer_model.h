@@ -690,6 +690,9 @@ class MixerModel : public QAbstractListModel {
     bool scene_on = true;
     // SceneHandsRole's bits, cleared whenever a scene starts.
     int scene_hands = 0;
+    // The same for the plugins: the chain tags of the inserts whose pattern
+    // or knob the player took from the scene.
+    std::vector<uint32_t> scene_hand_tags;
     // The conductor's count of fader moves, as last seen; a change means the
     // scene moved this fader and the model follows it.
     uint32_t level_writes_seen = 0;
@@ -779,6 +782,10 @@ class MixerModel : public QAbstractListModel {
   static bool sceneParamAllowed(const PluginInstance* insert);
   static bool sceneParamStepped(const PluginInstance* insert, uint32_t id);
   int sceneMarksFor(int row) const;
+  // Whether the scene in view holds this insert's pattern or a knob of it,
+  // and whether the player has taken it back: the slot's scene dot.
+  bool sceneHoldsInsert(int row, int slot) const;
+  bool sceneHandOnInsert(int row, int slot) const;
   void announceSceneMarks();
   void scenesEdited();
   QJsonObject scenesJson() const;

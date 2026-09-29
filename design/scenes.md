@@ -327,8 +327,9 @@ mudou no caminho:
   linha.** O sequencer conta o compasso a partir do começo do último bloco,
   e no bloco seguinte a uma linha ainda acha que ela está à frente: um
   `kNextPattern` escrito ali trocava na hora.
-- **Ainda não desenhado:** o ponto de "a cena guarda" no slot do
-  sequencer. O bloco da cena conta o padrão entre os controles que ela tem.
+- **O ponto no slot.** Um insert cujo padrão ou knob a cena em vista guarda
+  ganha o ponto do fader no canto de baixo do slot (o de cima é o Rec do
+  Looper e do Sampler); na mão, o anel amarelo. Escolhido no mockup, opção A.
 
 ## A fase 2, como ficou
 

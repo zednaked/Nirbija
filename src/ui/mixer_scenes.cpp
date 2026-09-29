@@ -264,6 +264,7 @@ void MixerModel::setFollowScenes(int row, bool on) {
   pushUndo();
   channel.follow_scenes = on;
   channel.scene_hands = 0;
+  channel.scene_hand_tags.clear();
   publishScenes();
   const QModelIndex idx = index(row);
   emit dataChanged(idx, idx, {FollowScenesRole, SceneMarksRole, SceneHandsRole});
@@ -361,6 +362,35 @@ void MixerModel::sceneTouched(int row, SceneTarget::What what, float value,
     const QModelIndex idx = index(row);
     emit dataChanged(idx, idx, {SceneHandsRole});
   }
+  // The slot's dot turns to a ring on the next poll of the insert details.
+  if ((what == SceneTarget::What::Pattern || what == SceneTarget::What::Param) &&
+      std::find(channel.scene_hand_tags.begin(), channel.scene_hand_tags.end(),
+                insert_tag) == channel.scene_hand_tags.end())
+    channel.scene_hand_tags.push_back(insert_tag);
+}
+
+bool MixerModel::sceneHoldsInsert(int row, int slot) const {
+  if (row < 0 || row >= static_cast<int>(channels_.size()) || slot < 0) return false;
+  const ChannelUi& channel = channels_[static_cast<size_t>(row)];
+  const ChannelStrip* strip = stripFor(row);
+  if (!channel.follow_scenes || strip == nullptr) return false;
+  const int shown = scene_recording_ ? recordScene() : scene_current_;
+  if (shown < 0 || shown >= static_cast<int>(scenes_.size())) return false;
+  const uint32_t tag = strip->insert_tag(static_cast<size_t>(slot));
+  if (tag == 0) return false;
+  for (const SceneUi::Target& target : scenes_[static_cast<size_t>(shown)].targets)
+    if (target.strip == channel.uid && target.insert_tag == tag &&
+        (target.what == SceneTarget::What::Pattern || target.what == SceneTarget::What::Param))
+      return true;
+  return false;
+}
+
+bool MixerModel::sceneHandOnInsert(int row, int slot) const {
+  if (!sceneHoldsInsert(row, slot) || scene_recording_) return false;
+  const ChannelUi& channel = channels_[static_cast<size_t>(row)];
+  const uint32_t tag = stripFor(row)->insert_tag(static_cast<size_t>(slot));
+  return std::find(channel.scene_hand_tags.begin(), channel.scene_hand_tags.end(), tag) !=
+         channel.scene_hand_tags.end();
 }
 
 int MixerModel::sceneMarksFor(int row) const {
@@ -470,7 +500,10 @@ void MixerModel::pollScenes() {
   const uint32_t changes = conductor.scene_changes();
   if (changes != scene_changes_seen_) {
     scene_changes_seen_ = changes;
-    for (ChannelUi& channel : channels_) channel.scene_hands = 0;
+    for (ChannelUi& channel : channels_) {
+      channel.scene_hands = 0;
+      channel.scene_hand_tags.clear();
+    }
     changed = true;
   }
   const int current = conductor.current();
