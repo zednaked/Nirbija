@@ -15,6 +15,7 @@
 #include "core/audio_graph.h"
 #include "core/recorder.h"
 #include "core/rt_queue.h"
+#include "core/scene_conductor.h"
 
 namespace nirbija {
 
@@ -36,6 +37,12 @@ struct EngineCommand {
     SetMetronome,
     SetTimeSig,
     InjectMidi,
+    // Scenes. SceneArm: `value` is the scene, -1 cancels. SceneHand: the
+    // player took `channel`'s control `value` (a SceneTarget::What) away
+    // from the scene. SetSceneGate: the strip's own on/off button.
+    SceneArm,
+    SceneHand,
+    SetSceneGate,
   } kind = Kind::None;
   size_t channel = 0;
   // Buses live in their own list in the graph, so the index alone is ambiguous.
@@ -182,6 +189,11 @@ class Engine {
   bool park_graph();
   void unpark_graph();
 
+  // The scene list and where the song is in it. publish(), reclaim() and the
+  // flags are UI-thread calls; arming and hands go through post().
+  SceneConductor& scenes() { return scenes_; }
+  const SceneConductor& scenes() const { return scenes_; }
+
   // UI thread. Returns false if the queue is full, meaning the audio thread has
   // stalled — the caller should surface that, not silently retry.
   bool post(const EngineCommand& command);
@@ -280,6 +292,7 @@ class Engine {
   bool external_running_ = false;
   bool transport_changed_ = true;
   RtQueue<EngineCommand, 1024> commands_;
+  SceneConductor scenes_;
 };
 
 }  // namespace nirbija

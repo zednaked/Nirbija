@@ -1086,7 +1086,7 @@ class ClapBackend : public PluginBackend {
 
   std::vector<PluginDescriptor> scan() override {
     std::vector<PluginDescriptor> found;
-    hosting::ScanCache cache("clap");
+    hosting::ScanCache cache("clap", PluginFormat::Clap);
     for (const fs::path& dir : clap_search_paths()) {
       std::error_code ec;
       if (!fs::is_directory(dir, ec)) continue;

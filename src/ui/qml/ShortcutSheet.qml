@@ -47,6 +47,11 @@ Popup {
         { key: qsTr("Ctrl+= / Ctrl+-"), what: qsTr("Bigger, smaller — the whole interface") },
         { key: qsTr("Ctrl+0"), what: qsTr("Back to the size it started at") },
 
+        { key: "", what: qsTr("Scenes") },
+        { key: qsTr("Alt+1 … Alt+9"), what: qsTr("Play that scene from the next bar") },
+        { key: qsTr("Alt+H"), what: qsTr("Hold the scene you are in") },
+        { key: qsTr("Alt+R"), what: qsTr("Record into a scene: what you touch goes in") },
+
         { key: "", what: qsTr("Faders, pans, sends and plugin parameters") },
         { key: qsTr("Drag"), what: qsTr("Move the control") },
         { key: qsTr("Shift+drag"), what: qsTr("Ten times finer") },

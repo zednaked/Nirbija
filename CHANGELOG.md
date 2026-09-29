@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+### CLAP and VST3 plugins from a warm scan cache
+
+0.4.0 cached the plugin scan but not each plugin's format, so from the second
+launch on every CLAP and VST3 plugin was listed as Internal: a session that
+named one said "not installed here", and one inserted then was saved as
+Internal. The cache now stamps the format back on what it reads
+(`tests/scan_cache.cpp`), and a session saved by 0.4.0 finds its plugins by
+uid.
+
+### Scenes
+
+A song is now a row of scenes across the top of the mixer, each as wide as
+it is long. A scene holds what changes from one part to the next - which
+strips play, where their faders sit, which pattern each Step Sequencer is on
+- and how many bars the way there takes. The list walks on by itself at the
+end of each scene; a click or Alt+1…9 plays another from the next bar line,
+Hold repeats the one playing, and the last one stays.
+
+A scene is recorded by touching: with Record scene lit, every fader, ON/OFF
+and pattern you move on a strip that follows scenes goes into it, and
+nothing else does. A strip can ignore scenes altogether (its colour stripe
+turns to dashes). Touching a control a scene is walking takes it back until
+the next scene starts.
+
+The change lands on the frame of the bar line. A strip switched off fades
+along a raised cosine over the scene's bars, a fader walks in decibels, and
+a pattern switches on the same frame the scene starts; `tests/scene_conductor.cpp`
+measures the largest step between samples through all of it, with bar lines
+both mid-block and on a block edge. The strip's new ON/OFF is its own gain,
+apart from the fader and from M, which stays the player's. Scenes live in
+the session and in undo; `design/scenes.md` has the whole design, and the
+plugin parameters of phase two and three.
+
 ## 0.4.0 — 2026-09-27
 
 ### A review of the whole tree, and what it turned up

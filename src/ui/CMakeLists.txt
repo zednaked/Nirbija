@@ -59,6 +59,7 @@ set(nirbija_qml
   qml/ValueTrack.qml
   qml/ParamBar.qml
   qml/ShortcutSheet.qml
+  qml/SceneRibbon.qml
 )
 foreach(qml_file IN LISTS nirbija_qml)
   get_filename_component(qml_name ${qml_file} NAME)
@@ -101,6 +102,7 @@ qt_add_qml_module(nirbija_ui
     expose_watcher.h
     mixer_model.cpp
     mixer_model.h
+    mixer_scenes.cpp
     mixer_session.cpp
     plugin_list_model.cpp
     plugin_list_model.h

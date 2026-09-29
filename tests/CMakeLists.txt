@@ -30,6 +30,14 @@ add_executable(nirbija_midi_order midi_order.cpp)
 target_link_libraries(nirbija_midi_order PRIVATE nirbija_core)
 add_test(NAME midi_order COMMAND nirbija_midi_order)
 
+add_executable(nirbija_scan_cache scan_cache.cpp)
+target_link_libraries(nirbija_scan_cache PRIVATE nirbija_core)
+add_test(NAME scan_cache COMMAND nirbija_scan_cache)
+
+add_executable(nirbija_scene_conductor scene_conductor.cpp)
+target_link_libraries(nirbija_scene_conductor PRIVATE nirbija_core)
+add_test(NAME scene_conductor COMMAND nirbija_scene_conductor)
+
 add_executable(nirbija_graph_click graph_click.cpp)
 target_link_libraries(nirbija_graph_click PRIVATE nirbija_core)
 add_test(NAME graph_click COMMAND nirbija_graph_click)
@@ -123,6 +131,10 @@ if(NIRBIJA_UI)
   target_compile_definitions(nirbija_session_roundtrip PRIVATE
     NIRBIJA_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
   add_test(NAME session_roundtrip COMMAND nirbija_session_roundtrip)
+
+  add_executable(nirbija_session_scenes session_scenes.cpp)
+  target_link_libraries(nirbija_session_scenes PRIVATE nirbija_ui)
+  add_test(NAME session_scenes COMMAND nirbija_session_scenes)
 endif()
 
 add_executable(nirbija_recorder_take recorder_take.cpp)
@@ -244,7 +256,7 @@ foreach(test IN ITEMS engine_smoke midi_jack midi_clock_follow recorder_take)
   endif()
 endforeach()
 foreach(test IN ITEMS ui_smoke session_dirty session_autosave_live session_undo_live
-                      session_roundtrip)
+                      session_roundtrip session_scenes)
   if(TEST ${test})
     set_tests_properties(${test} PROPERTIES LABELS "quick;ui" TIMEOUT 300
                          SKIP_RETURN_CODE 77)

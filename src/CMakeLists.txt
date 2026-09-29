@@ -8,6 +8,7 @@ add_library(nirbija_core
   core/file_player.cpp
   core/looper.cpp
   core/fx_pad.cpp
+  core/scene_conductor.cpp
   core/step_sequencer.cpp
   core/arpeggiator.cpp
   core/script_plugin.cpp

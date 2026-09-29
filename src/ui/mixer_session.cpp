@@ -195,6 +195,9 @@ QJsonObject MixerModel::writeChannel(const ChannelUi& channel, size_t row,
   entry[QStringLiteral("muted")] = channel.muted;
   entry[QStringLiteral("soloed")] = channel.soloed;
   entry[QStringLiteral("armed")] = channel.armed;
+  entry[QStringLiteral("uid")] = channel.uid;
+  entry[QStringLiteral("followScenes")] = channel.follow_scenes;
+  entry[QStringLiteral("sceneOn")] = channel.scene_on;
   entry[QStringLiteral("midiMask")] = midiMask(static_cast<int>(row));
   entry[QStringLiteral("channelSink")] =
       QString::fromStdString(engine_.current_channel_sink(channel.slot));
@@ -368,6 +371,7 @@ QJsonObject MixerModel::buildSession(bool allow_park) const {
   root[QStringLiteral("midiMaps")] = maps;
   root[QStringLiteral("master")] = master;
   root[QStringLiteral("channels")] = channels;
+  root[QStringLiteral("scenes")] = scenesJson();
   return root;
 }
 
@@ -488,6 +492,19 @@ int MixerModel::restoreChannel(const QJsonObject& entry, QStringList* missing,
   if (entry[QStringLiteral("muted")].toBool()) toggleMute(row);
   if (entry[QStringLiteral("soloed")].toBool()) toggleSolo(row);
   if (entry[QStringLiteral("armed")].toBool()) toggleArm(row);
+  // A strip preset loaded twice must not be two strips with one name to the
+  // scenes: a uid another row already wears is replaced.
+  channels_[row].uid = claimUid(entry[QStringLiteral("uid")].toString(), row);
+  channels_[row].follow_scenes = entry[QStringLiteral("followScenes")].toBool(true);
+  if (!entry[QStringLiteral("sceneOn")].toBool(true)) {
+    channels_[row].scene_on = false;
+    post(EngineCommand::Kind::SetSceneGate, row, 0.0f);
+  }
+  {
+    // The row was drawn when addChannel made it, with the defaults.
+    const QModelIndex idx = index(row);
+    emit dataChanged(idx, idx, {FollowScenesRole, SceneOnRole});
+  }
   setMidiMask(row, entry[QStringLiteral("midiMask")].toInt(0xFFFF));
   const QString channel_sink = entry[QStringLiteral("channelSink")].toString();
   if (!channel_sink.isEmpty()) connectChannelSink(row, channel_sink);
@@ -859,6 +876,10 @@ bool MixerModel::readSession(const QString& target) {
   }
   if (!midi_maps_.empty()) engine_.connect_all_midi_to_control();
 
+  // Last: a scene names strips by uid and sequencers by their place in a
+  // chain, and both only mean something once every strip is whole.
+  applyScenesJson(root[QStringLiteral("scenes")].toObject());
+
   restoring_ = false;
 
   // Named, not just logged: a strip that plays without its synth is the
@@ -1016,6 +1037,16 @@ void MixerModel::applySnapshot(const QJsonObject& root) {
     if (entry[QStringLiteral("muted")].toBool() != channel.muted) toggleMute(row);
     if (entry[QStringLiteral("soloed")].toBool() != channel.soloed) toggleSolo(row);
     if (entry[QStringLiteral("armed")].toBool() != channel.armed) toggleArm(row);
+    channel.uid = claimUid(entry[QStringLiteral("uid")].toString(), row);
+    channel.follow_scenes = entry[QStringLiteral("followScenes")].toBool(true);
+    if (entry[QStringLiteral("sceneOn")].toBool(true) != channel.scene_on) {
+      channel.scene_on = !channel.scene_on;
+      post(EngineCommand::Kind::SetSceneGate, row, channel.scene_on ? 1.0f : 0.0f);
+    }
+    {
+      const QModelIndex idx = index(row);
+      emit dataChanged(idx, idx, {FollowScenesRole, SceneOnRole});
+    }
     setMidiMask(row, entry[QStringLiteral("midiMask")].toInt(0xFFFF));
     const QString sink = entry[QStringLiteral("channelSink")].toString();
     if (sink != QString::fromStdString(engine_.current_channel_sink(channel.slot)))
@@ -1151,6 +1182,7 @@ void MixerModel::applySnapshot(const QJsonObject& root) {
   if (!midi_maps_.empty()) engine_.connect_all_midi_to_control();
 
   applySessionGlobals(root);
+  applyScenesJson(root[QStringLiteral("scenes")].toObject());
 
   // Editors of inserts that are gone close; every other window stays open on
   // the very same plugin it was editing.

@@ -332,7 +332,17 @@ void ChannelStrip::process(float* const* buffers, uint32_t frames,
         mute_gain_ = std::max(mute_target, mute_gain_ - mute_step_);
       const float left = stereo ? std::min(1.0f, 1.0f - smoothed_pan_) : 1.0f;
       const float right = stereo ? std::min(1.0f, 1.0f + smoothed_pan_) : 1.0f;
-      const float gain = smoothed_gain_ * mute_gain_;
+      if (scene_delay_ > 0) {
+        --scene_delay_;
+      } else if (scene_pos_ < scene_len_) {
+        ++scene_pos_;
+        const float t = static_cast<float>(scene_pos_) / static_cast<float>(scene_len_);
+        const float shape = 0.5f - 0.5f * std::cos(3.14159265358979f * t);
+        scene_gain_ = scene_pos_ == scene_len_
+                          ? scene_to_
+                          : scene_from_ + (scene_to_ - scene_from_) * shape;
+      }
+      const float gain = smoothed_gain_ * mute_gain_ * scene_gain_;
       if (have_curve) {
         curve_l[i] = gain * left;
         if (stereo) curve_r[i] = gain * right;
@@ -482,6 +492,33 @@ void ChannelStrip::swap_inserts(size_t a, size_t b) {
   insert_tags_[a].store(second_tag, std::memory_order_release);
   insert_tags_[b].store(first_tag, std::memory_order_release);
   end_chain_edit();
+}
+
+void ChannelStrip::start_scene_gate(bool on, uint32_t delay_frames,
+                                    uint32_t length_samples) {
+  scene_on_.store(on, std::memory_order_relaxed);
+  scene_from_ = scene_gain_;
+  scene_to_ = on ? 1.0f : 0.0f;
+  scene_delay_ = delay_frames;
+  scene_pos_ = 0;
+  scene_len_ = std::max<uint32_t>(1, length_samples);
+}
+
+void ChannelStrip::set_scene_on(bool on) {
+  const auto length = static_cast<uint32_t>(
+      std::max(1.0, kMuteSeconds * (sample_rate_ > 0.0 ? sample_rate_ : 48000.0)));
+  start_scene_gate(on, 0, length);
+}
+
+PluginInstance* ChannelStrip::insert_by_tag(uint32_t tag) const {
+  if (tag == 0) return nullptr;
+  // Under the chain's sequence counter, the same as a render: a swap caught
+  // halfway would pair one plugin's tag with the other's slot.
+  ChainSnapshot chain;
+  if (!snapshot_chain(&chain)) return nullptr;
+  for (size_t i = 0; i < chain.count; ++i)
+    if (chain.tags[i] == tag) return chain.inserts[i];
+  return nullptr;
 }
 
 PluginInstance* ChannelStrip::insert_at(size_t index) const {

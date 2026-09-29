@@ -806,6 +806,15 @@ void Engine::drain_commands() {
       metronome_.store(command.value != 0.0f, std::memory_order_relaxed);
       continue;
     }
+    if (command.kind == EngineCommand::Kind::SceneArm) {
+      scenes_.arm(static_cast<int>(command.value));
+      continue;
+    }
+    if (command.kind == EngineCommand::Kind::SceneHand) {
+      scenes_.hand(command.bus, command.channel,
+                   static_cast<SceneTarget::What>(static_cast<int>(command.value)));
+      continue;
+    }
     if (command.bus) {
       if (command.channel >= graph_->bus_count()) continue;
       if (!graph_->bus_alive(command.channel)) continue;
@@ -824,6 +833,7 @@ void Engine::drain_commands() {
       case EngineCommand::Kind::SetPan: strip.set_pan(command.value); break;
       case EngineCommand::Kind::SetMute: strip.set_muted(command.value != 0.0f); break;
       case EngineCommand::Kind::SetSolo: strip.set_soloed(command.value != 0.0f); break;
+      case EngineCommand::Kind::SetSceneGate: strip.set_scene_on(command.value != 0.0f); break;
       case EngineCommand::Kind::SetMasterGain:
       case EngineCommand::Kind::SetPlaying:
       case EngineCommand::Kind::SetTempo:
@@ -831,6 +841,8 @@ void Engine::drain_commands() {
       case EngineCommand::Kind::SetMetronome:
       case EngineCommand::Kind::SetTimeSig:
       case EngineCommand::Kind::InjectMidi:
+      case EngineCommand::Kind::SceneArm:
+      case EngineCommand::Kind::SceneHand:
       case EngineCommand::Kind::None:
         break;
     }
@@ -949,6 +961,9 @@ int Engine::process(jack_nframes_t frames) {
   transport_changed_ = false;
 
   graph_->set_transport(transport);
+  // Before the render, so a scene that starts on a bar line inside this
+  // block starts on its frame.
+  scenes_.run(*graph_, transport, frames, sample_rate_);
 
   float* master[2];
   for (int ch = 0; ch < 2; ++ch)

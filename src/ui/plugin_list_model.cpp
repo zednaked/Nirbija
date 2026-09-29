@@ -138,6 +138,14 @@ int PluginListModel::rowFor(PluginFormat format, const std::string& uid) const {
     if (descriptor.format == format && descriptor.uid == uid)
       return static_cast<int>(i);
   }
+  // 0.4.0 read CLAP and VST3 plugins back from its scan cache as Internal,
+  // and a session saved then names them that way. No built-in plugin has a
+  // uid outside "nirbija.", so such a name is one of those, and the uid alone
+  // finds it.
+  if (format == PluginFormat::Internal && uid.rfind("nirbija.", 0) != 0) {
+    for (size_t i = 0; i < entries_.size(); ++i)
+      if (entries_[i].descriptor.uid == uid) return static_cast<int>(i);
+  }
   return -1;
 }
 

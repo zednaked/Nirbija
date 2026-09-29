@@ -88,6 +88,9 @@ class ChannelStrip {
 
   // Audio-thread setters: plain stores, no allocation.
   void set_gain(float linear) { gain_.store(linear, std::memory_order_relaxed); }
+  // Where the fader was last told to go, before smoothing. A scene's fade
+  // starts from here.
+  float gain_target() const { return gain_.load(std::memory_order_relaxed); }
   void set_pan(float pan) { pan_.store(pan, std::memory_order_relaxed); }
   float pan() const { return pan_.load(std::memory_order_relaxed); }
   // Where the pan actually is this block, audio thread only: the graph pans
@@ -96,6 +99,18 @@ class ChannelStrip {
   float smoothed_pan() const { return smoothed_pan_; }
   void set_muted(bool muted) { muted_.store(muted, std::memory_order_relaxed); }
   void set_soloed(bool soloed) { soloed_.store(soloed, std::memory_order_relaxed); }
+
+  // The scene's on/off, a gain of its own beside the fader and the mute: the
+  // mute is the player's switch, this is what a scene fades in and out over
+  // bars. Audio thread only. The slope starts `delay_frames` into the next
+  // block this strip renders and takes `length_samples` along a raised
+  // cosine, from wherever the gain is now; a new call mid-slope turns it
+  // around from there instead of jumping.
+  void start_scene_gate(bool on, uint32_t delay_frames, uint32_t length_samples);
+  // The same, now, over the mute's few milliseconds: the strip's own button.
+  void set_scene_on(bool on);
+  // Where the scene gate is heading, for the UI.
+  bool scene_on() const { return scene_on_.load(std::memory_order_relaxed); }
   bool soloed() const { return soloed_.load(std::memory_order_relaxed); }
   // Where this strip sends its output: -1 is the master bus, anything else is
   // the index of a mix bus.
@@ -152,6 +167,13 @@ class ChannelStrip {
   void swap_inserts(size_t a, size_t b);
   size_t insert_count() const { return insert_count_.load(std::memory_order_acquire); }
   PluginInstance* insert_at(size_t index) const;
+  // The insert with this tag (see insert_tags_), or null. Either thread: a
+  // scene names a plugin by its tag, which survives a reorder and is never
+  // given to another plugin, so a stale scene cannot reach the wrong one.
+  PluginInstance* insert_by_tag(uint32_t tag) const;
+  uint32_t insert_tag(size_t index) const {
+    return index < kMaxInserts ? insert_tags_[index].load(std::memory_order_acquire) : 0;
+  }
 
   void set_insert_bypassed(size_t index, bool on);
   bool insert_bypassed(size_t index) const;
@@ -277,6 +299,14 @@ class ChannelStrip {
   // separate from the fader's own smoothing so it feels like a switch.
   float mute_gain_ = 1.0f;
   float mute_step_ = 1.0f;
+  // The scene gate, audio thread only apart from the published target.
+  std::atomic<bool> scene_on_{true};
+  float scene_gain_ = 1.0f;
+  float scene_from_ = 1.0f;
+  float scene_to_ = 1.0f;
+  uint32_t scene_delay_ = 0;
+  uint32_t scene_pos_ = 0;
+  uint32_t scene_len_ = 0;
   // How much dry each slot is putting out, 0 wet to 1 bypassed. Audio thread
   // only: the UI publishes the chain and reconcile_bypass_mix() works out
   // from the published tags which slot's mix belongs to which plugin.

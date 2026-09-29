@@ -4,6 +4,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls.Basic
 import QtQuick.Dialogs
+import QtQml
 import Nirbija
 
 ApplicationWindow {
@@ -84,6 +85,25 @@ ApplicationWindow {
     Shortcut {
         sequence: StandardKey.HelpContents
         onActivated: window.openShortcuts()
+    }
+
+    // Scenes: Alt and a digit arms that scene for the next bar. Alt, because
+    // the bare digits and letters belong to whatever is being played.
+    Instantiator {
+        model: 9
+        delegate: Shortcut {
+            required property int index
+            sequence: "Alt+" + (index + 1)
+            onActivated: Mixer.armScene(index)
+        }
+    }
+    Shortcut {
+        sequence: "Alt+H"
+        onActivated: Mixer.sceneHold = !Mixer.sceneHold
+    }
+    Shortcut {
+        sequence: "Alt+R"
+        onActivated: Mixer.sceneRecording = !Mixer.sceneRecording
     }
 
     // Resizing the whole interface, because a size that suits one screen is
@@ -212,10 +232,12 @@ ApplicationWindow {
         return entries
     }
 
-    function titleMenu(row, name) {
+    function titleMenu(row, name, followScenes) {
         return [
             { label: qsTr("Rename…"),
               action: () => window.openRename(row, name) },
+            { label: followScenes ? qsTr("Ignore scenes") : qsTr("Follow scenes"),
+              action: () => Mixer.setFollowScenes(row, !followScenes) },
             { label: qsTr("MIDI learn: fader"),
               action: () => Mixer.learnGain(row) },
             { label: qsTr("MIDI learn: pan"),
@@ -239,6 +261,46 @@ ApplicationWindow {
             { label: qsTr("Remove channel"), danger: true,
               action: () => Mixer.removeChannel(row) }
         ]
+    }
+
+    function sceneMenu(scene) {
+        const info = Mixer.scenes[scene]
+        const entries = [
+            { label: qsTr("Rename…"),
+              action: () => window.openSceneRename(scene, info.name) }
+        ]
+        for (const bars of [4, 8, 16, 32, 0]) {
+            entries.push({
+                label: (bars === info.bars ? "● " : "    ")
+                       + (bars > 0 ? qsTr("%1 bars").arg(bars) : qsTr("Until changed")),
+                enabled: bars !== info.bars,
+                action: () => Mixer.setSceneBars(scene, bars)
+            })
+        }
+        for (const fade of [0, 1, 2, 4, 8]) {
+            entries.push({
+                label: (fade === info.fade ? "● " : "    ")
+                       + (fade === 1 ? qsTr("Fade over 1 bar")
+                          : fade > 0 ? qsTr("Fade over %1 bars").arg(fade) : qsTr("No fade")),
+                enabled: fade !== info.fade,
+                action: () => Mixer.setSceneFade(scene, fade)
+            })
+        }
+        entries.push(
+            { label: qsTr("Record into it"),
+              action: () => {
+                  if (Mixer.currentScene !== scene) Mixer.armScene(scene)
+                  Mixer.sceneRecording = true
+              } },
+            { label: qsTr("Move left"), enabled: scene > 0,
+              action: () => Mixer.moveScene(scene, -1) },
+            { label: qsTr("Move right"), enabled: scene < Mixer.scenes.length - 1,
+              action: () => Mixer.moveScene(scene, 1) },
+            { label: qsTr("Forget what it holds"), enabled: info.count > 0, danger: true,
+              action: () => Mixer.clearScene(scene) },
+            { label: qsTr("Remove scene"), danger: true,
+              action: () => Mixer.removeScene(scene) })
+        return entries
     }
 
     function sessionMenu() {
@@ -373,6 +435,11 @@ ApplicationWindow {
         renameLoader.item.openFor(row, name)
     }
 
+    function openSceneRename(scene, name) {
+        sceneRenameLoader.active = true
+        sceneRenameLoader.item.openFor(scene, name)
+    }
+
     function openShortcuts() {
         shortcutLoader.active = true
         shortcutLoader.item.open()
@@ -423,11 +490,19 @@ ApplicationWindow {
                                                  qsTr("Nirbija"))
     }
 
+    SceneRibbon {
+        id: sceneRibbon
+        anchors.top: topBar.bottom
+        width: parent.width
+        onSceneMenuRequested: (scene, item) => slotMenu.openAt(
+            item, window.sceneMenu(scene), Mixer.scenes[scene].name)
+    }
+
     // Strips scroll horizontally as a session grows, which is the one direction
     // a mixer ever needs to grow in.
     MasterStrip {
         id: masterStrip
-        anchors.top: topBar.bottom
+        anchors.top: sceneRibbon.bottom
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         gain: Mixer.masterGain
@@ -441,7 +516,7 @@ ApplicationWindow {
 
     Flickable {
         id: mixerArea
-        anchors.top: topBar.bottom
+        anchors.top: sceneRibbon.bottom
         anchors.left: parent.left
         anchors.right: masterStrip.left
         anchors.bottom: parent.bottom
@@ -505,6 +580,10 @@ ApplicationWindow {
                     accent: strip.model.accent
                     isBus: strip.model.isBus
                     sends: strip.model.sends
+                    followScenes: strip.model.followScenes
+                    sceneOn: strip.model.sceneOn
+                    sceneMarks: strip.model.sceneMarks
+                    sceneHands: strip.model.sceneHands
 
                     onInputSlotClicked: item =>
                         window.openPortPicker("audio", strip.index, item)
@@ -554,7 +633,8 @@ ApplicationWindow {
                     ], strip.model.sends[slot].name)
 
                     onTitleClicked: item => slotMenu.openAt(
-                        item, window.titleMenu(strip.index, strip.model.name),
+                        item, window.titleMenu(strip.index, strip.model.name,
+                                               strip.model.followScenes),
                         strip.model.name)
 
                     onInsertSlotClicked: (slot, item) => {
@@ -721,6 +801,14 @@ ApplicationWindow {
         active: false
         sourceComponent: RenameDialog {
             onAccepted: name => Mixer.renameChannel(targetRow, name)
+        }
+    }
+
+    Loader {
+        id: sceneRenameLoader
+        active: false
+        sourceComponent: RenameDialog {
+            onAccepted: name => Mixer.renameScene(targetRow, name)
         }
     }
 

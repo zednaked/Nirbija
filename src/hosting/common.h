@@ -326,7 +326,11 @@ class SlotQueue {
 // rebuilt, never trusted, and never reported.
 class ScanCache {
  public:
-  explicit ScanCache(std::string_view format_name) {
+  // `format` is stamped on every descriptor read back: the file does not
+  // carry it, and a descriptor left at its default says Internal - which
+  // made every CLAP and VST3 plugin from a warm cache unfindable by the
+  // format a session names it with.
+  ScanCache(std::string_view format_name, PluginFormat format) : format_(format) {
     const char* xdg = std::getenv("XDG_CACHE_HOME");
     std::filesystem::path base;
     if (xdg != nullptr && *xdg != '\0') {
@@ -353,6 +357,7 @@ class ScanCache {
       return false;
     it->second.seen = true;
     *out = it->second.plugins;
+    for (PluginDescriptor& descriptor : *out) descriptor.format = format_;
     return true;
   }
 
@@ -399,6 +404,8 @@ class ScanCache {
   }
 
  private:
+  PluginFormat format_;
+
   struct Stamp {
     int64_t mtime = 0;
     int64_t size = 0;

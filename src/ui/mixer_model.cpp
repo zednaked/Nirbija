@@ -170,8 +170,14 @@ bool MixerModel::eventFilter(QObject* watched, QEvent* event) {
     const bool text_input = focus != nullptr &&
         (QByteArray(focus->metaObject()->className()).contains("TextInput") ||
          QByteArray(focus->metaObject()->className()).contains("TextEdit"));
-    if (!text_input) {
-      auto* key_event = static_cast<QKeyEvent*>(event);
+    auto* key_event = static_cast<QKeyEvent*>(event);
+    // A chord is a shortcut (Alt+1 arms a scene), not a note. Releases pass
+    // whatever is held, so a key let go after Alt went down still ends its
+    // note.
+    const bool chord = event->type() == QEvent::KeyPress &&
+                       (key_event->modifiers() &
+                        (Qt::AltModifier | Qt::ControlModifier | Qt::MetaModifier)) != 0;
+    if (!text_input && !chord) {
       emit globalKeyEvent(key_event->key(), event->type() == QEvent::KeyPress,
                           key_event->isAutoRepeat());
     }
@@ -212,6 +218,10 @@ QVariant MixerModel::data(const QModelIndex& index, int role) const {
     case IsBusRole: return channel.is_bus;
     case DestinationRole: return channel.destination;
     case SendsRole: return channel.sends;
+    case FollowScenesRole: return channel.follow_scenes;
+    case SceneOnRole: return channel.scene_on;
+    case SceneMarksRole: return sceneMarksFor(index.row());
+    case SceneHandsRole: return channel.scene_hands;
     default: return {};
   }
 }
@@ -234,6 +244,8 @@ QHash<int, QByteArray> MixerModel::roleNames() const {
       {WidthRole, "channelWidth"},
       {AccentRole, "accent"},   {IsBusRole, "isBus"},
       {DestinationRole, "destination"}, {SendsRole, "sends"},
+      {FollowScenesRole, "followScenes"}, {SceneOnRole, "sceneOn"},
+      {SceneMarksRole, "sceneMarks"},     {SceneHandsRole, "sceneHands"},
   };
 }
 
@@ -384,6 +396,7 @@ int MixerModel::addChannel(const QString& name, int channels) {
   channel.midi_label = tr("no MIDI");
   channel.output_label = tr("Master");
   channel.accent = nextAccent();
+  channel.uid = makeUid();
   channels_.push_back(std::move(channel));
   endInsertRows();
   markDirty();
@@ -483,6 +496,7 @@ int MixerModel::addBus(const QString& name) {
   bus.midi_label = tr("no MIDI");
   bus.output_label = tr("Master");
   bus.accent = nextAccent();
+  bus.uid = makeUid();
   channels_.push_back(std::move(bus));
   endInsertRows();
   markDirty();
@@ -623,6 +637,9 @@ void MixerModel::post(EngineCommand::Kind kind, int row, float value) {
 void MixerModel::setGain(int row, qreal gain) {
   if (row < 0 || row >= static_cast<int>(channels_.size())) return;
   channels_[row].gain = gain;
+  // Ahead of the gain itself: a hand has to reach the conductor no later
+  // than the value, or a scene walking this fader writes over it.
+  sceneTouched(row, SceneTarget::What::Level, static_cast<float>(gain));
   post(EngineCommand::Kind::SetGain, row, static_cast<float>(gain));
   const QModelIndex idx = index(row);
   emit dataChanged(idx, idx, {GainRole});
@@ -1058,6 +1075,16 @@ void MixerModel::setInsertParameter(int row, int slot, int id, qreal value) {
   PluginInstance* insert = insertFor(row, slot);
   if (insert == nullptr) return;
   insert->set_parameter(static_cast<uint32_t>(id), value);
+  // A sequencer's pattern, switched now or queued for the bar, is what a
+  // scene remembers of it.
+  if ((id == 196 || id == 197) && insertIsStepSequencer(row, slot)) {
+    const int pattern = id == 196 ? static_cast<int>(std::lround(value))
+                                  : static_cast<int>(std::lround(value)) - 1;
+    if (pattern >= 0)
+      if (ChannelStrip* strip = stripFor(row))
+        sceneTouched(row, SceneTarget::What::Pattern, static_cast<float>(pattern),
+                     strip->insert_tag(static_cast<size_t>(slot)));
+  }
   markDirty();
 }
 
@@ -1608,6 +1635,9 @@ void MixerModel::clearMixer() {
   if (engine_.follow_midi_clock()) toggleFollowMidiClock();
   setTimeSignature(4, 4);
   if (playing_ui_) togglePlay();
+  scene_recording_ = false;
+  applyScenesJson({});
+  armScene(-1);
 }
 
 void MixerModel::newSession() {
@@ -1928,6 +1958,8 @@ void MixerModel::pollLevels() {
     // and are only announced when one of them flipped.
     refreshInsertDetails(static_cast<int>(row));
   }
+
+  pollScenes();
 
   bool master_moved = false;
   master_peak_[0] = engine_.graph().read_master_peak(0);

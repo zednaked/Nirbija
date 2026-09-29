@@ -40,6 +40,31 @@ Rectangle {
     property bool isBus: false
     property var sends: []
     property color accent: Skin.accent
+    // Scenes: see MixerModel::SceneMarksRole for the bits.
+    property bool followScenes: true
+    property bool sceneOn: true
+    property int sceneMarks: 0
+    property int sceneHands: 0
+
+    // A small dot beside a control: filled in the strip's colour when the
+    // scene in view holds it, an amber ring when the player has taken it from
+    // the scene - a ring, since a strip's own colour can be amber too.
+    // An inline component cannot see this file's ids, so it is handed what
+    // it draws.
+    component SceneDot: Rectangle {
+        property int bit: 1
+        property int marks: 0
+        property int hands: 0
+        property color tint: Skin.accent
+        readonly property bool held: (hands & bit) !== 0
+        width: Px.px(6)
+        height: width
+        radius: width / 2
+        visible: held || (marks & bit) !== 0
+        color: held ? "transparent" : tint
+        border.width: held ? Px.px(1.5) : Mixer.sceneRecording ? 1 : 0
+        border.color: held ? Skin.solo : Skin.arm
+    }
 
     signal insertSlotClicked(int slot, var item)
     signal insertMenuRequested(int slot, var item)
@@ -83,7 +108,7 @@ Rectangle {
     }
 
     // The accent is a stripe rather than a fill, so a dozen strips side by side
-    // stay readable.
+    // stay readable. Broken into dashes on a strip the scenes leave alone.
     Rectangle {
         anchors.top: parent.top
         anchors.left: parent.left
@@ -91,6 +116,49 @@ Rectangle {
         height: Px.px(3)
         radius: Skin.radiusS
         color: root.accent
+        visible: root.followScenes
+    }
+    Row {
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: Px.px(3)
+        spacing: Px.px(4)
+        clip: true
+        visible: !root.followScenes
+        Repeater {
+            model: Math.ceil(root.width / Px.px(10))
+            Rectangle {
+                width: Px.px(6)
+                height: Px.px(3)
+                radius: Skin.radiusS
+                color: root.accent
+            }
+        }
+    }
+
+    // The player has hold of something a scene wanted: until the next scene
+    // starts, that control is theirs.
+    Rectangle {
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.topMargin: Px.px(6)
+        anchors.rightMargin: Px.px(6)
+        width: handText.implicitWidth + Px.px(8)
+        height: handText.implicitHeight + Px.px(2)
+        radius: Skin.radiusS
+        color: Skin.solo
+        visible: root.sceneHands !== 0
+        z: 5
+        Text {
+            id: handText
+            anchors.centerIn: parent
+            text: qsTr("HAND")
+            color: Skin.onAccent
+            font.pixelSize: Skin.fontXS
+            font.bold: true
+            font.letterSpacing: Px.px(1)
+        }
     }
 
     ColumnLayout {
@@ -193,13 +261,51 @@ Rectangle {
                     onClicked: Mixer.toggleArm(root.row)
                 }
 
-                Text {
+                // The strip's own on/off, the switch a scene fades: apart
+                // from M, which stays the player's.
+                StripButton {
                     Layout.fillWidth: true
-                    horizontalAlignment: Text.AlignHCenter
-                    text: Mixer.gainLabel(root.gain)
-                    color: Skin.textDim
-                    font.pixelSize: Skin.fontS
-                    font.family: Skin.monoFamily
+                    Layout.preferredHeight: Px.px(26)
+                    label: root.sceneOn ? qsTr("ON") : qsTr("OFF")
+                    tip: root.followScenes
+                         ? qsTr("On or off for the scenes. A scene fades this over its bars; while recording a scene, pressing it goes into the scene.")
+                         : qsTr("On or off. This strip ignores scenes, so only you switch it.")
+                    active: !root.sceneOn
+                    activeColor: Skin.disabled
+                    onClicked: Mixer.toggleSceneOn(root.row)
+
+                    SceneDot {
+                        bit: 1
+                        marks: root.sceneMarks
+                        hands: root.sceneHands
+                        tint: root.accent
+                        anchors.top: parent.top
+                        anchors.right: parent.right
+                        anchors.margins: Px.px(3)
+                    }
+                }
+
+                Item {
+                    Layout.fillWidth: true
+                    implicitHeight: gainText.implicitHeight
+
+                    Text {
+                        id: gainText
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        text: Mixer.gainLabel(root.gain)
+                        color: Skin.textDim
+                        font.pixelSize: Skin.fontS
+                        font.family: Skin.monoFamily
+                    }
+                    SceneDot {
+                        bit: 2
+                        marks: root.sceneMarks
+                        hands: root.sceneHands
+                        tint: root.accent
+                        anchors.verticalCenter: gainText.verticalCenter
+                        anchors.right: gainText.left
+                        anchors.rightMargin: Px.px(3)
+                    }
                 }
 
                 PanControl {

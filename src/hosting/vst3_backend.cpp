@@ -1527,7 +1527,7 @@ class Vst3Backend : public PluginBackend {
 
   std::vector<PluginDescriptor> scan() override {
     std::vector<PluginDescriptor> found;
-    hosting::ScanCache cache("vst3");
+    hosting::ScanCache cache("vst3", PluginFormat::Vst3);
     for (const fs::path& dir : vst3_search_paths()) {
       std::error_code ec;
       if (!fs::is_directory(dir, ec)) continue;

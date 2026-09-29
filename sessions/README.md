@@ -24,6 +24,32 @@ NIRBIJA_SESSION="$PWD/sessions/jam-pad-hall.json" \
   ./build/src/ui/nirbija
 ```
 
+## jam-showcase.json — start here
+
+One song that uses everything the mixer does, in seven scenes along the top:
+Dawn, Pulse, Groove, Break, Roll, Peak, Fade out. Press Play and the queue
+walks the song by itself (about two minutes at 118 BPM); click a scene or
+press Alt+1…7 to jump, Alt+H to stay in a part.
+
+| Strip | Chain | Shows |
+|---|---|---|
+| Drone | `nirbija.drone` | ignores scenes (dashed stripe): the bed, yours to play |
+| Drums | `nirbija.stepseq` → `nirbija.sampler` (808 Trap pack) | four patterns switched by the scenes, a ratchet roll; plays *into* Loop |
+| Loop | `nirbija.looper` → `nirbija.fxpad` | press Rec in Groove to catch the drums, bend them on the pad |
+| Chords | `nirbija.stepseq` → `nirbija.chord` → Odin2 (LV2) | one key per chord, held then stabbed |
+| Arp | `nirbija.stepseq` → `nirbija.arp` → `nirbija.script` (Lua) → Surge XT (CLAP) | triads walked up-down, softened by the script |
+| Keys | `nirbija.keyboard` → Odin2 | type over the Break, where the scene switches it on |
+| Room, Hall | `nirbija.fxpad` reverb, Dragonfly Hall (LV2) | sends |
+
+The scenes fade strips in and out, walk faders in decibels and change the
+sequencers' patterns on the bar line. Press Record scene and move something
+to change a part; right-click a scene for its length and fade.
+
+```sh
+python3 sessions/build-showcase.py
+sessions/run-jam.sh jam-showcase
+```
+
 ## The five recipes
 
 | File | Tempo | What it tests |

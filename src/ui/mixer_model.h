@@ -88,6 +88,22 @@ class MixerModel : public QAbstractListModel {
   // autosaved session is back on the strips. The window opens before either,
   // and the top bar says so rather than sitting black until they are done.
   Q_PROPERTY(bool loading READ loading NOTIFY loadingChanged)
+  // Scenes (design/scenes.md). The list is [{name, hue, bars, fade, count,
+  // lost}]: bars 0 is "until changed", `count` how many controls it holds and
+  // `lost` how many of those point at a strip or plugin that is gone.
+  Q_PROPERTY(QVariantList scenes READ scenes NOTIFY scenesChanged)
+  Q_PROPERTY(int currentScene READ currentScene NOTIFY sceneStateChanged)
+  Q_PROPERTY(int armedScene READ armedScene NOTIFY sceneStateChanged)
+  // Which scene a touch lands in while recording, -1 when there is none.
+  Q_PROPERTY(int recordScene READ recordScene NOTIFY sceneStateChanged)
+  // Bars since the current scene started, from 0, plus how far into this bar
+  // the transport is (0..1), so the ribbon can draw its playhead smoothly.
+  Q_PROPERTY(int sceneBar READ sceneBar NOTIFY sceneStateChanged)
+  Q_PROPERTY(qreal sceneBarPhase READ sceneBarPhase NOTIFY sceneStateChanged)
+  Q_PROPERTY(bool sceneAuto READ sceneAuto WRITE setSceneAuto NOTIFY sceneStateChanged)
+  Q_PROPERTY(bool sceneHold READ sceneHold WRITE setSceneHold NOTIFY sceneStateChanged)
+  Q_PROPERTY(bool sceneRecording READ sceneRecording WRITE setSceneRecording NOTIFY
+                 sceneStateChanged)
 
  public:
   enum Roles {
@@ -124,6 +140,14 @@ class MixerModel : public QAbstractListModel {
     IsBusRole,
     DestinationRole,
     SendsRole,
+    // Scenes: whether the strip follows them, whether its scene gate is on,
+    // and which of its controls the scene in view holds (SceneMarksRole) or
+    // the player took away from it until the next change (SceneHandsRole) -
+    // bit 0 the gate, bit 1 the fader, bit 2 a sequencer pattern.
+    FollowScenesRole,
+    SceneOnRole,
+    SceneMarksRole,
+    SceneHandsRole,
   };
 
   explicit MixerModel(QObject* parent = nullptr);
@@ -535,6 +559,36 @@ class MixerModel : public QAbstractListModel {
   // turns overwriting one file loses whichever was edited first.
   bool ownsSession() const { return session_fd_ >= 0; }
 
+  // --- scenes ---------------------------------------------------------------
+  QVariantList scenes() const;
+  int currentScene() const { return scene_current_; }
+  int armedScene() const { return scene_armed_; }
+  int recordScene() const;
+  int sceneBar() const { return scene_bar_; }
+  qreal sceneBarPhase() const { return scene_bar_phase_; }
+  bool sceneAuto() const { return engine_.scenes().auto_advance(); }
+  void setSceneAuto(bool on);
+  bool sceneHold() const { return engine_.scenes().hold(); }
+  void setSceneHold(bool on);
+  bool sceneRecording() const { return scene_recording_; }
+  void setSceneRecording(bool on);
+  // A new, empty scene at the end of the list. Returns its index.
+  Q_INVOKABLE int addScene();
+  Q_INVOKABLE void removeScene(int scene);
+  Q_INVOKABLE void renameScene(int scene, const QString& name);
+  // `bars` 0 plays until something else is chosen.
+  Q_INVOKABLE void setSceneBars(int scene, int bars);
+  Q_INVOKABLE void setSceneFade(int scene, int bars);
+  Q_INVOKABLE void moveScene(int scene, int direction);
+  // Forgets everything the scene holds, keeping its name and length.
+  Q_INVOKABLE void clearScene(int scene);
+  // Arms the scene for the next bar line - at once with the transport
+  // stopped. Arming the one already armed takes it back.
+  Q_INVOKABLE void armScene(int scene);
+  // The strip's own on/off, the one a scene fades.
+  Q_INVOKABLE void toggleSceneOn(int row);
+  Q_INVOKABLE void setFollowScenes(int row, bool on);
+
   // Turns a fader position in 0..1 into a linear gain, and back. AUM's fader is
   // not linear in amplitude: most of the travel covers the top of the range.
   Q_INVOKABLE static qreal faderToGain(qreal position);
@@ -555,6 +609,8 @@ class MixerModel : public QAbstractListModel {
   void metersActiveChanged();
   void countChanged();
   void loadingChanged();
+  void scenesChanged();
+  void sceneStateChanged();
   // The plugin list is complete (again). The session load waits for it.
   void scanFinished();
   // One beat of the 30 Hz poll, for editors that redraw something live - a
@@ -627,6 +683,33 @@ class MixerModel : public QAbstractListModel {
     // [{ bus: int, name: QString, level: qreal }], in slot order.
     QVariantList sends;
     QString accent;
+    // Who this strip is to a scene, across saves and reorders: 64 bits of
+    // random hex, made when the strip is and kept in the session.
+    QString uid;
+    bool follow_scenes = true;
+    bool scene_on = true;
+    // SceneHandsRole's bits, cleared whenever a scene starts.
+    int scene_hands = 0;
+    // The conductor's count of fader moves, as last seen; a change means the
+    // scene moved this fader and the model follows it.
+    uint32_t level_writes_seen = 0;
+  };
+
+  // A scene as the UI keeps it. Targets name strips by uid and sequencers by
+  // their chain tag, which is only good for this run: the session writes the
+  // insert's position instead and reading turns it back into a tag.
+  struct SceneUi {
+    struct Target {
+      QString strip;
+      SceneTarget::What what = SceneTarget::What::Gate;
+      uint32_t insert_tag = 0;
+      float value = 0.0f;
+    };
+    QString name;
+    qreal hue = 0.58;
+    int bars = 8;
+    int fade = 1;
+    std::vector<Target> targets;
   };
 
   ChannelStrip* stripFor(int row) const;
@@ -669,6 +752,28 @@ class MixerModel : public QAbstractListModel {
   void finishStartup();
   void handleControl(int cc, int channel, int value);
   void refreshRouting(int row);
+
+  // Scenes, in mixer_scenes.cpp.
+  int rowForUid(const QString& uid) const;
+  static QString makeUid();
+  // The row's uid, or a fresh one when it is empty or another row has it.
+  QString claimUid(const QString& wanted, int row) const;
+  // Rebuilds the conductor's table from scenes_ and publishes it.
+  void publishScenes();
+  // Once per poll: what the conductor did, the faders it moved, and a table
+  // rebuilt if strips came, went or stopped following since the last one.
+  void pollScenes();
+  // Writes a touch into the scene being recorded, or takes the control away
+  // from the scene that is playing. `row` must follow scenes; `insert_tag`
+  // is the sequencer's for a pattern.
+  void sceneTouched(int row, SceneTarget::What what, float value,
+                    uint32_t insert_tag = 0);
+  int sceneMarksFor(int row) const;
+  void announceSceneMarks();
+  void scenesEdited();
+  QJsonObject scenesJson() const;
+  void applyScenesJson(const QJsonObject& json);
+  quint64 sceneTableSignature() const;
 
   // Coalesces the writes: a fader drag would otherwise save on every frame.
   // `schedule_save` false marks the session modified without arming the
@@ -782,6 +887,14 @@ class MixerModel : public QAbstractListModel {
   bool limiter_working_ = false;
   int limiter_hold_ = 0;
   int xruns_ = 0;
+  std::vector<SceneUi> scenes_;
+  bool scene_recording_ = false;
+  int scene_current_ = -1;
+  int scene_armed_ = -1;
+  int scene_bar_ = -1;
+  qreal scene_bar_phase_ = 0.0;
+  uint32_t scene_changes_seen_ = 0;
+  quint64 scene_table_signature_ = 0;
   QVector<QByteArray> undo_stack_;
   QVector<QByteArray> redo_stack_;
   void pushUndo();
