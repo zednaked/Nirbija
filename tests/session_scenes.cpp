@@ -181,6 +181,22 @@ int main(int argc, char* argv[]) {
     settle();
     if (field(mixer, 0, MixerModel::SceneHandsRole).toInt() != 0)
       fail("a new scene did not clear the hand");
+
+    // The playing scene is followed through a move, the undo of the move,
+    // and the removal of the scene before it - no neighbour takes its place.
+    mixer.moveScene(1, -1);
+    if (mixer.currentScene() != 0) fail("a moved playing scene is not shown where it went");
+    settle();
+    if (mixer.currentScene() != 0) fail("the conductor lost a moved playing scene");
+    mixer.undo();
+    settle();
+    if (mixer.currentScene() != 1) fail("undoing a move lost the playing scene: " +
+                                        std::to_string(mixer.currentScene()));
+    mixer.removeScene(0);
+    settle();
+    if (mixer.currentScene() != 0)
+      fail("removing the scene before the playing one moved it: " +
+           std::to_string(mixer.currentScene()));
   }
 
   if (failures == 0) std::puts("session_scenes: ok");

@@ -106,6 +106,15 @@ pela mesma via e é liberada na thread da UI. Armar uma cena é um comando:
 `Arm(scene_index)`. Tirar a mão e soltar a mão também:
 `Hand(strip, what, id)`.
 
+**Cenas por quem são, não por onde estão.** Cada cena tem um `id` que a UI
+dá quando a cria e que fica com ela em mover, editar e desfazer (vai no JSON
+só para o undo; uma sessão aberta de arquivo numera as suas). O regente
+guarda o id da cena corrente, da armada e da preparada, e numa tabela nova
+acha cada uma de novo pelo id. Mover ou remover cenas com a música tocando
+não põe a vizinha no lugar. Se a cena removida é a que toca, os strips ficam
+onde ela deixou e a que vinha depois dela é armada para a próxima linha:
+o tamanho da removida foi junto com ela, e esperar mais seria palpite.
+
 **Na linha de compasso.** Se há cena armada, ou a cena corrente acabou e a
 fila está andando, o regente troca de cena **no frame da linha**, limpa as
 mãos, e para cada alvo de um strip que segue as cenas:

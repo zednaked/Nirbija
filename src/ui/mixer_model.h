@@ -707,6 +707,7 @@ class MixerModel : public QAbstractListModel {
       uint32_t param = 0;    // Param only
       bool stepped = false;  // Param only: jumps on the line
     };
+    uint32_t id = 0;  // stable for the run; what the conductor follows it by
     QString name;
     qreal hue = 0.58;
     int bars = 8;
@@ -780,7 +781,9 @@ class MixerModel : public QAbstractListModel {
   void announceSceneMarks();
   void scenesEdited();
   QJsonObject scenesJson() const;
-  void applyScenesJson(const QJsonObject& json);
+  // `keep_ids`: an undo puts back the very scenes it took, so the one
+  // playing goes on playing; a session opened from a file numbers its own.
+  void applyScenesJson(const QJsonObject& json, bool keep_ids = false);
   quint64 sceneTableSignature() const;
 
   // Coalesces the writes: a fader drag would otherwise save on every frame.
@@ -896,6 +899,7 @@ class MixerModel : public QAbstractListModel {
   int limiter_hold_ = 0;
   int xruns_ = 0;
   std::vector<SceneUi> scenes_;
+  uint32_t next_scene_id_ = 1;
   bool scene_recording_ = false;
   int scene_current_ = -1;
   int scene_armed_ = -1;

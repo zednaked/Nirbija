@@ -9,6 +9,7 @@
 #include <QJsonObject>
 #include <QRandomGenerator>
 
+#include <algorithm>
 #include <cmath>
 
 #include "mixer_model.h"
@@ -140,6 +141,7 @@ int MixerModel::addScene() {
   const size_t index = scenes_.size();
   scene.name = tr("Scene %1").arg(index + 1);
   scene.hue = kSceneHues[index % std::size(kSceneHues)];
+  scene.id = next_scene_id_++;
   scenes_.push_back(std::move(scene));
   scenesEdited();
   return static_cast<int>(index);
@@ -149,9 +151,15 @@ void MixerModel::removeScene(int scene) {
   if (scene < 0 || scene >= static_cast<int>(scenes_.size())) return;
   pushUndo();
   scenes_.erase(scenes_.begin() + scene);
-  // The conductor counts by index: whatever it was playing past this one is
-  // now one lower, and the one removed must not go on being current.
-  if (scene_armed_ == scene) armScene(-1);
+  // The conductor follows scenes by id and finds its own place again; the
+  // positions shown here are moved now so nothing points at a neighbour
+  // until its next poll.
+  auto shift = [scene](int& index) {
+    if (index == scene) index = -1;
+    else if (index > scene) --index;
+  };
+  shift(scene_current_);
+  shift(scene_armed_);
   scenesEdited();
 }
 
@@ -183,6 +191,12 @@ void MixerModel::moveScene(int scene, int direction) {
     return;
   pushUndo();
   std::swap(scenes_[static_cast<size_t>(scene)], scenes_[static_cast<size_t>(other)]);
+  auto follow = [scene, other](int& index) {
+    if (index == scene) index = other;
+    else if (index == other) index = scene;
+  };
+  follow(scene_current_);
+  follow(scene_armed_);
   scenesEdited();
 }
 
@@ -392,6 +406,7 @@ void MixerModel::publishScenes() {
   table->scenes.reserve(scenes_.size());
   for (const SceneUi& scene : scenes_) {
     SceneTable::Scene entry;
+    entry.id = scene.id;
     entry.bars = static_cast<uint32_t>(std::max(0, scene.bars));
     entry.fade_bars = static_cast<uint32_t>(std::max(0, scene.fade));
     entry.first = static_cast<uint32_t>(table->targets.size());
@@ -511,6 +526,7 @@ QJsonObject MixerModel::scenesJson() const {
       targets.append(saved);
     }
     QJsonObject entry;
+    entry[QStringLiteral("id")] = static_cast<qint64>(scene.id);
     entry[QStringLiteral("name")] = scene.name;
     entry[QStringLiteral("hue")] = scene.hue;
     entry[QStringLiteral("bars")] = scene.bars;
@@ -524,7 +540,7 @@ QJsonObject MixerModel::scenesJson() const {
   return json;
 }
 
-void MixerModel::applyScenesJson(const QJsonObject& json) {
+void MixerModel::applyScenesJson(const QJsonObject& json, bool keep_ids) {
   scenes_.clear();
   for (const QJsonValue& value : json[QStringLiteral("items")].toArray()) {
     const QJsonObject entry = value.toObject();
@@ -568,6 +584,16 @@ void MixerModel::applyScenesJson(const QJsonObject& json) {
           target.insert_tag = stripFor(row)->insert_tag(static_cast<size_t>(slot));
       }
       scene.targets.push_back(target);
+    }
+    const auto saved_id = entry[QStringLiteral("id")].toInteger(0);
+    const bool taken = std::any_of(scenes_.begin(), scenes_.end(), [&](const SceneUi& s) {
+      return static_cast<qint64>(s.id) == saved_id;
+    });
+    if (keep_ids && saved_id > 0 && saved_id < 0x7fffffff && !taken) {
+      scene.id = static_cast<uint32_t>(saved_id);
+      next_scene_id_ = std::max(next_scene_id_, scene.id + 1);
+    } else {
+      scene.id = next_scene_id_++;
     }
     scenes_.push_back(std::move(scene));
   }

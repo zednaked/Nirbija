@@ -25,6 +25,23 @@ constexpr double kShortSeconds = 0.010;
 float to_db(float linear) {
   return linear <= 0.0f ? kFloorDb : std::max(kFloorDb, 20.0f * std::log10(linear));
 }
+
+uint32_t id_at(const SceneTable* table, int index) {
+  if (table == nullptr || index < 0 || index >= static_cast<int>(table->scenes.size()))
+    return 0;
+  return table->scenes[static_cast<size_t>(index)].id;
+}
+
+// Where the scene called `id`, last seen at `was`, sits in `table`. A table
+// without ids is matched by position, as long as the position is still there.
+int index_of(const SceneTable* table, uint32_t id, int was) {
+  if (table == nullptr || was < 0) return SceneConductor::kNone;
+  const int count = static_cast<int>(table->scenes.size());
+  if (id == 0) return was < count ? was : SceneConductor::kNone;
+  for (int i = 0; i < count; ++i)
+    if (table->scenes[static_cast<size_t>(i)].id == id) return i;
+  return SceneConductor::kNone;
+}
 }  // namespace
 
 void SceneConductor::publish(std::shared_ptr<const SceneTable> table) {
@@ -43,7 +60,12 @@ uint32_t SceneConductor::level_writes(bool bus, size_t strip) const {
 }
 
 void SceneConductor::arm(int scene) {
-  armed_ = scene < 0 ? kNone : scene;
+  // Counted in the newest table, which may not be the one run() last saw:
+  // kept by id, and placed again when run() catches up with the table.
+  const SceneTable* table = live_.load(std::memory_order_acquire);
+  const int count = table != nullptr ? static_cast<int>(table->scenes.size()) : 0;
+  armed_ = scene < 0 || scene >= count ? kNone : scene;
+  armed_id_ = id_at(table, armed_);
   apply_now_ = armed_ != kNone;  // only honoured while stopped; see run()
   pub_armed_.store(armed_, std::memory_order_relaxed);
 }
@@ -86,10 +108,7 @@ void SceneConductor::run(AudioGraph& graph, const TransportInfo& transport,
                          uint32_t frames, double sample_rate) {
   if (sample_rate > 0.0) sample_rate_ = sample_rate;
   const SceneTable* table = live_.load(std::memory_order_acquire);
-  const int count = table != nullptr ? static_cast<int>(table->scenes.size()) : 0;
-  if (current_ >= count) current_ = kNone;
-  if (armed_ >= count) armed_ = kNone;
-  if (prepared_ >= count) prepared_ = kNone;
+  if (table != seen_) follow_table(table);
 
   const double tempo = transport.tempo_bpm;
   const int numerator = std::max(1, transport.numerator);
@@ -151,6 +170,7 @@ void SceneConductor::run(AudioGraph& graph, const TransportInfo& transport,
   walk_levels(graph, frames);
   walk_params(graph, frames);
   clock_ += frames;
+  remember_ids(table);
   publish_state();
   generation_.fetch_add(1, std::memory_order_release);
 }
@@ -357,6 +377,35 @@ void SceneConductor::walk_params(AudioGraph& graph, uint32_t frames) {
     plugin->set_parameter(ramp.param, value);
     if (t >= 1.0) ramp.active = false;
   }
+}
+
+void SceneConductor::follow_table(const SceneTable* table) {
+  const int was_current = current_;
+  const int count = table != nullptr ? static_cast<int>(table->scenes.size()) : 0;
+  // armed_ may already count in this table (arm() saw it first); its id is
+  // right either way.
+  current_ = index_of(table, current_id_, current_);
+  armed_ = index_of(table, armed_id_, armed_);
+  prepared_ = index_of(table, prepared_id_, prepared_);
+  // The scene playing was taken out from under the song. The strips stay
+  // where it left them, and the scene that came after it - now in its place
+  // - takes over on the next bar line, as if it had run its bars out. The
+  // bar count the removed one had is gone with it, so waiting any longer
+  // would be a guess.
+  if (was_current != kNone && current_ == kNone && current_id_ != 0) {
+    scene_line_ = -1;
+    if (armed_ == kNone && auto_.load(std::memory_order_relaxed) &&
+        !hold_.load(std::memory_order_relaxed) && was_current < count)
+      armed_ = was_current;
+  }
+  seen_ = table;
+  remember_ids(table);
+}
+
+void SceneConductor::remember_ids(const SceneTable* table) {
+  current_id_ = id_at(table, current_);
+  armed_id_ = id_at(table, armed_);
+  prepared_id_ = id_at(table, prepared_);
 }
 
 void SceneConductor::publish_state() {

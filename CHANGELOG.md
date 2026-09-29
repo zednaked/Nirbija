@@ -22,6 +22,14 @@ quantised sampler take started a beat late. A line now lands on its nearest
 frame and belongs to exactly one block (`tests/beat_grid.cpp`); the looper
 already worked that way and now shares the code.
 
+### Scenes moved or removed while the song plays
+
+The conductor counted scenes by position, so moving or removing one while
+the song played could leave it pointing at the neighbour. Scenes now carry
+an id the conductor follows through moves, removals and undo. Removing the
+scene that is playing hands the song to the one after it on the next bar
+line.
+
 ### Scenes
 
 A song is now a row of scenes across the top of the mixer, each as wide as

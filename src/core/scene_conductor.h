@@ -49,6 +49,11 @@ struct SceneTarget {
 // audio thread reads it without a lock for as long as it is live.
 struct SceneTable {
   struct Scene {
+    // Who the scene is, across tables: the UI hands each one an id that
+    // stays with it through moves and edits, so a scene removed or moved
+    // while the song plays does not leave the conductor pointing at its
+    // neighbour. 0 is "no identity", matched by position.
+    uint32_t id = 0;
     uint32_t bars = 0;       // 0 = until something else happens
     uint32_t fade_bars = 0;  // 0 = the controls' own short slopes
     uint32_t first = 0;      // into `targets`
@@ -64,8 +69,10 @@ class SceneConductor {
 
   // --- UI thread ------------------------------------------------------------
   // Replaces the scene list. The old one is kept until the audio thread has
-  // provably left it (see dsp::RetiredList). A scene index the new table does
-  // not have stops being current or armed on the next block.
+  // provably left it (see dsp::RetiredList). The current, armed and queued
+  // scenes are found again in the new table by id; one it no longer has
+  // stops being current or armed on the next block, and if that was the one
+  // playing, the scene that followed it is armed for the next bar line.
   void publish(std::shared_ptr<const SceneTable> table);
   // Frees retired tables; `audio_running` false frees them all at once.
   void reclaim(bool audio_running);
@@ -91,6 +98,8 @@ class SceneConductor {
   // --- audio thread ---------------------------------------------------------
   // Arms a scene for the next bar line, or cancels with kNone. With the
   // transport stopped there is no bar line: the scene lands on the next block.
+  // `scene` is a position in the newest table published, which is the one
+  // the UI counted in.
   void arm(int scene);
   // The player took a control: the scene stops walking it until the next
   // change. Only a level has anything to stop; a gate or a pattern is set
@@ -142,6 +151,9 @@ class SceneConductor {
   void prepare_patterns(AudioGraph& graph, const SceneTable& table, int scene);
   void walk_levels(AudioGraph& graph, uint32_t frames);
   void publish_state();
+  // A new table: the positions kept are found again by id.
+  void follow_table(const SceneTable* table);
+  void remember_ids(const SceneTable* table);
 
   // UI side.
   std::shared_ptr<const SceneTable> owned_;
@@ -160,6 +172,10 @@ class SceneConductor {
   std::array<std::atomic<uint32_t>, kMaxBuses> bus_writes_{};
 
   // Audio thread only.
+  const SceneTable* seen_ = nullptr;  // the table the positions below are in
+  uint32_t current_id_ = 0;
+  uint32_t armed_id_ = 0;
+  uint32_t prepared_id_ = 0;
   int current_ = kNone;
   int armed_ = kNone;
   bool apply_now_ = false;          // armed while stopped

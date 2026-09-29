@@ -116,8 +116,9 @@ SceneTarget level(size_t strip, float gain) {
 }
 
 void add_scene(SceneTable& table, uint32_t bars, uint32_t fade,
-               std::vector<SceneTarget> targets) {
+               std::vector<SceneTarget> targets, uint32_t id = 0) {
   SceneTable::Scene scene;
+  scene.id = id;
   scene.bars = bars;
   scene.fade_bars = fade;
   scene.first = static_cast<uint32_t>(table.targets.size());
@@ -375,6 +376,62 @@ int main() {
     rig.run_bars(4.0);
     rig.scenes.reclaim(true);
     rig.scenes.reclaim(false);
+  }
+
+  // --- scenes followed by who they are, not where they sit ----------------------
+  // The UI moves and removes scenes while the song plays; the conductor has
+  // to keep playing the same one, and the list has to walk on from it.
+  {
+    auto table_of = [](std::vector<uint32_t> ids) {
+      auto table = std::make_shared<SceneTable>();
+      for (uint32_t id : ids) add_scene(*table, 2, 0, {}, id);
+      return table;
+    };
+    Rig rig(120.0);
+    rig.scenes.publish(table_of({11, 12, 13, 14}));
+    rig.scenes.arm(1);  // 12
+    rig.run_bars(1.5);
+    expect(rig.scenes.current() == 1, "setup: scene 12 did not start");
+
+    // Moved one to the left: still 12, now at 0.
+    rig.scenes.publish(table_of({12, 11, 13, 14}));
+    rig.block();
+    expect(rig.scenes.current() == 0, "a moved scene was lost: current " +
+                                          std::to_string(rig.scenes.current()));
+
+    // One before it removed: still 12, still at 0; one after it armed, and
+    // the arm survives a move of the armed one.
+    rig.scenes.publish(table_of({12, 13, 14}));
+    rig.block();
+    expect(rig.scenes.current() == 0, "removing another scene moved the current one");
+    rig.scenes.arm(2);  // 14
+    rig.scenes.publish(table_of({12, 14, 13}));
+    rig.block();
+    expect(rig.scenes.armed() == 1, "a moved armed scene was lost: armed " +
+                                        std::to_string(rig.scenes.armed()));
+    rig.run_bars(1.0);
+    expect(rig.scenes.current() == 1, "the armed scene did not start after moving");
+
+    // An arm counted in a table the audio thread has not run on yet.
+    rig.scenes.publish(table_of({13, 12, 14}));
+    rig.scenes.arm(0);  // 13, in the new table
+    rig.block();
+    expect(rig.scenes.armed() == 0, "an arm in the newest table landed on its neighbour");
+    rig.run_bars(1.0);
+    expect(rig.scenes.current() == 0, "setup: scene 13 did not start");
+
+    // The playing scene removed: what followed it takes over on the next line.
+    rig.scenes.publish(table_of({12, 14}));
+    rig.block();
+    expect(rig.scenes.current() == SceneConductor::kNone,
+           "a removed scene is still current");
+    expect(rig.scenes.armed() == 0, "the scene after a removed one was not armed");
+    rig.run_bars(1.0);
+    expect(rig.scenes.current() == 0, "the scene after a removed one did not start");
+
+    // And the list walks on from there.
+    rig.run_bars(2.0);
+    expect(rig.scenes.current() == 1, "the list did not walk on after a removal");
   }
 
   if (failures == 0) std::puts("scene_conductor: ok");

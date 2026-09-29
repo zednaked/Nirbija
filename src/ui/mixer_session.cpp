@@ -1182,7 +1182,7 @@ void MixerModel::applySnapshot(const QJsonObject& root) {
   if (!midi_maps_.empty()) engine_.connect_all_midi_to_control();
 
   applySessionGlobals(root);
-  applyScenesJson(root[QStringLiteral("scenes")].toObject());
+  applyScenesJson(root[QStringLiteral("scenes")].toObject(), true);
 
   // Editors of inserts that are gone close; every other window stays open on
   // the very same plugin it was editing.
