@@ -32,6 +32,7 @@ QString what_name(SceneTarget::What what) {
     case SceneTarget::What::Gate: return QStringLiteral("gate");
     case SceneTarget::What::Level: return QStringLiteral("level");
     case SceneTarget::What::Pattern: return QStringLiteral("pattern");
+    case SceneTarget::What::Param: return QStringLiteral("param");
   }
   return {};
 }
@@ -40,6 +41,7 @@ bool what_from_name(const QString& name, SceneTarget::What* out) {
   if (name == QLatin1String("gate")) *out = SceneTarget::What::Gate;
   else if (name == QLatin1String("level")) *out = SceneTarget::What::Level;
   else if (name == QLatin1String("pattern")) *out = SceneTarget::What::Pattern;
+  else if (name == QLatin1String("param")) *out = SceneTarget::What::Param;
   else return false;
   return true;
 }
@@ -100,9 +102,9 @@ QVariantList MixerModel::scenes() const {
         ++lost;
         continue;
       }
-      if (target.what == SceneTarget::What::Pattern &&
-          position_of_tag(stripFor(row), target.insert_tag) < 0)
-        ++lost;
+      const bool on_plugin = target.what == SceneTarget::What::Pattern ||
+                             target.what == SceneTarget::What::Param;
+      if (on_plugin && position_of_tag(stripFor(row), target.insert_tag) < 0) ++lost;
     }
     out.append(QVariantMap{
         {QStringLiteral("name"), scene.name},
@@ -254,8 +256,50 @@ void MixerModel::setFollowScenes(int row, bool on) {
   markDirty();
 }
 
+bool MixerModel::sceneParamAllowed(const PluginInstance* insert) {
+  if (insert == nullptr) return false;
+  const PluginDescriptor& descriptor = insert->descriptor();
+  if (descriptor.format == PluginFormat::Lv2) return true;
+  if (descriptor.format != PluginFormat::Internal) return false;
+  // The built-ins whose parameters are settings. The sequencer, looper and
+  // sampler have parameters that are buttons (clear, record, mutate): a
+  // scene that pressed them again on every bar line would be a bug, and the
+  // sequencer's part in a scene is its pattern. The script recompiles its
+  // tables on the UI thread when a knob moves, which the audio thread cannot.
+  static const char* const kAllowed[] = {"nirbija.fxpad", "nirbija.drone",
+                                         "nirbija.arp", "nirbija.chord"};
+  for (const char* uid : kAllowed)
+    if (descriptor.uid == uid) return true;
+  return false;
+}
+
+bool MixerModel::sceneParamStepped(const PluginInstance* insert, uint32_t id) {
+  if (insert == nullptr || insert->descriptor().format != PluginFormat::Internal)
+    return false;
+  // Nothing says which parameters take whole values (design/scenes.md,
+  // phase 3 reads it from the formats that know). For the built-ins a range
+  // of whole numbers wider than 0..1 is a mode, a division or a note - and
+  // a mode walked through its neighbours on the way is not a fade.
+  for (const ParameterInfo& info : insert->parameters()) {
+    if (info.id != id) continue;
+    auto whole = [](double v) { return std::floor(v) == v; };
+    return whole(info.min_value) && whole(info.max_value) &&
+           whole(info.default_value) && info.max_value - info.min_value >= 2.0;
+  }
+  return false;
+}
+
+void MixerModel::sceneParamTouched(int row, int slot, uint32_t id, float value) {
+  PluginInstance* insert = insertFor(row, slot);
+  ChannelStrip* strip = stripFor(row);
+  if (strip == nullptr || !sceneParamAllowed(insert)) return;
+  sceneTouched(row, SceneTarget::What::Param, value,
+               strip->insert_tag(static_cast<size_t>(slot)), id,
+               sceneParamStepped(insert, id));
+}
+
 void MixerModel::sceneTouched(int row, SceneTarget::What what, float value,
-                              uint32_t insert_tag) {
+                              uint32_t insert_tag, uint32_t param, bool stepped) {
   if (restoring_ || row < 0 || row >= static_cast<int>(channels_.size())) return;
   ChannelUi& channel = channels_[static_cast<size_t>(row)];
   if (!channel.follow_scenes) return;
@@ -268,12 +312,15 @@ void MixerModel::sceneTouched(int row, SceneTarget::What what, float value,
     for (SceneUi::Target& target : scene.targets) {
       if (target.strip != channel.uid || target.what != what) continue;
       if (what == SceneTarget::What::Pattern && target.insert_tag != insert_tag) continue;
+      if (what == SceneTarget::What::Param &&
+          (target.insert_tag != insert_tag || target.param != param))
+        continue;
       target.value = value;
       found = true;
       break;
     }
     if (!found) {
-      scene.targets.push_back({channel.uid, what, insert_tag, value});
+      scene.targets.push_back({channel.uid, what, insert_tag, value, param, stepped});
       // Only a new control changes what the ribbon and the strip show.
       emit scenesChanged();
       const QModelIndex idx = index(row);
@@ -287,12 +334,14 @@ void MixerModel::sceneTouched(int row, SceneTarget::What what, float value,
   // Playing, not recording: the hand wins. The conductor stops walking the
   // fader; the strip shows which of its controls are the player's now.
   if (scene_current_ < 0) return;
-  if (what == SceneTarget::What::Level) {
+  if (what == SceneTarget::What::Level || what == SceneTarget::What::Param) {
     EngineCommand command;
     command.kind = EngineCommand::Kind::SceneHand;
     command.channel = channel.slot;
     command.bus = channel.is_bus;
     command.value = static_cast<float>(static_cast<int>(what));
+    command.tag = insert_tag;
+    command.param = param;
     engine_.post(command);
   }
   if ((sceneMarksFor(row) & bit_of(what)) != 0 &&
@@ -356,6 +405,8 @@ void MixerModel::publishScenes() {
       out.bus = channel.is_bus;
       out.strip = static_cast<uint16_t>(channel.slot);
       out.insert_tag = target.insert_tag;
+      out.param = target.param;
+      out.stepped = target.stepped;
       out.value = target.value;
       table->targets.push_back(out);
     }
@@ -444,13 +495,18 @@ QJsonObject MixerModel::scenesJson() const {
       saved[QStringLiteral("strip")] = target.strip;
       saved[QStringLiteral("what")] = what_name(target.what);
       saved[QStringLiteral("value")] = static_cast<double>(target.value);
-      if (target.what == SceneTarget::What::Pattern) {
+      if (target.what == SceneTarget::What::Pattern ||
+          target.what == SceneTarget::What::Param) {
         // A tag is only good for this run; the session names the insert by
         // its place in the chain, which is how the strip itself lists them.
         const int row = rowForUid(target.strip);
         const int position = row < 0 ? -1 : position_of_tag(stripFor(row), target.insert_tag);
         if (position < 0) continue;
         saved[QStringLiteral("insert")] = position;
+      }
+      if (target.what == SceneTarget::What::Param) {
+        saved[QStringLiteral("id")] = static_cast<qint64>(target.param);
+        if (target.stepped) saved[QStringLiteral("stepped")] = true;
       }
       targets.append(saved);
     }
@@ -498,6 +554,17 @@ void MixerModel::applyScenesJson(const QJsonObject& json) {
                                  : slot_of_position(stripFor(row),
                                                     saved[QStringLiteral("insert")].toInt(-1));
         if (slot >= 0 && insertIsStepSequencer(row, slot))
+          target.insert_tag = stripFor(row)->insert_tag(static_cast<size_t>(slot));
+      }
+      if (target.what == SceneTarget::What::Param) {
+        target.param = static_cast<uint32_t>(saved[QStringLiteral("id")].toInteger(-1));
+        target.stepped = saved[QStringLiteral("stepped")].toBool(false);
+        const int row = rowForUid(target.strip);
+        const int slot = row < 0 ? -1
+                                 : slot_of_position(stripFor(row),
+                                                    saved[QStringLiteral("insert")].toInt(-1));
+        // Only onto a plugin the audio thread may set, whatever the file says.
+        if (slot >= 0 && sceneParamAllowed(insertFor(row, slot)))
           target.insert_tag = stripFor(row)->insert_tag(static_cast<size_t>(slot));
       }
       scene.targets.push_back(target);

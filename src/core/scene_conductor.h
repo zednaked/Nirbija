@@ -27,13 +27,23 @@ struct SceneTarget {
     Gate,     // the strip's scene gate, on or off
     Level,    // the fader, linear gain
     Pattern,  // a step sequencer's pattern, 0-15
+    Param,    // a plugin parameter, in the plugin's own range
   };
   What what = What::Gate;
   bool bus = false;
+  // A parameter that only takes whole values (a mode, a division) jumps on
+  // the bar line; every other one walks over the fade.
+  bool stepped = false;
   uint16_t strip = 0;       // graph slot
-  uint32_t insert_tag = 0;  // Pattern only: the sequencer, by chain tag
+  uint32_t insert_tag = 0;  // Pattern and Param: the plugin, by chain tag
+  uint32_t param = 0;       // Param: its id
   float value = 0.0f;
 };
+
+// Only a plugin whose set_parameter is a plain store may be reached from the
+// audio thread: the built-in ones and LV2 (a control port). The UI builds
+// Param targets for nothing else; CLAP and VST3 need a queue of their own
+// first (design/scenes.md, phase 3).
 
 // Built whole on the UI thread and never written again once published: the
 // audio thread reads it without a lock for as long as it is live.
@@ -85,7 +95,9 @@ class SceneConductor {
   // The player took a control: the scene stops walking it until the next
   // change. Only a level has anything to stop; a gate or a pattern is set
   // once, on the line.
-  void hand(bool bus, size_t strip, SceneTarget::What what);
+  // `tag` and `param` name the plugin parameter for a Param hand.
+  void hand(bool bus, size_t strip, SceneTarget::What what, uint32_t tag = 0,
+            uint32_t param = 0);
 
   // Once per block, after the transport is known and before the graph
   // renders, so a bar line inside this block is acted on in this block.
@@ -102,7 +114,24 @@ class SceneConductor {
     uint64_t length = 0;  // samples
   };
 
+  // A plugin parameter on its way somewhere, found again by tag each block
+  // so a plugin removed mid-fade simply stops being walked.
+  struct ParamRamp {
+    bool active = false;
+    bool bus = false;
+    uint16_t strip = 0;
+    uint32_t tag = 0;
+    uint32_t param = 0;
+    float from = 0.0f;
+    float to = 0.0f;
+    uint64_t start = 0;
+    uint64_t length = 0;
+  };
+  static constexpr size_t kMaxParamRamps = 256;
+
   static ChannelStrip* strip_of(AudioGraph& graph, bool bus, size_t index);
+  ParamRamp* param_ramp_for(const SceneTarget& target, bool claim);
+  void walk_params(AudioGraph& graph, uint32_t frames);
   LevelRamp* ramp_of(bool bus, size_t index);
   void at_line(AudioGraph& graph, const SceneTable& table, int64_t line,
                uint32_t frame, double fade_unit_samples);
@@ -142,6 +171,7 @@ class SceneConductor {
   int prepared_ = kNone;            // whose patterns wait in the sequencers
   std::array<LevelRamp, kMaxChannels> channel_ramps_{};
   std::array<LevelRamp, kMaxBuses> bus_ramps_{};
+  std::array<ParamRamp, kMaxParamRamps> param_ramps_{};
 };
 
 }  // namespace nirbija

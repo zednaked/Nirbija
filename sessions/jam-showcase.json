@@ -72,6 +72,13 @@
           "bypassed": false,
           "postFader": false,
           "state": "TkpTTVAwMgrNzEw/AAAAAAAAAAAQAAAAJAAAAAEAAAAAAIA/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAPA/AAAAAAAAAAAAAAAAgIjlQAcAAAA4MDggU3ViIgAAAHBhY2tzLzgwOC10cmFwL3NhbXBsZXMvODA4LXN1Yi53YXYmAAAAAQAAAAAAgD8AAAAAAAAAAAAAAAAAAAAAAAAAAAAA8D8AAAAAAAAAAAAAAACAiOVACgAAAFRyYXAgU25hcmUlAAAAcGFja3MvODA4LXRyYXAvc2FtcGxlcy90cmFwLXNuYXJlLndhdioAAAABAAAAAACAPwAAAAAAAAAAAAAAAAAAAAAAAAAAAADwPwAAAAAAAAAAAAAAAICI5UAJAAAAVGlnaHQgSGF0JAAAAHBhY2tzLzgwOC10cmFwL3NhbXBsZXMvdGlnaHQtaGF0Lndhdi4AAAABAAAAAACAPwAAAAAAAAAAAAAAAAAAAAAAAAAAAADwPwAAAAAAAAAAAAAAAICI5UAKAAAAU2l6emxlIEhhdCUAAABwYWNrcy84MDgtdHJhcC9zYW1wbGVzL3NpenpsZS1oYXQud2F2JwAAAAEAAAAAAIA/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAPA/AAAAAAAAAAAAAAAAgIjlQAgAAABCaWcgQ2xhcCMAAABwYWNrcy84MDgtdHJhcC9zYW1wbGVzL2JpZy1jbGFwLndhdiUAAAABAAAAAACAPwAAAAAAAAAAAAAAAAAAAAAAAAAAAADwPwAAAAAAAAAAAAAAAICI5UAFAAAAQ2xpY2sgAAAAcGFja3MvODA4LXRyYXAvc2FtcGxlcy9jbGljay53YXYpAAAAAQAAAAAAgD8AAAAAAAAAAAAAAAAAAAAAAAAAAAAA8D8AAAAAAAAAAAAAAACAiOVABwAAAFN1YiBUb20iAAAAcGFja3MvODA4LXRyYXAvc2FtcGxlcy9zdWItdG9tLndhdjgAAAABAAAAAACAPwAAAAAAAAAAAAAAAAAAAAAAAAAAAADwPwAAAAAAAAAAAAAAAICI5UAEAAAAQmxpcB8AAABwYWNrcy84MDgtdHJhcC9zYW1wbGVzL2JsaXAud2F2MQAAAAEAAAAAAIA/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAPA/AAAAAAAAAAAAAAAAgIjlQAUAAABDcmFzaAAAAAAzAAAAAQAAAAAAgD8AAAAAAAAAAAAAAAAAAAAAAAAAAAAA8D8AAAAAAAAAAAAAAACAiOVABAAAAFJpZGUAAAAALwAAAAEAAAAAAIA/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAPA/AAAAAAAAAAAAAAAAgIjlQAcAAABNaWQgVG9tAAAAACsAAAABAAAAAACAPwAAAAAAAAAAAAAAAAAAAAAAAAAAAADwPwAAAAAAAAAAAAAAAICI5UAHAAAATG93IFRvbQAAAAAtAAAAAQAAAAAAgD8AAAAAAAAAAAAAAAAAAAAAAAAAAAAA8D8AAAAAAAAAAAAAAACAiOVACAAAAEhpZ2ggVG9tAAAAACgAAAABAAAAAACAPwAAAAAAAAAAAAAAAAAAAAAAAAAAAADwPwAAAAAAAAAAAAAAAICI5UAHAAAARS1TbmFyZQAAAAA2AAAAAQAAAAAAgD8AAAAAAAAAAAAAAAAAAAAAAAAAAAAA8D8AAAAAAAAAAAAAAACAiOVACgAAAFRhbWJvdXJpbmUAAAAANQAAAAEAAAAAAIA/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAPA/AAAAAAAAAAAAAAAAgIjlQAkAAABSaWRlIEJlbGwAAAAAAQAAAA=="
+        },
+        {
+          "format": "Internal",
+          "uid": "nirbija.fxpad",
+          "bypassed": false,
+          "postFader": false,
+          "state": "MAowLjAKMC4wCjAuMAowLjAKMC4wCjAuMAowLjAKMC4wCjAuMAowLjAKMC4wCjAuMAowLjAKMC4wCjAuMAowLjAK"
         }
       ],
       "sends": [
@@ -152,6 +159,13 @@
           "uid": "https://thewavewarden.com/odin2",
           "bypassed": false,
           "postFader": false
+        },
+        {
+          "format": "Internal",
+          "uid": "nirbija.fxpad",
+          "bypassed": false,
+          "postFader": false,
+          "state": "MAowLjAKMC4wCjAuMAowLjAKMC4wCjAuMAowLjAKLTAuODUKMC4wCjAuMAowLjAKMC4wCjAuMAowLjAKMC4wCjAuMAo="
         }
       ],
       "sends": [
@@ -205,6 +219,13 @@
           "uid": "org.surge-synth-team.surge-xt",
           "bypassed": false,
           "postFader": false
+        },
+        {
+          "format": "Internal",
+          "uid": "nirbija.fxpad",
+          "bypassed": false,
+          "postFader": false,
+          "state": "MAowLjAKMC4wCjAuMAowLjAKMC4wCjAuMAowLjAKMC4wCjAuMAowLjAKMC4wCjAuMAowLjAKMC4wCjAuMAowLjAK"
         }
       ],
       "sends": [
@@ -354,6 +375,41 @@
             "strip": "5ce0000000000003",
             "what": "gate",
             "value": 1.0
+          },
+          {
+            "strip": "5ce0000000000004",
+            "what": "param",
+            "insert": 3,
+            "id": 7,
+            "value": -0.85
+          },
+          {
+            "strip": "5ce0000000000007",
+            "what": "param",
+            "insert": 0,
+            "id": 4,
+            "value": 0.9
+          },
+          {
+            "strip": "5ce0000000000002",
+            "what": "param",
+            "insert": 2,
+            "id": 7,
+            "value": 0.0
+          },
+          {
+            "strip": "5ce0000000000002",
+            "what": "param",
+            "insert": 2,
+            "id": 10,
+            "value": 0.0
+          },
+          {
+            "strip": "5ce0000000000005",
+            "what": "param",
+            "insert": 4,
+            "id": 11,
+            "value": 0.0
           }
         ]
       },
@@ -388,6 +444,27 @@
             "strip": "5ce0000000000005",
             "what": "level",
             "value": 0.158489
+          },
+          {
+            "strip": "5ce0000000000002",
+            "what": "param",
+            "insert": 2,
+            "id": 7,
+            "value": 0.4
+          },
+          {
+            "strip": "5ce0000000000004",
+            "what": "param",
+            "insert": 3,
+            "id": 7,
+            "value": -0.5
+          },
+          {
+            "strip": "5ce0000000000007",
+            "what": "param",
+            "insert": 0,
+            "id": 4,
+            "value": 0.75
           }
         ]
       },
@@ -423,6 +500,34 @@
             "strip": "5ce0000000000005",
             "what": "level",
             "value": 0.316228
+          },
+          {
+            "strip": "5ce0000000000002",
+            "what": "param",
+            "insert": 2,
+            "id": 7,
+            "value": 0.0
+          },
+          {
+            "strip": "5ce0000000000004",
+            "what": "param",
+            "insert": 3,
+            "id": 7,
+            "value": 0.0
+          },
+          {
+            "strip": "5ce0000000000005",
+            "what": "param",
+            "insert": 4,
+            "id": 11,
+            "value": 0.3
+          },
+          {
+            "strip": "5ce0000000000007",
+            "what": "param",
+            "insert": 0,
+            "id": 4,
+            "value": 0.6
           }
         ]
       },
@@ -463,6 +568,34 @@
             "strip": "5ce0000000000006",
             "what": "gate",
             "value": 1.0
+          },
+          {
+            "strip": "5ce0000000000002",
+            "what": "param",
+            "insert": 2,
+            "id": 7,
+            "value": -0.7
+          },
+          {
+            "strip": "5ce0000000000002",
+            "what": "param",
+            "insert": 2,
+            "id": 10,
+            "value": 0.55
+          },
+          {
+            "strip": "5ce0000000000004",
+            "what": "param",
+            "insert": 3,
+            "id": 13,
+            "value": 0.45
+          },
+          {
+            "strip": "5ce0000000000007",
+            "what": "param",
+            "insert": 0,
+            "id": 4,
+            "value": 0.85
           }
         ]
       },
@@ -470,7 +603,7 @@
         "name": "Roll",
         "hue": 0.0,
         "bars": 1,
-        "fade": 0,
+        "fade": 1,
         "targets": [
           {
             "strip": "5ce0000000000002",
@@ -486,6 +619,27 @@
           {
             "strip": "5ce0000000000006",
             "what": "gate",
+            "value": 0.0
+          },
+          {
+            "strip": "5ce0000000000002",
+            "what": "param",
+            "insert": 2,
+            "id": 7,
+            "value": 0.5
+          },
+          {
+            "strip": "5ce0000000000002",
+            "what": "param",
+            "insert": 2,
+            "id": 10,
+            "value": 0.0
+          },
+          {
+            "strip": "5ce0000000000004",
+            "what": "param",
+            "insert": 3,
+            "id": 13,
             "value": 0.0
           }
         ]
@@ -527,6 +681,34 @@
             "strip": "5ce0000000000005",
             "what": "level",
             "value": 0.398107
+          },
+          {
+            "strip": "5ce0000000000002",
+            "what": "param",
+            "insert": 2,
+            "id": 7,
+            "value": 0.0
+          },
+          {
+            "strip": "5ce0000000000002",
+            "what": "param",
+            "insert": 2,
+            "id": 14,
+            "value": 0.25
+          },
+          {
+            "strip": "5ce0000000000005",
+            "what": "param",
+            "insert": 4,
+            "id": 11,
+            "value": 0.45
+          },
+          {
+            "strip": "5ce0000000000007",
+            "what": "param",
+            "insert": 0,
+            "id": 4,
+            "value": 0.6
           }
         ]
       },
@@ -555,6 +737,34 @@
             "strip": "5ce0000000000003",
             "what": "gate",
             "value": 0.0
+          },
+          {
+            "strip": "5ce0000000000004",
+            "what": "param",
+            "insert": 3,
+            "id": 7,
+            "value": -0.9
+          },
+          {
+            "strip": "5ce0000000000002",
+            "what": "param",
+            "insert": 2,
+            "id": 14,
+            "value": 0.0
+          },
+          {
+            "strip": "5ce0000000000005",
+            "what": "param",
+            "insert": 4,
+            "id": 11,
+            "value": 0.8
+          },
+          {
+            "strip": "5ce0000000000007",
+            "what": "param",
+            "insert": 0,
+            "id": 4,
+            "value": 1.0
           }
         ]
       }

@@ -321,6 +321,30 @@ mudou no caminho:
 - **Ainda não desenhado:** o ponto de "a cena guarda" no slot do
   sequencer. O bloco da cena conta o padrão entre os controles que ela tem.
 
+## A fase 2, como ficou
+
+Os knobs dos plugins internos entram nas cenas: FX Pad, Drone, Arpeggiator
+e Chord, e qualquer parâmetro de um LV2. Um alvo `param` é
+`(strip, tag do insert, id, valor)`; na sessão, `{"what": "param",
+"insert": posição, "id": n, "value": v}`.
+
+- **Quem pode.** `MixerModel::sceneParamAllowed`: LV2 (store na porta de
+  controle) e os internos da lista. O Step Sequencer fica de fora - os
+  parâmetros dele que não são o padrão incluem botões (mutate, clear,
+  record) que uma cena apertaria de novo a cada linha -, e também o Looper,
+  o Sampler e o Script, que recompila as tabelas na thread da UI. CLAP e
+  VST3 continuam para a fase 3.
+- **Degrau.** Ainda sem `ParameterInfo::stepped`: para os internos, uma
+  faixa de números inteiros mais larga que 0..1 é um modo, uma divisão ou
+  uma nota, e pula na linha. LV2 anda sempre.
+- **Rampa.** Linear no valor do parâmetro, um valor por bloco, do valor que
+  o plugin tem no momento da linha até o alvo. O FX Pad já suaviza cada
+  quantidade em 8 ms por bloco, que liga os degraus.
+- **Mão.** Mexer num knob que a cena anda manda `SceneHand` com o tag e o
+  id; a rampa daquele parâmetro para.
+- **Gravar.** `setFxPad`, `setFxPadAmount`, `setDroneParam` e o
+  `setInsertParameter` genérico gravam pelo mesmo `sceneTouched`.
+
 ## Testes
 
 Todos `quick`, offline, no mesmo estilo dos que já medem o maior degrau entre

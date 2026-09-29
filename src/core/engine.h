@@ -48,6 +48,9 @@ struct EngineCommand {
   // Buses live in their own list in the graph, so the index alone is ambiguous.
   bool bus = false;
   float value = 0.0f;
+  // SceneHand on a plugin parameter: which plugin (chain tag) and which id.
+  uint32_t tag = 0;
+  uint32_t param = 0;
 };
 
 // Owns the JACK client and the live graph.

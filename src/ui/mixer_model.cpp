@@ -1077,6 +1077,7 @@ void MixerModel::setInsertParameter(int row, int slot, int id, qreal value) {
   insert->set_parameter(static_cast<uint32_t>(id), value);
   // A sequencer's pattern, switched now or queued for the bar, is what a
   // scene remembers of it.
+  sceneParamTouched(row, slot, static_cast<uint32_t>(id), static_cast<float>(value));
   if ((id == 196 || id == 197) && insertIsStepSequencer(row, slot)) {
     const int pattern = id == 196 ? static_cast<int>(std::lround(value))
                                   : static_cast<int>(std::lround(value)) - 1;
@@ -2339,6 +2340,7 @@ void MixerModel::setFxPad(int row, int slot, int pad, bool on) {
   auto* fx = dynamic_cast<FxPadInstance*>(insertFor(row, slot));
   if (fx == nullptr) return;
   fx->set_pad(pad, on);
+  sceneParamTouched(row, slot, static_cast<uint32_t>(pad), fx->pad_amount(pad));
   // Which pads are down still belongs to the session, but a pad is pressed
   // twenty times in a bar, and each press is not worth a session written a
   // second later.
@@ -2354,6 +2356,7 @@ void MixerModel::setFxPadAmount(int row, int slot, int pad, qreal amount) {
   auto* fx = dynamic_cast<FxPadInstance*>(insertFor(row, slot));
   if (fx == nullptr) return;
   fx->set_pad_amount(pad, static_cast<float>(amount));
+  sceneParamTouched(row, slot, static_cast<uint32_t>(pad), fx->pad_amount(pad));
   markDirty(false);
 }
 
@@ -2410,6 +2413,7 @@ void MixerModel::setDroneParam(int row, int slot, int id, qreal value) {
   auto* drone = dynamic_cast<DroneInstance*>(insertFor(row, slot));
   if (drone == nullptr || id < 0) return;
   drone->set_parameter(static_cast<uint32_t>(id), value);
+  sceneParamTouched(row, slot, static_cast<uint32_t>(id), static_cast<float>(value));
   // The swell is ridden all night; the session does not need writing on
   // every inch of it. A new string or a new root is the piece, and is.
   markDirty(static_cast<uint32_t>(id) != DroneInstance::Swell);

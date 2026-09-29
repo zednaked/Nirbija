@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "core/audio_graph.h"
+#include "core/fx_pad.h"
 #include "core/scene_conductor.h"
 #include "core/step_sequencer.h"
 
@@ -254,6 +255,49 @@ int main() {
     rig.run_bars(0.6);
     expect(rig.scenes.current() == 2 && raw->parameter_value(kSeqPattern) == 5.0,
            "an armed scene did not land on the next line" + at);
+  }
+
+  // --- a plugin parameter walks over the fade, a stepped one jumps -------------
+  {
+    Rig rig(110.0);
+    auto fx = std::make_unique<nirbija::FxPadInstance>();
+    nirbija::PluginInstance* raw = fx.get();
+    rig.graph.channel(rig.strip).add_insert(std::move(fx));
+    const uint32_t tag = rig.graph.channel(rig.strip).insert_tag(0);
+    auto param = [&](uint32_t id, float value, bool stepped = false) {
+      SceneTarget t;
+      t.what = SceneTarget::What::Param;
+      t.strip = static_cast<uint16_t>(rig.strip);
+      t.insert_tag = tag;
+      t.param = id;
+      t.value = value;
+      t.stepped = stepped;
+      return t;
+    };
+    const uint32_t filter = nirbija::FxPadInstance::Filter;
+    const uint32_t crush = nirbija::FxPadInstance::Crush;
+    auto table = std::make_shared<SceneTable>();
+    add_scene(*table, 1, 0, {param(filter, 0.0f), param(crush, 0.0f, true)});
+    add_scene(*table, 0, 2, {param(filter, 0.8f), param(crush, 0.5f, true)});
+    rig.scenes.publish(table);
+
+    rig.run_bars(0.9);
+    expect(raw->parameter_value(filter) == 0.0, "a parameter moved before its scene");
+    while (rig.out.size() <= rig.line_frame(1)) rig.block();
+    expect(std::fabs(raw->parameter_value(crush) - 0.5) < 1e-6,
+           "a stepped parameter did not jump on the line");
+    expect(raw->parameter_value(filter) < 0.05,
+           "a walking parameter jumped instead of starting from where it was");
+    rig.run_bars(1.0);
+    const double mid = raw->parameter_value(filter);
+    expect(mid > 0.35 && mid < 0.45,
+           "a bar into a two-bar fade the parameter is not halfway: " + std::to_string(mid));
+
+    rig.scenes.hand(false, rig.strip, SceneTarget::What::Param, tag, filter);
+    raw->set_parameter(filter, 0.1);
+    rig.run_bars(1.5);
+    expect(std::fabs(raw->parameter_value(filter) - 0.1) < 1e-6,
+           "the scene kept walking a parameter the player took");
   }
 
   // --- the list: walk, hold, stay on the last ----------------------------------

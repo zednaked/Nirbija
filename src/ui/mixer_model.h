@@ -704,6 +704,8 @@ class MixerModel : public QAbstractListModel {
       SceneTarget::What what = SceneTarget::What::Gate;
       uint32_t insert_tag = 0;
       float value = 0.0f;
+      uint32_t param = 0;    // Param only
+      bool stepped = false;  // Param only: jumps on the line
     };
     QString name;
     qreal hue = 0.58;
@@ -767,7 +769,13 @@ class MixerModel : public QAbstractListModel {
   // from the scene that is playing. `row` must follow scenes; `insert_tag`
   // is the sequencer's for a pattern.
   void sceneTouched(int row, SceneTarget::What what, float value,
-                    uint32_t insert_tag = 0);
+                    uint32_t insert_tag = 0, uint32_t param = 0, bool stepped = false);
+  // A plugin knob moved by the player: into the scene being recorded, or out
+  // of the playing scene's hands. Only for plugins the conductor may set
+  // from the audio thread (see sceneParamAllowed).
+  void sceneParamTouched(int row, int slot, uint32_t id, float value);
+  static bool sceneParamAllowed(const PluginInstance* insert);
+  static bool sceneParamStepped(const PluginInstance* insert, uint32_t id);
   int sceneMarksFor(int row) const;
   void announceSceneMarks();
   void scenesEdited();

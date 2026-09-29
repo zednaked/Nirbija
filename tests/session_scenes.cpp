@@ -35,10 +35,10 @@ QVariantMap scene(MixerModel& mixer, int index) {
   return index < list.size() ? list[index].toMap() : QVariantMap{};
 }
 
-int sequencer_row(MixerModel& mixer) {
+int plugin_row(MixerModel& mixer, const char* uid) {
   for (int i = 0; i < mixer.plugins()->rowCount(); ++i) {
     const nirbija::PluginDescriptor* descriptor = mixer.plugins()->descriptor(i);
-    if (descriptor != nullptr && descriptor->uid == "nirbija.stepseq") return i;
+    if (descriptor != nullptr && descriptor->uid == uid) return i;
   }
   return -1;
 }
@@ -77,8 +77,10 @@ int main(int argc, char* argv[]) {
     mixer.addChannel(QStringLiteral("Beat"), 2);
     mixer.addChannel(QStringLiteral("Pad"), 2);
     mixer.addChannel(QStringLiteral("Drone"), 2);
-    const int seq = sequencer_row(mixer);
+    const int seq = plugin_row(mixer, "nirbija.stepseq");
     if (seq < 0 || !mixer.addInsert(0, seq)) fail("could not load a Step Sequencer");
+    const int fx = plugin_row(mixer, "nirbija.fxpad");
+    if (fx < 0 || !mixer.addInsert(1, fx)) fail("could not load an FX Pad");
 
     // Recording with no scene makes one, and each touch lands in it once.
     mixer.setSceneRecording(true);
@@ -87,14 +89,17 @@ int main(int argc, char* argv[]) {
     mixer.setGain(0, 0.4);  // the same fader again: still one control
     mixer.toggleSceneOn(1);
     mixer.setInsertParameter(0, 0, 197, 3.0);  // queue pattern 3 (index 2)
+    mixer.setFxPadAmount(1, 0, 7, 0.3);        // the filter pad, then again:
+    mixer.setFxPadAmount(1, 0, 7, 0.6);        // one control, the last value
+    mixer.setInsertParameter(0, 0, 1, 0.5);    // a sequencer knob: not a scene's
     mixer.setFollowScenes(2, false);
     mixer.setGain(2, 0.1);  // ignores scenes: not recorded
     mixer.setSceneRecording(false);
     mixer.setGain(1, 0.9);  // not recording: not recorded
 
-    if (scene(mixer, 0)["count"].toInt() != 3)
+    if (scene(mixer, 0)["count"].toInt() != 4)
       fail("the first scene holds " + std::to_string(scene(mixer, 0)["count"].toInt()) +
-           " controls, not 3");
+           " controls, not 4");
     // Marks follow the scene in view; with nothing playing and not
     // recording there is none, so nothing is marked.
     if (mixer.currentScene() < 0 && field(mixer, 0, MixerModel::SceneMarksRole).toInt() != 0)
@@ -130,7 +135,7 @@ int main(int argc, char* argv[]) {
     } else {
       if (scene(mixer, 0)["name"].toString() != QStringLiteral("Intro"))
         fail("a scene's name was not kept");
-      if (scene(mixer, 0)["count"].toInt() != 3) fail("a scene lost what it holds");
+      if (scene(mixer, 0)["count"].toInt() != 4) fail("a scene lost what it holds");
       if (scene(mixer, 0)["lost"].toInt() != 0)
         fail("a scene's controls no longer find their strips: " +
              std::to_string(scene(mixer, 0)["lost"].toInt()));
@@ -147,14 +152,18 @@ int main(int argc, char* argv[]) {
     mixer.removeScene(0);
     if (mixer.scenes().size() != 1) fail("remove did not remove the scene");
     mixer.undo();
-    if (mixer.scenes().size() != 2 || scene(mixer, 0)["count"].toInt() != 3)
+    if (mixer.scenes().size() != 2 || scene(mixer, 0)["count"].toInt() != 4)
       fail("undo did not bring the scene back with its controls");
 
     // Stopped: an armed scene lands at once, and the strips follow it.
     mixer.setGain(0, 1.0);
     mixer.toggleSceneOn(1);  // on again, by hand
+    mixer.setFxPadAmount(1, 0, 7, 0.0);
     mixer.armScene(0);
     settle();
+    if (std::abs(mixer.fxPadAmount(1, 0, 7) - 0.6) > 1e-4)
+      fail("the FX Pad knob did not follow the scene: " +
+           std::to_string(mixer.fxPadAmount(1, 0, 7)));
     if (mixer.currentScene() != 0) fail("an armed scene did not start with the transport stopped");
     if (std::abs(field(mixer, 0, MixerModel::GainRole).toDouble() - 0.4) > 1e-4)
       fail("the fader did not follow the scene: " +

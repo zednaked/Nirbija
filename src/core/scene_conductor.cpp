@@ -48,9 +48,29 @@ void SceneConductor::arm(int scene) {
   pub_armed_.store(armed_, std::memory_order_relaxed);
 }
 
-void SceneConductor::hand(bool bus, size_t strip, SceneTarget::What what) {
-  if (what != SceneTarget::What::Level) return;
-  if (LevelRamp* ramp = ramp_of(bus, strip)) ramp->active = false;
+void SceneConductor::hand(bool bus, size_t strip, SceneTarget::What what,
+                          uint32_t tag, uint32_t param) {
+  if (what == SceneTarget::What::Level) {
+    if (LevelRamp* ramp = ramp_of(bus, strip)) ramp->active = false;
+    return;
+  }
+  if (what != SceneTarget::What::Param) return;
+  for (ParamRamp& ramp : param_ramps_)
+    if (ramp.active && ramp.bus == bus && ramp.strip == strip && ramp.tag == tag &&
+        ramp.param == param)
+      ramp.active = false;
+}
+
+SceneConductor::ParamRamp* SceneConductor::param_ramp_for(const SceneTarget& target,
+                                                          bool claim) {
+  ParamRamp* free = nullptr;
+  for (ParamRamp& ramp : param_ramps_) {
+    if (ramp.active && ramp.bus == target.bus && ramp.strip == target.strip &&
+        ramp.tag == target.insert_tag && ramp.param == target.param)
+      return &ramp;
+    if (!ramp.active && free == nullptr) free = &ramp;
+  }
+  return claim ? free : nullptr;
 }
 
 ChannelStrip* SceneConductor::strip_of(AudioGraph& graph, bool bus, size_t index) {
@@ -129,6 +149,7 @@ void SceneConductor::run(AudioGraph& graph, const TransportInfo& transport,
   }
 
   walk_levels(graph, frames);
+  walk_params(graph, frames);
   clock_ += frames;
   publish_state();
   generation_.fetch_add(1, std::memory_order_release);
@@ -219,6 +240,31 @@ void SceneConductor::start(AudioGraph& graph, const SceneTable& table, int scene
         ramp->length = static_cast<uint64_t>(fade_samples);
         break;
       }
+      case SceneTarget::What::Param: {
+        PluginInstance* plugin = strip->insert_by_tag(target.insert_tag);
+        if (plugin == nullptr) break;
+        if (target.stepped || fade_samples < 1.0) {
+          // On the line, and nothing still walking it the other way.
+          if (ParamRamp* ramp = param_ramp_for(target, false)) ramp->active = false;
+          plugin->set_parameter(target.param, target.value);
+          break;
+        }
+        ParamRamp* ramp = param_ramp_for(target, true);
+        if (ramp == nullptr) {  // more walks at once than there is room for
+          plugin->set_parameter(target.param, target.value);
+          break;
+        }
+        ramp->active = true;
+        ramp->bus = target.bus;
+        ramp->strip = target.strip;
+        ramp->tag = target.insert_tag;
+        ramp->param = target.param;
+        ramp->from = static_cast<float>(plugin->parameter_value(target.param));
+        ramp->to = target.value;
+        ramp->start = clock_ + frame;
+        ramp->length = static_cast<uint64_t>(fade_samples);
+        break;
+      }
       case SceneTarget::What::Pattern: {
         PluginInstance* seq = strip->insert_by_tag(target.insert_tag);
         if (seq == nullptr) break;
@@ -289,6 +335,28 @@ void SceneConductor::walk_levels(AudioGraph& graph, uint32_t frames) {
   for (size_t i = 0; i < kMaxChannels; ++i)
     walk(channel_ramps_[i], false, i, channel_writes_[i]);
   for (size_t i = 0; i < kMaxBuses; ++i) walk(bus_ramps_[i], true, i, bus_writes_[i]);
+}
+
+void SceneConductor::walk_params(AudioGraph& graph, uint32_t frames) {
+  const uint64_t end = clock_ + frames;
+  for (ParamRamp& ramp : param_ramps_) {
+    if (!ramp.active || end <= ramp.start) continue;
+    ChannelStrip* strip = strip_of(graph, ramp.bus, ramp.strip);
+    PluginInstance* plugin = strip != nullptr ? strip->insert_by_tag(ramp.tag) : nullptr;
+    if (plugin == nullptr) {
+      ramp.active = false;
+      continue;
+    }
+    // Where the fade is at the end of this block, like the fader: a plugin
+    // that smooths its own parameters (the FX Pad does, over 8 ms) turns the
+    // block's steps into a line.
+    const double t = std::min(1.0, static_cast<double>(end - ramp.start) /
+                                       static_cast<double>(std::max<uint64_t>(1, ramp.length)));
+    const float value = t >= 1.0 ? ramp.to
+                                 : ramp.from + (ramp.to - ramp.from) * static_cast<float>(t);
+    plugin->set_parameter(ramp.param, value);
+    if (t >= 1.0) ramp.active = false;
+  }
 }
 
 void SceneConductor::publish_state() {

@@ -812,7 +812,8 @@ void Engine::drain_commands() {
     }
     if (command.kind == EngineCommand::Kind::SceneHand) {
       scenes_.hand(command.bus, command.channel,
-                   static_cast<SceneTarget::What>(static_cast<int>(command.value)));
+                   static_cast<SceneTarget::What>(static_cast<int>(command.value)),
+                   command.tag, command.param);
       continue;
     }
     if (command.bus) {

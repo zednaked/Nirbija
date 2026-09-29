@@ -8,23 +8,28 @@ itself; Alt+1..7 jumps; Hold (Alt+H) stays in a part as long as you like.
     Drone   nirbija.drone, glide and space. Ignores scenes (dashed stripe):
             the bed under the whole song, yours to play.
     Drums   nirbija.stepseq (four patterns: pulse, groove, half-time,
-            ratchet roll) -> nirbija.sampler on the 808 Trap pack. Plays into
-            the Loop strip below it rather than the master.
+            ratchet roll) -> nirbija.sampler on the 808 Trap pack ->
+            nirbija.fxpad. Plays into the Loop strip below it rather than
+            the master.
     Loop    nirbija.looper, empty, count-in on -> nirbija.fxpad. Press Rec
             during Groove to catch a bar of the drums; the FX pad is there to
             bend it.
     Chords  nirbija.stepseq (held chords, then stabs) -> nirbija.chord, one
-            key per chord (Am F C G, by degree in C major) -> Odin2 (LV2).
+            key per chord (Am F C G, by degree in C major) -> Odin2 (LV2)
+            -> nirbija.fxpad.
     Arp     nirbija.stepseq holding the triads -> nirbija.arp (up-down, two
             octaves, latch) -> nirbija.script (Lua: a softer touch, and
-            nothing above C6) -> Surge XT (CLAP).
+            nothing above C6) -> Surge XT (CLAP) -> nirbija.fxpad.
     Keys    nirbija.keyboard -> Odin2: type on the computer keyboard and
             play over it (A W S E D F T G Y H U J K). Follows scenes: off
             until Break, where the song leaves room for it.
     Room    bus, nirbija.fxpad reverb. Hall: bus, Dragonfly Hall (LV2).
 
-The scenes switch strips on and off with a fade, walk faders in decibels
-and change the sequencers' patterns on the bar line. Nothing outside the
+The scenes switch strips on and off with a fade, walk faders in decibels,
+change the sequencers' patterns on the bar line and ride the FX Pads: the
+chords behind a low-pass that opens and closes again, the drums through a
+high-pass, a dub echo in the Break and a one-bar filter riser into the Peak,
+the arp's delay and the room growing as the song leaves. Nothing outside the
 host is needed but Odin2, Surge XT and Dragonfly; a strip whose plugin is
 missing still loads, named on screen, and the song still plays.
 
@@ -308,6 +313,12 @@ def drone_state(**overrides: float) -> str:
     return b64("\n".join(lines) + "\n")
 
 
+# FX Pad pads by index (fx_pad.h). The amount is also the mix: at 0 a pad is
+# out of the signal. Filter, Pitch, Comb and Ring go both ways - Filter below
+# zero is a low-pass closing as it goes down, above zero a high-pass.
+REVERB, FILTER, DUB, DELAY, VIBRO, DIRTY = 4, 7, 10, 11, 13, 14
+
+
 def fxpad(amounts_by_pad: dict[int, float]) -> str:
     amounts = [0.0] * 16
     for pad, amount in amounts_by_pad.items():
@@ -326,6 +337,16 @@ def level(strip, db):
             "value": 0.0 if db is None else round(10 ** (db / 20.0), 6)}
 
 
+# Where each strip's FX Pad sits in its chain.
+FX_SLOT = {"Drums": 2, "Loop": 1, "Chords": 3, "Arp": 4, "Room": 0}
+
+
+def fx(strip, pad, amount):
+    """One FX Pad knob. The scene walks it over its fade like a fader."""
+    return {"strip": UIDS[strip], "what": "param", "insert": FX_SLOT[strip],
+            "id": pad, "value": float(amount)}
+
+
 def pattern(strip, index):
     # The sequencer is the first plugin on both strips that change pattern.
     return {"strip": UIDS[strip], "what": "pattern", "insert": 0,
@@ -335,36 +356,60 @@ def pattern(strip, index):
 HUES = [0.58, 0.08, 0.83, 0.47, 0.00, 0.30, 0.72]
 
 SCENES = [
+    # Dark and far: the chords behind a closed low-pass, a big room.
     ("Dawn", 8, 0, [
         gate("Drums", False), gate("Arp", False), gate("Keys", False),
         gate("Chords", True), level("Chords", -15), pattern("Chords", 0),
         gate("Loop", True),
+        fx("Chords", FILTER, -0.85), fx("Room", REVERB, 0.9),
+        fx("Drums", FILTER, 0.0), fx("Drums", DUB, 0.0),
+        fx("Arp", DELAY, 0.0),
     ]),
+    # The kick arrives thin, through a high-pass; the chords start to open.
     ("Pulse", 8, 2, [
         gate("Drums", True), level("Drums", -12), pattern("Drums", 0),
         gate("Arp", True), level("Arp", -16),
+        fx("Drums", FILTER, 0.4), fx("Chords", FILTER, -0.5),
+        fx("Room", REVERB, 0.75),
     ]),
+    # Everything open.
     ("Groove", 16, 1, [
         level("Drums", -10), pattern("Drums", 1),
         level("Chords", -14), pattern("Chords", 1),
         level("Arp", -10),
+        fx("Drums", FILTER, 0.0), fx("Chords", FILTER, 0.0),
+        fx("Arp", DELAY, 0.3), fx("Room", REVERB, 0.6),
     ]),
+    # The floor drops: drums muffled into a dub echo, the chords wobble.
     ("Break", 8, 4, [
         level("Drums", -14), pattern("Drums", 2),
         level("Chords", -10), pattern("Chords", 0),
         gate("Arp", False), gate("Keys", True),
+        fx("Drums", FILTER, -0.7), fx("Drums", DUB, 0.55),
+        fx("Chords", VIBRO, 0.45), fx("Room", REVERB, 0.85),
     ]),
-    ("Roll", 1, 0, [
+    # One bar of riser: over that bar the drums climb from muffled, through
+    # open, to a thin high-pass, the roll gets louder and the dub lets go.
+    ("Roll", 1, 1, [
         level("Drums", -7), pattern("Drums", 3), gate("Keys", False),
+        fx("Drums", FILTER, 0.5), fx("Drums", DUB, 0.0),
+        fx("Chords", VIBRO, 0.0),
     ]),
+    # Back in, harder: a little dirt on the drums, the arp echoing.
     ("Peak", 16, 1, [
         level("Drums", -9), pattern("Drums", 1),
         level("Chords", -13), pattern("Chords", 1),
         gate("Arp", True), level("Arp", -8),
+        fx("Drums", FILTER, 0.0), fx("Drums", DIRTY, 0.25),
+        fx("Arp", DELAY, 0.45), fx("Room", REVERB, 0.6),
     ]),
+    # Eight bars: everything leaves, the chords close down into the dark,
+    # the room and the arp's echo grow as the dry sound goes.
     ("Fade out", 0, 8, [
         gate("Drums", False), gate("Chords", False), gate("Arp", False),
         gate("Loop", False),
+        fx("Chords", FILTER, -0.9), fx("Drums", DIRTY, 0.0),
+        fx("Arp", DELAY, 0.8), fx("Room", REVERB, 1.0),
     ]),
 ]
 
@@ -399,6 +444,7 @@ def main() -> None:
                 insert("Internal", "nirbija.stepseq",
                        stepseq(DRUM_LANES, DRUM_PATTERNS)),
                 insert("Internal", "nirbija.sampler", sampler_blob()),
+                insert("Internal", "nirbija.fxpad", fxpad({})),
             ], sends=[send("Room", 0.18)]),
             channel("Loop", gain=0.9, inserts=[
                 insert("Internal", "nirbija.looper"),
@@ -409,6 +455,7 @@ def main() -> None:
                        stepseq(CHORD_LANES, CHORD_PATTERNS)),
                 insert("Internal", "nirbija.chord", chord_state()),
                 insert(*ODIN2),
+                insert("Internal", "nirbija.fxpad", fxpad({FILTER: -0.85})),
             ], sends=[send("Hall", 0.3)]),
             channel("Arp", gain=0.16, pan=0.2, on=False, inserts=[
                 insert("Internal", "nirbija.stepseq",
@@ -416,6 +463,7 @@ def main() -> None:
                 insert("Internal", "nirbija.arp", arp_state()),
                 insert("Internal", "nirbija.script", script_state()),
                 insert(*SURGE),
+                insert("Internal", "nirbija.fxpad", fxpad({})),
             ], sends=[send("Room", 0.25), send("Hall", 0.2)]),
             channel("Keys", gain=0.5, on=False, inserts=[
                 insert("Internal", "nirbija.keyboard"),
