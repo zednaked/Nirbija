@@ -10,8 +10,8 @@ second launch on.
 
 A song is now a row of scenes across the top of the mixer, each as wide as
 it is long. A scene holds what changes from one part to the next - which
-strips play, where their faders sit, which pattern each Step Sequencer is on
-- and how many bars the way there takes. The list walks on by itself at the
+strips play, where their faders sit, which pattern each Step Sequencer is on,
+and how many bars the way there takes. The list walks on by itself at the
 end of each scene; a click or Alt+1…9 plays another from the next bar line,
 Hold repeats the one playing, and the last one stays.
 
