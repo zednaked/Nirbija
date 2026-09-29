@@ -1058,6 +1058,21 @@ class Vst3Instance : public PluginInstance {
     }
     if (component.empty()) return false;
 
+    // A state may arrive before activate() - a session restore sets it while
+    // the instance is still quiet. The interface allows that, but some
+    // plugins derive things from the sample rate as they read it: LSP's
+    // Compressor MidSide divides by it and dies of SIGFPE. setupProcessing is
+    // legal on an inactive component and activate() repeats it with the real
+    // numbers, so they get a rate to divide by first.
+    if (!active_.load(std::memory_order_acquire) && processor_ != nullptr) {
+      Vst::ProcessSetup setup{};
+      setup.processMode = Vst::kRealtime;
+      setup.symbolicSampleSize = Vst::kSample32;
+      setup.maxSamplesPerBlock = static_cast<int32>(max_block_ > 0 ? max_block_ : 1024);
+      setup.sampleRate = sample_rate_hint_;
+      processor_->setupProcessing(setup);
+    }
+
     MemStream stream(&component);
     if (component_->setState(&stream) != kResultOk) return false;
     if (controller_ != nullptr) {

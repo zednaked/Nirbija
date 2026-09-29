@@ -288,7 +288,8 @@ QVector<quint32> MixerModel::insertDetailsSignature(int row) const {
   }
   for (const ChannelUi::MissingInsert& ghost : channel.missing)
     signature.append(0x80000000u ^ static_cast<quint32>(qHash(ghost.uid)) ^
-                     (ghost.bypassed ? 2u : 0u) ^ (ghost.post_fader ? 4u : 0u));
+                     (ghost.bypassed ? 2u : 0u) ^ (ghost.post_fader ? 4u : 0u) ^
+                     (ghost.quarantined ? 8u : 0u));
   return signature;
 }
 
@@ -335,10 +336,12 @@ QVariantList MixerModel::buildInsertDetails(int row) const {
   // shows the uid struck through; the entry is kept so a save writes it back.
   for (const ChannelUi::MissingInsert& ghost : channel.missing) {
     QVariantMap entry;
-    entry.insert(QStringLiteral("name"), ghost.uid.section('/', -1));
+    entry.insert(QStringLiteral("name"),
+                 ghost.name.isEmpty() ? ghost.uid.section('/', -1) : ghost.name);
     entry.insert(QStringLiteral("uid"), ghost.uid);
     entry.insert(QStringLiteral("filled"), true);
     entry.insert(QStringLiteral("missing"), true);
+    entry.insert(QStringLiteral("quarantined"), ghost.quarantined);
     entry.insert(QStringLiteral("bypassed"), ghost.bypassed);
     entry.insert(QStringLiteral("postFader"), ghost.post_fader);
     details.append(entry);

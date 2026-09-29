@@ -136,6 +136,10 @@ if(NIRBIJA_UI)
     NIRBIJA_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
   add_test(NAME session_roundtrip COMMAND nirbija_session_roundtrip)
 
+  add_executable(nirbija_session_quarantine session_quarantine.cpp)
+  target_link_libraries(nirbija_session_quarantine PRIVATE nirbija_ui)
+  add_test(NAME session_quarantine COMMAND nirbija_session_quarantine)
+
   add_executable(nirbija_session_scenes session_scenes.cpp)
   target_link_libraries(nirbija_session_scenes PRIVATE nirbija_ui)
   add_test(NAME session_scenes COMMAND nirbija_session_scenes)
@@ -260,7 +264,7 @@ foreach(test IN ITEMS engine_smoke midi_jack midi_clock_follow recorder_take)
   endif()
 endforeach()
 foreach(test IN ITEMS ui_smoke session_dirty session_autosave_live session_undo_live
-                      session_roundtrip session_scenes)
+                      session_roundtrip session_quarantine session_scenes)
   if(TEST ${test})
     set_tests_properties(${test} PROPERTIES LABELS "quick;ui" TIMEOUT 300
                          SKIP_RETURN_CODE 77)

@@ -242,6 +242,9 @@ class MixerModel : public QAbstractListModel {
   // `pluginIndex` refers to the row of the shared PluginListModel.
   Q_INVOKABLE bool addInsert(int row, int pluginIndex);
   Q_INVOKABLE void removeInsert(int row, int slot);
+  // A plugin held off because it took the mixer down while a session was
+  // being restored: loads it again, saved state and all, as a live insert.
+  Q_INVOKABLE void retryInsert(int row, int slot);
 
   // Moves an insert one place up or down the chain. `direction` is -1 or +1.
   Q_INVOKABLE void moveInsert(int row, int slot, int direction);
@@ -686,6 +689,10 @@ class MixerModel : public QAbstractListModel {
       QString state;  // base64, verbatim from the file
       bool bypassed = false;
       bool post_fader = false;
+      // Installed, but it crashed the mixer while a session was restored and
+      // is kept off until asked for again; see loadSession().
+      bool quarantined = false;
+      QString name;  // the plugin's own name, when it is installed
     };
     QVector<MissingInsert> missing;
     // [{ bus: int, name: QString, level: qreal }], in slot order.
@@ -824,6 +831,7 @@ class MixerModel : public QAbstractListModel {
   int restoreChannel(const QJsonObject& entry, QStringList* missing,
                      const QString& sample_dir = {});
   void restoreChannelLinks(int row, const QJsonObject& entry);
+  void markBootStep(const QString& step) const;
   // Bindings are stored on the channel, not by graph slot: those numbers
   // are issued fresh every time the mixer starts, and a map that kept one
   // would land on the wrong strip — or on none.
@@ -862,6 +870,12 @@ class MixerModel : public QAbstractListModel {
   // Restoring fires the same setters the UI does; without this every one of
   // them would queue another save of what was just loaded.
   bool restoring_ = false;
+  // The startup restore's crash guard: a marker beside the session naming the
+  // insert being loaded, and what the marker left behind by a launch that
+  // died there said. See loadSession().
+  QString boot_marker_;
+  QStringList boot_suspects_;
+  int restore_channel_index_ = -1;
   // Held for the life of the process; the kernel drops it if we die badly.
   int session_fd_ = -1;
   // Editor windows stay owned here so closing the mixer closes them too. The

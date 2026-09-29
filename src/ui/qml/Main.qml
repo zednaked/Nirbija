@@ -196,7 +196,18 @@ ApplicationWindow {
 
     // A plugin the session names and this machine does not have: nothing to
     // open, nothing to bypass - only the entry to keep or to let go of.
-    function missingInsertMenu(row, slot, uid) {
+    function missingInsertMenu(row, slot, uid, quarantined) {
+        // Installed, but it crashed the mixer while the session opened: held
+        // off with its settings until asked for again.
+        if (quarantined)
+            return [
+                { label: qsTr("Crashed while the session opened"), enabled: false,
+                  action: () => {} },
+                { label: qsTr("Try again"),
+                  action: () => Mixer.retryInsert(row, slot) },
+                { label: qsTr("Forget it"), danger: true,
+                  action: () => Mixer.removeInsert(row, slot) }
+            ]
         return [
             { label: qsTr("Not installed here: %1").arg(uid), enabled: false,
               action: () => {} },
@@ -622,7 +633,8 @@ ApplicationWindow {
                         if (detail.missing === true) {
                             slotMenu.openAt(item,
                                             window.missingInsertMenu(strip.index, slot,
-                                                                     detail.uid),
+                                                                     detail.uid,
+                                                                     detail.quarantined === true),
                                             detail.name)
                             return
                         }

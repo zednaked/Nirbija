@@ -259,6 +259,7 @@ QJsonObject MixerModel::writeChannel(const ChannelUi& channel, size_t row,
     saved[QStringLiteral("uid")] = ghost.uid;
     saved[QStringLiteral("bypassed")] = ghost.bypassed;
     saved[QStringLiteral("postFader")] = ghost.post_fader;
+    if (ghost.quarantined) saved[QStringLiteral("quarantined")] = true;
     if (!ghost.state.isEmpty()) saved[QStringLiteral("state")] = ghost.state;
     inserts.append(saved);
   }
@@ -414,7 +415,74 @@ bool MixerModel::writeJson(const QString& path, const QJsonObject& root) {
   return true;
 }
 
-void MixerModel::loadSession() { readSession(sessionPath()); }
+// A plugin that crashes while its saved state is read takes the whole mixer
+// down, and the next launch reads the same session and meets the same plugin:
+// the app opens and closes forever. So the startup restore leaves a marker
+// beside the session naming each insert as it is loaded, and removes it once
+// the restore is done. A launch that finds the marker still there knows which
+// insert killed the last one, and keeps that insert off - state and all, as a
+// ghost in its slot, which the save then writes back marked, so it stays off
+// until someone asks for it again. Only the instance that holds the session
+// lock does this: a read-only second instance must not blame anyone.
+void MixerModel::loadSession() {
+  const QString path = sessionPath();
+  if (session_fd_ >= 0) {
+    boot_marker_ = path + QStringLiteral(".loading");
+    QFile left(boot_marker_);
+    if (left.open(QIODevice::ReadOnly)) {
+      const QString suspect = QString::fromUtf8(left.readAll()).trimmed();
+      left.close();
+      if (!suspect.isEmpty()) {
+        boot_suspects_.append(suspect);
+        qWarning("session: the last launch died loading %s; keeping it off",
+                 qPrintable(suspect));
+      }
+    }
+  }
+  readSession(path);
+  if (!boot_marker_.isEmpty()) {
+    QFile::remove(boot_marker_);
+    boot_marker_.clear();
+  }
+}
+
+void MixerModel::retryInsert(int row, int slot) {
+  if (row < 0 || row >= static_cast<int>(channels_.size())) return;
+  const int ghost = slot - channels_[row].inserts.size();
+  if (ghost < 0 || ghost >= channels_[row].missing.size()) return;
+  const ChannelUi::MissingInsert held = channels_[row].missing.at(ghost);
+  if (!held.quarantined) return;
+
+  PluginFormat format = PluginFormat::Lv2;
+  if (!format_from_name(held.format, &format)) return;
+  const int plugin_row = plugins_->rowFor(format, held.uid.toStdString());
+  if (plugin_row < 0) return;
+
+  // The ghost goes only once the plugin is in: if it takes the mixer down
+  // again, the file on disk still has it held off.
+  const QByteArray bytes = QByteArray::fromBase64(held.state.toLatin1());
+  const std::vector<uint8_t> blob(bytes.begin(), bytes.end());
+  const int placed = placeInsert(row, plugin_row, -1, &blob,
+                                 QFileInfo(sessionPath()).absolutePath());
+  if (placed < 0) return;
+  channels_[row].missing.removeAt(ghost);
+  setInsertBypassed(row, placed, held.bypassed);
+  setInsertPostFader(row, placed, held.post_fader);
+  refreshInsertDetails(row);
+  markDirty();
+}
+
+// Written before the insert is made, so a crash anywhere inside instantiate,
+// load_state or activate leaves it naming the culprit. A closed file lives in
+// the page cache and outlives the process; only the machine going down with
+// it would lose the line, and then the loop it guards against is not ours.
+void MixerModel::markBootStep(const QString& step) const {
+  if (boot_marker_.isEmpty()) return;
+  QFile marker(boot_marker_);
+  if (!marker.open(QIODevice::WriteOnly | QIODevice::Truncate)) return;
+  marker.write(step.toUtf8());
+  marker.close();
+}
 
 bool MixerModel::saveSessionAs(const QUrl& file) {
   const QString path = file.isLocalFile() ? file.toLocalFile() : file.toString();
@@ -521,8 +589,10 @@ int MixerModel::restoreChannel(const QJsonObject& entry, QStringList* missing,
   if (!midi.isEmpty()) connectSource(row, midi, true);
 
   int insert_slot = -1;
+  int saved_index = -1;
   for (const QJsonValue& slot : entry[QStringLiteral("inserts")].toArray()) {
     const QJsonObject saved = slot.toObject();
+    ++saved_index;
 
     PluginFormat format = PluginFormat::Lv2;
     if (!format_from_name(saved[QStringLiteral("format")].toString(), &format))
@@ -545,6 +615,35 @@ int MixerModel::restoreChannel(const QJsonObject& entry, QStringList* missing,
            saved[QStringLiteral("postFader")].toBool()});
       continue;
     }
+
+    // Where this insert sits in the file, which is what the crash guard in
+    // loadSession() goes by: the file is the one thing that is the same from
+    // the launch that died to the one reading it again.
+    const QString step = restore_channel_index_ < 0
+                             ? QString()
+                             : QStringLiteral("%1/%2/%3")
+                                   .arg(restore_channel_index_)
+                                   .arg(saved_index)
+                                   .arg(QString::fromStdString(uid));
+    const bool blamed = !step.isEmpty() && boot_suspects_.contains(step);
+    if (blamed || saved[QStringLiteral("quarantined")].toBool()) {
+      const PluginDescriptor* known = plugins_->descriptor(plugin_row);
+      const QString plugin_name = known != nullptr
+                                      ? QString::fromStdString(known->name)
+                                      : QString::fromStdString(uid);
+      if (blamed)
+        emit errorOccurred(
+            tr("%1 crashed Nirbija while the session was opening. It is kept "
+               "off, settings saved; its slot menu can try it again.")
+                .arg(plugin_name));
+      channels_[row].missing.append(
+          {saved[QStringLiteral("format")].toString(),
+           QString::fromStdString(uid), saved[QStringLiteral("state")].toString(),
+           saved[QStringLiteral("bypassed")].toBool(),
+           saved[QStringLiteral("postFader")].toBool(), true, plugin_name});
+      continue;
+    }
+    markBootStep(step);
 
     // The state goes in before the plugin reaches the audio thread - see
     // placeInsert - so nothing here needs the graph parked.
@@ -823,8 +922,13 @@ bool MixerModel::readSession(const QString& target) {
   rows.reserve(static_cast<size_t>(channels.size()));
   const QString sample_dir = QFileInfo(target).absolutePath();
   QStringList missing;
-  for (const QJsonValue& value : channels)
+  restore_channel_index_ = 0;
+  for (const QJsonValue& value : channels) {
     rows.push_back(restoreChannel(value.toObject(), &missing, sample_dir));
+    ++restore_channel_index_;
+  }
+  restore_channel_index_ = -1;
+  markBootStep(QString());
 
   // Destinations and sends last: both can name a bus that appears later in the
   // list, and only now is every row in place. An entry that found no room
