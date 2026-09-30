@@ -22,6 +22,7 @@
 #include "core/plugin.h"
 #include "plugin_list_model.h"
 #include "plugin_window.h"
+#include "screen_capture.h"
 
 namespace nirbija {
 
@@ -59,6 +60,10 @@ class MixerModel : public QAbstractListModel {
   Q_PROPERTY(QString masterSink READ masterSink NOTIFY routingChanged)
   Q_PROPERTY(bool playing READ playing NOTIFY transportChanged)
   Q_PROPERTY(bool recording READ recording NOTIFY recordingChanged)
+  // Film the screen with every take and join it to the master; see
+  // ScreenCapture. Kept across launches.
+  Q_PROPERTY(bool recordScreen READ recordScreen WRITE setRecordScreen
+                 NOTIFY recordScreenChanged)
   Q_PROPERTY(QString recordingLabel READ recordingLabel NOTIFY levelsChanged)
   Q_PROPERTY(qreal tempo READ tempo WRITE setTempo NOTIFY transportChanged)
   Q_PROPERTY(bool metronome READ metronome NOTIFY transportChanged)
@@ -210,6 +215,8 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE QString toggleRecord();
 
   Q_INVOKABLE static QString recordingsPath();
+  bool recordScreen() const { return record_screen_; }
+  void setRecordScreen(bool on);
   Q_INVOKABLE void rewind();
 
   // Returns the new row, or -1 if the graph is already at its channel/bus cap.
@@ -614,6 +621,7 @@ class MixerModel : public QAbstractListModel {
   void transportChanged();
   void learnChanged();
   void recordingChanged();
+  void recordScreenChanged();
   void errorOccurred(const QString& message);
   void dirtyChanged();
   void metersActiveChanged();
@@ -870,6 +878,9 @@ class MixerModel : public QAbstractListModel {
   // Restoring fires the same setters the UI does; without this every one of
   // them would queue another save of what was just loaded.
   bool restoring_ = false;
+  bool record_screen_ = false;
+  QString take_dir_;
+  ScreenCapture* screen_capture_ = nullptr;
   // The startup restore's crash guard: a marker beside the session naming the
   // insert being loaded, and what the marker left behind by a launch that
   // died there said. See loadSession().

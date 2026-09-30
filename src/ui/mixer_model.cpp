@@ -25,9 +25,12 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QKeyEvent>
+#include <QScreen>
+#include <QSettings>
 #include <QUrl>
 #include <QStandardPaths>
 #include <QtMath>
+#include <QWindow>
 
 #include <algorithm>
 #include <clocale>
@@ -58,6 +61,9 @@ MixerModel::MixerModel(QObject* parent) : QAbstractListModel(parent) {
   // Starts the plugin scan on its worker. The list fills in when it is done
   // and the session is restored right behind it - see beginStartup().
   plugins_ = std::make_unique<PluginListModel>(this);
+  screen_capture_ = new ScreenCapture(this);
+  connect(screen_capture_, &ScreenCapture::message, this, &MixerModel::errorOccurred);
+  record_screen_ = QSettings().value(QStringLiteral("record/screen"), false).toBool();
 
   if (engine_.start("nirbija")) {
     status_ = tr("%1 Hz · %2 frames")
@@ -721,9 +727,38 @@ QString MixerModel::recordingsPath() {
          QStringLiteral("/Nirbija");
 }
 
+void MixerModel::setRecordScreen(bool on) {
+  if (on == record_screen_) return;
+  record_screen_ = on;
+  QSettings().setValue(QStringLiteral("record/screen"), on);
+  emit recordScreenChanged();
+}
+
+namespace {
+
+// The connector the mixer's window is on, which is the name
+// gpu-screen-recorder knows a monitor by ("eDP-1").
+QString mixer_monitor() {
+  for (QWindow* window : QGuiApplication::topLevelWindows())
+    if (window->isVisible() && window->screen() != nullptr)
+      return window->screen()->name();
+  QScreen* primary = QGuiApplication::primaryScreen();
+  return primary != nullptr ? primary->name() : QString();
+}
+
+}  // namespace
+
 QString MixerModel::toggleRecord() {
   if (engine_.recording()) {
     engine_.stop_recording();
+    if (screen_capture_->running()) {
+      // The master is always the take's last file.
+      const QStringList masters = QDir(take_dir_).entryList(
+          {QStringLiteral("* master.wav")}, QDir::Files);
+      screen_capture_->stop(
+          masters.isEmpty() ? QString() : take_dir_ + QLatin1Char('/') + masters.first(),
+          engine_.recording_first_usecs());
+    }
     emit recordingChanged();
     return {};
   }
@@ -733,6 +768,11 @@ QString MixerModel::toggleRecord() {
   if (take.isEmpty()) {
     qWarning("recorder: could not start a take");
     emit errorOccurred(tr("Could not start recording"));
+  } else {
+    take_dir_ = take;
+    // Started after the take: the two are lined up by their clocks, not by
+    // which went first, and the sound is the one that must not wait.
+    if (record_screen_) screen_capture_->start(take, mixer_monitor());
   }
   emit recordingChanged();
   return take;

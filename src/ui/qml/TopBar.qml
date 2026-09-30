@@ -85,6 +85,17 @@ Rectangle {
             onClicked: Mixer.toggleRecord()
         }
 
+        // Whether a take films the screen too. Lit in the record colour when
+        // it will; changing it mid-take waits for the next one.
+        StripButton {
+            Layout.preferredWidth: Px.px(32)
+            label: "▣"
+            tip: qsTr("Film the screen with each take: the GPU records the picture and the take's own master becomes its sound, lined up to the block. The film lands in the take's folder when you stop.")
+            active: Mixer.recordScreen
+            activeColor: Skin.arm
+            onClicked: Mixer.recordScreen = !Mixer.recordScreen
+        }
+
         // Bar and beat, plus how long the take has been running. Fixed width so
         // the row does not shuffle sideways every time the beat rolls over.
         ColumnLayout {

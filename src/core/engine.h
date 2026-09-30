@@ -148,6 +148,9 @@ class Engine {
   bool recording() const { return recorder_.recording(); }
   bool recording_overran() const { return recorder_.overran(); }
   double recorded_seconds() const;
+  // When the take's first frame was due, CLOCK_MONOTONIC microseconds; 0
+  // before its first block. See Recorder::mark_cycle.
+  uint64_t recording_first_usecs() const { return recorder_.first_frame_usecs(); }
 
   // --- transport ----------------------------------------------------------
   // Read from the UI thread; the audio thread owns the writing.

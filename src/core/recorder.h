@@ -49,6 +49,18 @@ class Recorder {
   // Realtime thread. Called once per block after every track has been written.
   void advance(uint32_t frames);
 
+  // Realtime thread, before the block renders: when the block's first frame
+  // is due, in CLOCK_MONOTONIC microseconds (JACK's clock). The first block
+  // of a take keeps it, so the take can be lined up with anything else
+  // stamped on that clock - a screen recording's first frame.
+  void mark_cycle(uint64_t usecs) {
+    cycle_usecs_.store(usecs, std::memory_order_relaxed);
+  }
+  // 0 until the take's first block has been written.
+  uint64_t first_frame_usecs() const {
+    return first_frame_usecs_.load(std::memory_order_acquire);
+  }
+
  private:
   struct Track;
 
@@ -65,6 +77,8 @@ class Recorder {
   std::atomic<bool> writer_running_{false};
   std::atomic<bool> overran_{false};
   std::atomic<uint64_t> frames_written_{0};
+  std::atomic<uint64_t> cycle_usecs_{0};
+  std::atomic<uint64_t> first_frame_usecs_{0};
   double sample_rate_ = 0.0;
 };
 

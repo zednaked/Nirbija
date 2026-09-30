@@ -612,7 +612,8 @@ int MixerModel::restoreChannel(const QJsonObject& entry, QStringList* missing,
           {saved[QStringLiteral("format")].toString(),
            QString::fromStdString(uid), saved[QStringLiteral("state")].toString(),
            saved[QStringLiteral("bypassed")].toBool(),
-           saved[QStringLiteral("postFader")].toBool()});
+           saved[QStringLiteral("postFader")].toBool(),
+           saved[QStringLiteral("quarantined")].toBool(), {}});
       continue;
     }
 
@@ -1197,7 +1198,8 @@ void MixerModel::applySnapshot(const QJsonObject& root) {
                                 QString::fromStdString(uid),
                                 saved[QStringLiteral("state")].toString(),
                                 saved[QStringLiteral("bypassed")].toBool(),
-                                saved[QStringLiteral("postFader")].toBool()});
+                                saved[QStringLiteral("postFader")].toBool(),
+                                saved[QStringLiteral("quarantined")].toBool(), {}});
         continue;
       }
       targets.push_back({saved, plugin_row, -1});

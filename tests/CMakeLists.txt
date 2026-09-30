@@ -140,6 +140,11 @@ if(NIRBIJA_UI)
   target_link_libraries(nirbija_session_quarantine PRIVATE nirbija_ui)
   add_test(NAME session_quarantine COMMAND nirbija_session_quarantine)
 
+  add_executable(nirbija_screen_capture screen_capture_test.cpp)
+  target_link_libraries(nirbija_screen_capture PRIVATE nirbija_ui)
+  add_test(NAME screen_capture COMMAND nirbija_screen_capture)
+  set_tests_properties(screen_capture PROPERTIES LABELS "quick;ui")
+
   add_executable(nirbija_session_scenes session_scenes.cpp)
   target_link_libraries(nirbija_session_scenes PRIVATE nirbija_ui)
   add_test(NAME session_scenes COMMAND nirbija_session_scenes)

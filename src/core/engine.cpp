@@ -973,6 +973,16 @@ int Engine::process(jack_nframes_t frames) {
   // The click is scheduled before the render and rendered inside it, so it
   // goes through the limiter and the park fade with everything else.
   schedule_metronome(frames, tempo, transport.beats);
+  // Only a take reads it, and only its first block keeps it.
+  if (recorder_.recording()) {
+    jack_nframes_t cycle_frame = 0;
+    jack_time_t cycle_usecs = 0;
+    jack_time_t next_usecs = 0;
+    float period_usecs = 0.0f;
+    if (jack_get_cycle_times(client_, &cycle_frame, &cycle_usecs, &next_usecs,
+                             &period_usecs) == 0)
+      recorder_.mark_cycle(cycle_usecs);
+  }
   graph_->render(master, frames);
 
   const size_t channels = graph_->channel_count();

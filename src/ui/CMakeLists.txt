@@ -108,6 +108,8 @@ qt_add_qml_module(nirbija_ui
     plugin_list_model.h
     plugin_window.cpp
     plugin_window.h
+    screen_capture.cpp
+    screen_capture.h
     skin.cpp
     skin.h
   QML_FILES ${nirbija_qml}

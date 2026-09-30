@@ -67,6 +67,7 @@ bool Recorder::start(const std::string& directory, double sample_rate,
   tracks_.clear();
   overran_.store(false, std::memory_order_relaxed);
   frames_written_.store(0, std::memory_order_relaxed);
+  first_frame_usecs_.store(0, std::memory_order_relaxed);
 
   for (size_t i = 0; i < track_names.size(); ++i) {
     auto track = std::make_unique<Track>();
@@ -166,7 +167,9 @@ void Recorder::write(size_t track_index, const float* const* channels,
 
 void Recorder::advance(uint32_t frames) {
   if (!recording()) return;
-  frames_written_.fetch_add(frames, std::memory_order_relaxed);
+  if (frames_written_.fetch_add(frames, std::memory_order_relaxed) == 0)
+    first_frame_usecs_.store(cycle_usecs_.load(std::memory_order_relaxed),
+                             std::memory_order_release);
 }
 
 void Recorder::writer_loop() {
