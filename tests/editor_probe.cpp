@@ -11,6 +11,7 @@
 // The trailing pairs set parameters on the insert before the picture is
 // taken: `24=1` pushes a drone's swell up so the strings are moving. A
 // `drag=x1,y1,x2,y2` argument drags the mouse across the open editor before
+// (at 1.2 s, or `drag_at=<ms>` in: an editor that waits on a device needs longer)
 // the picture, and `show=24,30` prints those parameters afterwards - the
 // way to check that a gesture in the real QML lands where it should.
 // `play=1` starts the transport first, for an editor whose state waits on
@@ -99,6 +100,7 @@ int main(int argc, char* argv[]) {
     return 1;
   }
   QList<QPointF> drag;
+  int drag_at = 1200;
   QList<int> show;
   int delay = 0;
   // `editor=0` leaves the editor closed, for a picture of the strip itself:
@@ -107,6 +109,10 @@ int main(int argc, char* argv[]) {
   for (int i = 4; i < args.size(); ++i) {
     const QStringList pair = args[i].split('=');
     if (pair.size() != 2) continue;
+    if (pair[0] == QStringLiteral("drag_at")) {
+      drag_at = pair[1].toInt();
+      continue;
+    }
     if (pair[0] == QStringLiteral("drag")) {
       const QStringList xy = pair[1].split(',');
       if (xy.size() == 4)
@@ -198,7 +204,7 @@ int main(int argc, char* argv[]) {
   // the same path a real pointer does: through the overlay, into the popup,
   // onto whichever handler claims it.
   if (drag.size() == 2) {
-    QTimer::singleShot(1200, [&] {
+    QTimer::singleShot(drag_at, [&] {
       ulong stamp = 1000;
       auto send = [&](QEvent::Type type, QPointF pos, Qt::MouseButton button,
                       Qt::MouseButtons buttons) {

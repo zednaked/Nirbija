@@ -2531,6 +2531,9 @@ QVariantMap MixerModel::insertFm1Snapshot(int row, int slot) const {
   out[QStringLiteral("readAt")] =
       read_at > 0 ? QDateTime::fromSecsSinceEpoch(read_at).toString(QStringLiteral("HH:mm")) : QString();
   out[QStringLiteral("selected")] = link.selected_track();
+  QStringList sounds;
+  for (const std::string& label : fm1->sound_labels()) sounds.append(QString::fromStdString(label));
+  out[QStringLiteral("sounds")] = sounds;
   out[QStringLiteral("generation")] = static_cast<qreal>(link.board_generation());
   QVariantList tracks;
   const auto board = link.board();
@@ -2539,6 +2542,7 @@ QVariantMap MixerModel::insertFm1Snapshot(int row, int slot) const {
     track[QStringLiteral("engine")] = board[t].engine;
     track[QStringLiteral("name")] = QString::fromStdString(board[t].engine_name);
     track[QStringLiteral("drum")] = board[t].engine >= info.engines && info.engines > 0;
+    track[QStringLiteral("sound")] = link.wanted_sound(static_cast<uint8_t>(t));
     QVariantList params;
     for (const Fm1Param& p : board[t].params) {
       QVariantMap param;
@@ -2569,6 +2573,21 @@ void MixerModel::setFm1Param(int row, int slot, int id, qreal value) {
   // The session keeps the device's project, read from it after it settles:
   // nothing here to write yet.
   sceneParamTouched(row, slot, static_cast<uint32_t>(id), static_cast<float>(value));
+}
+
+int MixerModel::fm1CaptureSound(int row, int slot, int track) {
+  auto* fm1 = dynamic_cast<Fm1Instance*>(insertFor(row, slot));
+  if (fm1 == nullptr) return 0;
+  const int index = fm1->capture_sound(track);
+  if (index > 0) {
+    fm1UseSound(row, slot, track, index);
+    markDirty();  // the table is the session's
+  }
+  return index;
+}
+
+void MixerModel::fm1UseSound(int row, int slot, int track, int index) {
+  setFm1Param(row, slot, static_cast<int>(Fm1Instance::param_id(track, Fm1Instance::kSoundKey)), index);
 }
 
 void MixerModel::fm1ReadNow(int row, int slot) {

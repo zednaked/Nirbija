@@ -332,6 +332,11 @@ class MixerModel : public QAbstractListModel {
   Q_INVOKABLE void setFm1Param(int row, int slot, int id, qreal value);
   Q_INVOKABLE void fm1ReadNow(int row, int slot);
   Q_INVOKABLE void fm1SendProject(int row, int slot);
+  // Whole sounds for the scenes: the one track `track` plays now into the
+  // table and onto its SOUND (recorded into the scene while Record scene is
+  // lit); or a stored one onto it. Returns the sound's number, 0 for none.
+  Q_INVOKABLE int fm1CaptureSound(int row, int slot, int track);
+  Q_INVOKABLE void fm1UseSound(int row, int slot, int track, int index);
   Q_INVOKABLE QVariantMap insertDroneSnapshot(int row, int slot) const;
   Q_INVOKABLE void setDroneParam(int row, int slot, int id, qreal value);
   Q_INVOKABLE QStringList dronePresetNames() const;

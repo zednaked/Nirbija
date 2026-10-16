@@ -51,6 +51,7 @@ namespace {
 constexpr uint8_t kMagic[4] = {'N', 'F', 'M', '1'};
 constexpr uint8_t kVersion = 1;
 constexpr uint8_t kSectionProject = 1;
+constexpr uint8_t kSectionSounds = 2;
 
 void put32(std::vector<uint8_t>& out, uint32_t v) {
   for (int i = 0; i < 4; ++i) out.push_back(static_cast<uint8_t>(v >> (8 * i)));
@@ -62,7 +63,8 @@ uint32_t get32(const uint8_t* p) {
 
 }  // namespace
 
-std::vector<uint8_t> Fm1Instance::pack_state(const std::vector<uint8_t>& project) {
+std::vector<uint8_t> Fm1Instance::pack_state(const std::vector<uint8_t>& project,
+                                              const std::vector<std::vector<uint8_t>>& sounds) {
   std::vector<uint8_t> blob(kMagic, kMagic + 4);
   blob.push_back(kVersion);
   if (!project.empty()) {
@@ -70,14 +72,28 @@ std::vector<uint8_t> Fm1Instance::pack_state(const std::vector<uint8_t>& project
     put32(blob, static_cast<uint32_t>(project.size()));
     blob.insert(blob.end(), project.begin(), project.end());
   }
+  if (!sounds.empty()) {
+    std::vector<uint8_t> table;
+    table.push_back(static_cast<uint8_t>(sounds.size() & 0xff));
+    table.push_back(static_cast<uint8_t>(sounds.size() >> 8));
+    for (const auto& sound : sounds) {
+      put32(table, static_cast<uint32_t>(sound.size()));
+      table.insert(table.end(), sound.begin(), sound.end());
+    }
+    blob.push_back(kSectionSounds);
+    put32(blob, static_cast<uint32_t>(table.size()));
+    blob.insert(blob.end(), table.begin(), table.end());
+  }
   return blob;
 }
 
 // A session file is bytes on disk: anything short, unknown or cut off is
 // refused whole rather than handed to the device in part. Unknown sections
 // (a later Nirbija's) are skipped.
-bool Fm1Instance::unpack_state(const std::vector<uint8_t>& blob, std::vector<uint8_t>* project) {
+bool Fm1Instance::unpack_state(const std::vector<uint8_t>& blob, std::vector<uint8_t>* project,
+                               std::vector<std::vector<uint8_t>>* sounds) {
   project->clear();
+  if (sounds != nullptr) sounds->clear();
   if (blob.size() < 5 || !std::equal(kMagic, kMagic + 4, blob.begin()) || blob[4] < 1) return false;
   size_t at = 5;
   while (at < blob.size()) {
@@ -87,6 +103,21 @@ bool Fm1Instance::unpack_state(const std::vector<uint8_t>& blob, std::vector<uin
     at += 5;
     if (length > blob.size() - at) return false;
     if (tag == kSectionProject) project->assign(blob.begin() + at, blob.begin() + at + length);
+    if (tag == kSectionSounds && sounds != nullptr) {
+      const uint8_t* p = blob.data() + at;
+      if (length < 2) return false;
+      const size_t count = p[0] | p[1] << 8;
+      size_t in = 2;
+      for (size_t i = 0; i < count; ++i) {
+        if (length - in < 4) return false;
+        const uint32_t size = get32(p + in);
+        in += 4;
+        if (size > length - in) return false;
+        sounds->emplace_back(p + in, p + in + size);
+        in += size;
+      }
+      if (sounds->size() > kMaxSounds) sounds->resize(kMaxSounds);
+    }
     at += length;
   }
   return true;
@@ -94,29 +125,73 @@ bool Fm1Instance::unpack_state(const std::vector<uint8_t>& blob, std::vector<uin
 
 std::vector<uint8_t> Fm1Instance::save_state() const {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (project_.empty()) return {};  // never read: nothing of the device's to keep
-  return pack_state(project_);
+  if (project_.empty() && sounds_.empty()) return {};  // nothing of the device's to keep
+  return pack_state(project_, sounds_);
 }
 
 bool Fm1Instance::load_state(const std::vector<uint8_t>& blob) {
   if (blob.empty()) return true;
   std::vector<uint8_t> project;
-  if (!unpack_state(blob, &project)) return false;
-  if (project.empty()) return true;
+  std::vector<std::vector<uint8_t>> sounds;
+  if (!unpack_state(blob, &project, &sounds)) return false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    project_ = project;
+    sounds_ = sounds;
+    if (!project.empty()) project_ = project;
   }
-  link_.put_project(std::move(project));
+  link_.set_sound_table(std::move(sounds));
+  if (!project.empty()) link_.put_project(std::move(project));
   return true;
 }
 
+int Fm1Instance::capture_sound(int track) {
+  if (track < 0 || track >= kSoundTracks) return 0;
+  auto reply = link_.call(96, {static_cast<uint8_t>(track)});  // TRACK_SOUND get
+  if (!reply || reply->size() < 4 || (*reply)[0] != track) return 0;
+  std::vector<uint8_t> sound(reply->begin() + 1, reply->end());
+  std::vector<std::vector<uint8_t>> table;
+  int index = 0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (size_t i = 0; i < sounds_.size(); ++i)
+      if (sounds_[i] == sound) index = static_cast<int>(i) + 1;
+    if (index == 0) {
+      if (sounds_.size() >= kMaxSounds) return 0;
+      sounds_.push_back(std::move(sound));
+      index = static_cast<int>(sounds_.size());
+      sounds_dirty_ = true;
+    }
+    table = sounds_;
+  }
+  link_.set_sound_table(std::move(table));
+  return index;
+}
+
+std::vector<std::string> Fm1Instance::sound_labels() const {
+  const Fm1Info info = link_.info();
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<std::string> out;
+  for (const auto& sound : sounds_) {
+    const int engine = sound.empty() ? -1 : sound[0];
+    out.push_back(engine >= 0 && engine < static_cast<int>(info.engine_names.size())
+                      ? info.engine_names[static_cast<size_t>(engine)]
+                      : "?");
+  }
+  return out;
+}
+
 bool Fm1Instance::take_state_dirty() {
+  bool sounds = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    sounds = sounds_dirty_;
+    sounds_dirty_ = false;
+  }
   auto project = link_.take_project();
-  if (!project) return false;
+  if (!project) return sounds;
   read_at_.store(static_cast<int64_t>(std::time(nullptr)), std::memory_order_relaxed);
   std::lock_guard<std::mutex> lock(mutex_);
-  if (*project == project_) return false;
+  if (*project == project_) return sounds;
   project_ = std::move(*project);
   return true;
 }
@@ -137,6 +212,18 @@ size_t Fm1Instance::project_bytes() const {
 
 std::vector<ParameterInfo> Fm1Instance::parameters() const {
   std::vector<ParameterInfo> out;
+  // The sounds first and always, even before the device was read: a scene
+  // saved with them names them whatever the device holds today.
+  for (int t = 0; t < kSoundTracks; ++t) {
+    ParameterInfo info;
+    info.id = param_id(t, kSoundKey);
+    info.name = "T" + std::to_string(t + 1) + " SOUND";
+    info.min_value = 0;
+    info.max_value = static_cast<double>(kMaxSounds);
+    info.default_value = 0;
+    info.stepped = true;
+    out.push_back(std::move(info));
+  }
   const auto board = link_.board();
   for (size_t t = 0; t < board.size(); ++t) {
     for (const Fm1Param& p : board[t].params) {
@@ -155,15 +242,24 @@ std::vector<ParameterInfo> Fm1Instance::parameters() const {
 }
 
 double Fm1Instance::parameter_value(uint32_t id) const {
+  if ((id & 0xff) == kSoundKey) return link_.wanted_sound(static_cast<uint8_t>(id >> 8));
   return link_.value(static_cast<uint8_t>(id >> 8), static_cast<uint8_t>(id & 0xff));
 }
 
 void Fm1Instance::set_parameter(uint32_t id, double value) {
+  if ((id & 0xff) == kSoundKey) {
+    link_.want_sound_rt(static_cast<uint8_t>(id >> 8), static_cast<int>(std::lround(value)));
+    return;
+  }
   link_.set_param(static_cast<uint8_t>(id >> 8), static_cast<uint8_t>(id & 0xff),
                   static_cast<int>(std::lround(value)));
 }
 
 void Fm1Instance::set_parameter_rt(uint32_t id, double value) {
+  if ((id & 0xff) == kSoundKey) {
+    link_.want_sound_rt(static_cast<uint8_t>(id >> 8), static_cast<int>(std::lround(value)));
+    return;
+  }
   link_.set_param_rt(static_cast<uint8_t>(id >> 8), static_cast<uint8_t>(id & 0xff),
                      static_cast<int>(std::lround(value)));
 }

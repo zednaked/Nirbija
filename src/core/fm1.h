@@ -40,6 +40,12 @@ class Fm1Instance : public PluginInstance {
   // parameter after a firmware update. The list follows the device: it is
   // empty before the first read and changes with a track's engine.
   static uint32_t param_id(int track, int key) { return static_cast<uint32_t>(track) << 8 | static_cast<uint32_t>(key); }
+  // SOUND: one stepped parameter per synth track (1..3), past every Jangada
+  // key: which sound of the table the track plays (1-based; 0 leaves it).
+  // A scene sets it on its bar line and the Link sends that sound whole.
+  static constexpr int kSoundKey = 200;
+  static constexpr int kSoundTracks = 3;
+  static constexpr size_t kMaxSounds = 64;
   std::vector<ParameterInfo> parameters() const override;
   double parameter_value(uint32_t id) const override;
   void set_parameter(uint32_t id, double value) override;
@@ -62,6 +68,14 @@ class Fm1Instance : public PluginInstance {
   Fm1Link& link() { return link_; }
   const Fm1Link& link() const { return link_; }
 
+  // Takes the sound track `track` plays now on the device into the table and
+  // returns its number (1-based), the one already there when it is the same;
+  // 0 when the device did not answer or the table is full. UI thread: it
+  // waits for the device, a few milliseconds.
+  int capture_sound(int track);
+  // The table, for the editor: each sound's engine name, in order.
+  std::vector<std::string> sound_labels() const;
+
   // The editor's two buttons: read the device's project now; give it the
   // session's project again.
   void read_project_now() { link_.read_project_now(); }
@@ -73,13 +87,19 @@ class Fm1Instance : public PluginInstance {
 
   // The blob: "NFM1", a version byte, then sections (tag, length u32 LE,
   // bytes). Section 1 is the project, as the device gave it ("JNG2").
-  static std::vector<uint8_t> pack_state(const std::vector<uint8_t>& project);
-  static bool unpack_state(const std::vector<uint8_t>& blob, std::vector<uint8_t>* project);
+  // Section 2 is the table of sounds: a count (u16 LE), then each sound
+  // (length u32 LE, bytes).
+  static std::vector<uint8_t> pack_state(const std::vector<uint8_t>& project,
+                                         const std::vector<std::vector<uint8_t>>& sounds = {});
+  static bool unpack_state(const std::vector<uint8_t>& blob, std::vector<uint8_t>* project,
+                           std::vector<std::vector<uint8_t>>* sounds = nullptr);
 
  private:
   mutable std::mutex mutex_;
   std::vector<uint8_t> project_;  // what the session gets; empty until first read
   std::vector<TouchedParam> touched_;  // UI thread: device touches not taken yet
+  std::vector<std::vector<uint8_t>> sounds_;  // the table, under mutex_
+  bool sounds_dirty_ = false;                 // under mutex_
   std::atomic<int64_t> read_at_{0};
 
   PluginDescriptor descriptor_;

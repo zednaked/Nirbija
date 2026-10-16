@@ -33,6 +33,12 @@ EditorPopup {
     readonly property var tracks: root.snap.tracks || []
     readonly property var current: root.tracks.length > root.track ? root.tracks[root.track] : null
     readonly property bool connected: root.snap.state === "connected"
+    readonly property int soundNow: root.current ? (root.current.sound || 0) : 0
+
+    function soundLabel(index) {
+        const labels = root.snap.sounds || []
+        return "#" + index + " " + (index - 1 < labels.length ? labels[index - 1] : "")
+    }
 
     function refresh() {
         root.snap = Mixer.insertFm1Snapshot(root.targetRow, root.targetSlot)
@@ -74,7 +80,7 @@ EditorPopup {
     }
 
     width: Px.px(980)
-    height: Px.px(640)
+    height: Px.px(676)
     holdOpen: Mixer.learning
     glowHue: root.hue
     glowOpacity: root.connected ? 0.14 : 0.0
@@ -233,6 +239,64 @@ EditorPopup {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 spacing: Skin.spacing
+
+                // The track's whole sound, for the scenes: which stored one its
+                // SOUND names, a capture of what it plays now, the list.
+                RowLayout {
+                    visible: root.track < 3 && root.current !== null && root.current.params.length > 0
+                    Layout.fillWidth: true
+                    spacing: Skin.spacingS
+
+                    Text {
+                        text: qsTr("SOUND")
+                        color: Skin.textDim
+                        font.pixelSize: Skin.fontXS
+                        font.bold: true
+                        font.letterSpacing: Px.px(1.5)
+                    }
+                    Rectangle {
+                        Layout.preferredWidth: Px.px(150)
+                        Layout.preferredHeight: Skin.buttonHeight
+                        radius: Skin.radius
+                        color: Skin.slotEmpty
+                        border.width: 1
+                        border.color: root.soundNow > 0 ? root.hue : Skin.border
+                        Text {
+                            anchors.centerIn: parent
+                            color: root.soundNow > 0 ? Skin.text : Skin.textDim
+                            font.pixelSize: Skin.fontS
+                            font.family: Skin.monoFamily
+                            text: root.soundNow > 0 ? root.soundLabel(root.soundNow) : qsTr("none set")
+                        }
+                    }
+                    StripButton {
+                        label: qsTr("CAPTURE")
+                        enabled: root.connected
+                        tip: qsTr("Keep the sound this track plays now: it joins the session's sounds and becomes the track's SOUND. With Record scene lit, the scene takes it and plays it on its bar line.")
+                        onClicked: Mixer.fm1CaptureSound(root.targetRow, root.targetSlot, root.track)
+                    }
+                    StripButton {
+                        id: soundsButton
+                        label: qsTr("SOUNDS")
+                        enabled: (root.snap.sounds || []).length > 0
+                        tip: qsTr("Put one of the session's sounds on this track now.")
+                        onClicked: {
+                            const entries = []
+                            const labels = root.snap.sounds || []
+                            for (let i = 0; i < labels.length; ++i) {
+                                const index = i + 1
+                                entries.push({ label: root.soundLabel(index),
+                                               action: () => Mixer.fm1UseSound(root.targetRow, root.targetSlot, root.track, index) })
+                            }
+                            soundMenu.openAt(soundsButton, entries, qsTr("Sounds"))
+                        }
+                    }
+                    SlotMenu {
+                        id: soundMenu
+                        parent: Overlay.overlay
+                    }
+                    Item { Layout.fillWidth: true }
+                }
 
                 Text {
                     visible: !root.current || root.current.params.length === 0

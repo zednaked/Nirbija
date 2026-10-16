@@ -359,14 +359,14 @@ void board() {
   expect(device.desc_requests() == 36, "board: two engines described, 18 each (the drum track's sends reuse ANALOG's)");
 
   const auto params = fm1.parameters();
-  bool ids = params.size() == 18 * 3 + 4;
+  bool ids = params.size() == 3 + 18 * 3 + 4;
   for (const auto& p : params)
-    if ((p.id >> 8) > 3 || (p.id & 0xff) >= 128) ids = false;
+    if ((p.id >> 8) > 3 || ((p.id & 0xff) >= 128 && (p.id & 0xff) != 200)) ids = false;
   const auto wave = std::find_if(params.begin(), params.end(),
                                  [](const nirbija::ParameterInfo& p) { return p.id == (0u << 8 | 49u); });
   expect(ids && wave != params.end() && wave->stepped && wave->name == "T1 WAVE" &&
              fm1.parameter_value(0u << 8 | 53u) == 99.0,
-         "instance: 58 parameters, id = track << 8 | key, enums stepped, values read");
+         "instance: 61 parameters (3 SOUND, 18 x 3, 4), id = track << 8 | key, enums stepped, values read");
 
   fm1.set_parameter(2u << 8 | 36u, 77);  // track 3's REV from the editor
   expect(within(1000, [&] { return device.param_key(2, 36) == 77; }), "instance: a bar moved here reaches the device");
@@ -383,6 +383,53 @@ void board() {
   expect(within(2000, [&] { return link.board_generation() > gen; }) && link.board()[2].engine_name == "FM6" &&
              link.board()[2].params[0].name == "ALG" && device.desc_requests() == 36 && link.selected_track() == 2,
          "board: RELOAD after an engine change, read again; FM6 already described, no new ENG_DESC");
+  device.stop();
+}
+
+void sounds() {
+  nirbija::Fm1Instance fm1(session_timing());
+  FakeFm1 device(*fm1.external_midi());
+  device.set_param_key(0, 53, 30);  // track 1: ANALOG, CUT 30
+  device.start();
+  fm1.activate(48000.0, 256);
+  within(2000, [&] { return fm1.link().board_generation() >= 1; });
+  const auto params = fm1.parameters();
+  const bool listed = std::count_if(params.begin(), params.end(), [](const nirbija::ParameterInfo& p) {
+                        return (p.id & 0xff) == 200 && p.stepped && p.max_value == 64.0;
+                      }) == 3;
+  expect(listed, "sound: one stepped SOUND for each synth track (1..3), 0..64");
+
+  const int dark = fm1.capture_sound(0);
+  device.set_param_key(0, 53, 110);  // the hand opens the filter
+  const int bright = fm1.capture_sound(0);
+  expect(dark == 1 && bright == 2 && fm1.capture_sound(0) == 2 && fm1.sound_labels().size() == 2 &&
+             fm1.sound_labels()[0] == "ANALOG" && fm1.take_state_dirty(),
+         "sound: captured into the table (the same sound once), the session dirty");
+
+  const uint64_t sent = fm1.link().sounds_sent();
+  fm1.set_parameter_rt(0u << 8 | 200u, 1);  // a scene on its bar line: the dark one
+  // The device takes the values before it answers: wait for the answer too.
+  expect(within(1000, [&] { return device.param_key(0, 53) == 30 && fm1.link().sounds_sent() == sent + 1; }) &&
+             fm1.parameter_value(0u << 8 | 200u) == 1.0,
+         "sound: SOUND 1 on the bar line, the device plays it whole (CUT back to 30)");
+  device.set_param_key(0, 53, 77);  // the hand again, between scenes
+  fm1.set_parameter_rt(0u << 8 | 200u, 1);  // the same scene entered again
+  expect(within(1000, [&] { return device.param_key(0, 53) == 30 && fm1.link().sounds_sent() == sent + 2; }),
+         "sound: the same SOUND again is sent again, over the hand");
+  const int puts = device.sound_puts();
+  fm1.set_parameter_rt(0u << 8 | 200u, 0);
+  fm1.set_parameter_rt(1u << 8 | 200u, 9);  // past the table
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  expect(device.sound_puts() == puts, "sound: 0, or a number past the table, sends nothing");
+
+  // Carried in the session, and sent from it.
+  const auto blob = fm1.save_state();
+  std::vector<uint8_t> project;
+  std::vector<std::vector<uint8_t>> table;
+  expect(nirbija::Fm1Instance::unpack_state(blob, &project, &table) && table.size() == 2,
+         "sound: the table is in the session");
+  nirbija::Fm1Instance again(session_timing());
+  expect(again.load_state(blob) && again.sound_labels().size() == 2, "sound: and back from it");
   device.stop();
 }
 
@@ -415,6 +462,7 @@ int main() {
   params();
   instance();
   board();
+  sounds();
   session_blobs();
   session_read();
   session_restore();

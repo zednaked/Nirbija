@@ -207,6 +207,11 @@ A tabela de sons vai no blob da sessão junto do projeto.
    com as quatro tracks, os botões Read from FM-1 / Send back e o estado
    da devolução. `tests/fake_fm1_jack.cpp` põe o FM-1 de mentira no JACK
    para o `nirbija_editor_probe nirbija.fm1` fotografar o editor.
-6. SOM nas cenas.
+6. ~~SOM nas cenas~~ feito: o parâmetro SOUND (chave 200) das tracks 1–3,
+   a tabela de sons na sessão (seção 2 do blob), CAPTURE e SOUNDS no
+   editor. Cada escrita no SOUND conta (um contador atômico), então voltar a
+   uma cena reenvia o som por cima da mão; o Link manda o som antes de
+   qualquer outro pedido. Falta: capturar sozinho quando o engine ou o
+   preset muda no aparelho com Record scene aceso (hoje só pelo botão).
 7. No FM-1 de verdade: latência das notas, cliques na troca de som, o
    projeto devolvido depois de desligar e ligar.

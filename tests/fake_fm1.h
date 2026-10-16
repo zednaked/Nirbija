@@ -91,6 +91,7 @@ class FakeFm1 {
   std::atomic<int> engine[kTracks] = {0, 1, 0, 2};
   std::atomic<int> selected{0};
   int desc_requests() { return received(98); }
+  int sound_puts() const { return sound_puts_.load(); }
   // As loading a preset on the device: the track's engine changes, RELOAD.
   void reload_soon(int track, int new_engine) {
     engine[track] = new_engine;
@@ -242,8 +243,17 @@ class FakeFm1 {
           r.push_back(0);
         }
         break;
-      case 96: {  // TRACK_SOUND get: track, engine, count, count x (key, v14)
-        if (na != 1 || a[0] >= kTracks) return;
+      case 96: {  // TRACK_SOUND: get (track) or put (track, engine, count, pairs); the sound now
+        if (na < 1 || a[0] >= kTracks) return;
+        if (na > 1) {
+          if (na < 4 || a[1] >= 2) return;  // (the drum track and bad engines get no reply)
+          const size_t count = a[2] | a[3] << 7;
+          if (na != 4 + 3 * count) return;
+          engine[a[0]] = a[1];
+          for (size_t i = 0; i < count; ++i)
+            if (index_of(a[4 + 3 * i]) >= 0) set(a[0], index_of(a[4 + 3 * i]), rv(a + 5 + 3 * i));
+          ++sound_puts_;
+        }
         r = {a[0], static_cast<uint8_t>(engine[a[0]].load()), kParams, 0};
         for (int i = 0; i < kParams; ++i) {
           r.push_back(static_cast<uint8_t>(key_of(i)));
@@ -405,6 +415,7 @@ class FakeFm1 {
   std::atomic<int> largest_params_{0};
   std::atomic<int> push_id_{-1};
   std::atomic<bool> reload_{false};
+  std::atomic<int> sound_puts_{0};
   std::vector<uint8_t> project_, snapshot_, staging_;
   uint32_t staged_len_ = 0, staged_crc_ = 0;
   bool staging_on_ = false;

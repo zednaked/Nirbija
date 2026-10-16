@@ -181,6 +181,44 @@ std::array<Fm1Track, Fm1Link::kMaxTracks> Fm1Link::board() const {
   return board_;
 }
 
+void Fm1Link::set_sound_table(std::vector<std::vector<uint8_t>> table) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  sounds_ = std::move(table);
+}
+
+void Fm1Link::want_sound_rt(uint8_t track, int index) {
+  if (track >= kMaxTracks) return;
+  sound_want_[track].store(index, std::memory_order_relaxed);
+  // No notify: that is a syscall, and the Link looks every millisecond anyway.
+  sound_seq_[track].fetch_add(1, std::memory_order_release);
+}
+
+// Link thread: each track whose wanted sound was set since the last look
+// gets it (TRACK_SOUND put). False when a request went unanswered.
+bool Fm1Link::send_wanted_sounds() {
+  bool answered = true;
+  for (size_t t = 0; t < kMaxTracks; ++t) {
+    const uint32_t seq = sound_seq_[t].load(std::memory_order_acquire);
+    if (seq == sound_done_seq_[t]) continue;
+    sound_done_seq_[t] = seq;
+    const int index = sound_want_[t].load(std::memory_order_relaxed);
+    std::vector<uint8_t> args{static_cast<uint8_t>(t)};
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (index < 1 || static_cast<size_t>(index) > sounds_.size()) continue;
+      const auto& sound = sounds_[static_cast<size_t>(index) - 1];
+      args.insert(args.end(), sound.begin(), sound.end());
+    }
+    if (exchange(kTrackSound, args)) {
+      sounds_sent_.fetch_add(1, std::memory_order_relaxed);
+      board_stale_ = true;  // its engine and values changed under the editor
+    } else {
+      answered = false;
+    }
+  }
+  return answered;
+}
+
 std::vector<Fm1Link::Touch> Fm1Link::take_touches() {
   std::lock_guard<std::mutex> lock(mutex_);
   std::vector<Touch> out;
@@ -541,7 +579,21 @@ void Fm1Link::thread_main() {
       continue;
     }
 
-    // The project first: a put waiting, else a read when one is due. Each
+    // A sound a scene asked for: on its bar line, ahead of everything.
+    bool sounds_due = false;
+    for (size_t t = 0; t < kMaxTracks; ++t)
+      if (sound_seq_[t].load(std::memory_order_acquire) != sound_done_seq_[t]) sounds_due = true;
+    if (sounds_due) {
+      const bool answered = send_wanted_sounds();
+      last_sent = Clock::now();
+      misses = answered ? 0 : misses + 1;
+      if (misses >= timing_.missed_pings) {
+        go_disconnected();
+        next_connect = Clock::now() + std::chrono::milliseconds(timing_.reconnect_ms);
+      }
+      continue;
+    }
+    // The project next: a put waiting, else a read when one is due. Each
     // counts as a request for the keepalive and the miss count.
     std::optional<std::vector<uint8_t>> to_put;
     {

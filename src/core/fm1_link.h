@@ -126,6 +126,22 @@ class Fm1Link {
   };
   std::vector<Touch> take_touches();
 
+  // --- whole sounds (design/fm1.md, "As cenas") -------------------------------
+  // A sound is a TRACK_SOUND frame without its track byte: engine, count,
+  // the values by key, an FM6 track's patch. The table is the session's.
+  // UI thread.
+  void set_sound_table(std::vector<std::vector<uint8_t>> table);
+  // Audio thread (a scene on its bar line) or any other: track `track` is to
+  // play sound `index` of the table (1-based; 0 leaves the track alone).
+  // Every call counts, the same index again included, so a scene entered
+  // again restores its sound over whatever the hand did meanwhile. Sent
+  // before any other request: it is the one with a bar line to meet.
+  void want_sound_rt(uint8_t track, int index);
+  int wanted_sound(uint8_t track) const {
+    return track < kMaxTracks ? sound_want_[track].load(std::memory_order_relaxed) : 0;
+  }
+  uint64_t sounds_sent() const { return sounds_sent_.load(std::memory_order_relaxed); }
+
   // UI thread. The pushes since the last call, oldest first.
   std::vector<Fm1Push> take_pushes();
 
@@ -178,6 +194,7 @@ class Fm1Link {
   std::vector<uint8_t> take_params_frame();
   std::optional<std::vector<uint8_t>> read_project();
   bool read_board();
+  bool send_wanted_sounds();
   void note_push(uint8_t cmd, const std::vector<uint8_t>& args);
   // 0 done, 3 the song plays, anything else refused or lost.
   int write_project(const std::vector<uint8_t>& project);
@@ -220,6 +237,12 @@ class Fm1Link {
   std::array<int16_t, 256> index_to_key_{};
   std::vector<std::pair<int, std::vector<Fm1Param>>> descs_;  // per engine
   bool board_stale_ = true;
+
+  std::vector<std::vector<uint8_t>> sounds_;  // under mutex_
+  std::array<std::atomic<int>, kMaxTracks> sound_want_{};
+  std::array<std::atomic<uint32_t>, kMaxTracks> sound_seq_{};
+  std::array<uint32_t, kMaxTracks> sound_done_seq_{};  // Link thread only
+  std::atomic<uint64_t> sounds_sent_{0};
   std::chrono::steady_clock::time_point changed_at_{};
   std::chrono::steady_clock::time_point put_after_{};
 
