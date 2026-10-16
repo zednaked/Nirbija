@@ -477,11 +477,14 @@ std::vector<std::string> Engine::ports_matching(unsigned long flags,
   const char** ports = jack_get_ports(client_, nullptr, type, flags);
 
   std::vector<std::string> found;
+  // "nirbija:" and not "nirbija": another client whose name only starts the
+  // same ("nirbija-fake-jangada") is not us.
+  const std::string own = std::string(jack_get_client_name(client_)) + ":";
   for (const char** port = ports; port != nullptr && *port != nullptr; ++port) {
     const std::string name = *port;
     // Our own ports are never worth offering: connecting the mixer to itself
     // is either a no-op or a feedback loop.
-    if (name.rfind(jack_get_client_name(client_), 0) == 0) continue;
+    if (name.rfind(own, 0) == 0) continue;
     found.push_back(name);
   }
   if (ports != nullptr) jack_free(ports);
@@ -1094,8 +1097,11 @@ size_t Engine::attach_external(ExternalMidi* device) {
       slot.in = in;
     }
     // The ports are set before the device is published, and never change
-    // after: a pass that sees the device sees them.
+    // after: a pass that sees the device sees them. Nothing is servicing
+    // `notes` yet and the instrument is not filling it: empty it here.
+    device->notes.clear();
     slot.device.store(device, std::memory_order_release);
+    device->serviced.store(true, std::memory_order_release);
     reconnect_external(i);
     return i;
   }
@@ -1105,10 +1111,16 @@ size_t Engine::attach_external(ExternalMidi* device) {
 void Engine::detach_external(size_t slot) {
   if (slot >= kMaxExternal) return;
   ExternalPorts& record = external_[slot];
-  if (record.device.exchange(nullptr, std::memory_order_acq_rel) == nullptr) return;
+  ExternalMidi* device = record.device.exchange(nullptr, std::memory_order_acq_rel);
+  if (device == nullptr) return;
+  device->serviced.store(false, std::memory_order_release);
   if (client_ == nullptr) return;
   jack_port_disconnect(client_, record.out);
   jack_port_disconnect(client_, record.in);
+  if (clock_out_ != nullptr)
+    for (const std::string& port : ports_matching(JackPortIsInput, JACK_DEFAULT_MIDI_TYPE, false))
+      if (contains_nocase(port, device->match))
+        jack_disconnect(client_, jack_port_name(clock_out_), port.c_str());
   // A pass that loaded the pointer before it was cleared may still be inside
   // the device. Two finished passes from here mean one started after the
   // clear. A server that stopped calling never gets there; a second is far
@@ -1128,10 +1140,13 @@ bool Engine::reconnect_external(size_t slot) {
   if (device == nullptr || record.out == nullptr) return false;
   bool sent = false, heard = false;
   // The device's input takes what we send; its output is what we read.
+  // The clock goes along: the device follows it when set to (the FM-1's GLO >
+  // CLK USB), and the top bar's clock switch decides whether it runs at all.
   for (const std::string& port : ports_matching(JackPortIsInput, JACK_DEFAULT_MIDI_TYPE, false)) {
     if (!contains_nocase(port, device->match)) continue;
     const int rc = jack_connect(client_, jack_port_name(record.out), port.c_str());
     sent = sent || rc == 0 || rc == EEXIST;
+    if (clock_out_ != nullptr) jack_connect(client_, jack_port_name(clock_out_), port.c_str());
   }
   for (const std::string& port : ports_matching(JackPortIsOutput, JACK_DEFAULT_MIDI_TYPE, false)) {
     if (!contains_nocase(port, device->match)) continue;

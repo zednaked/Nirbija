@@ -755,6 +755,13 @@ class MixerModel : public QAbstractListModel {
                   const QString& sample_dir = {});
   int busCount() const;
   void pollLevels();
+  // Hardware instruments (the FM-1 strip, design/fm1.md): attaches to the
+  // engine every device a live chain holds, detaches the ones gone. Runs
+  // after a plugin is placed and at the top of every poll, before anything
+  // retired is reclaimed, so a device is always detached before its plugin
+  // is freed. Every ~2 s it also wires again the ones not yet wired, for a
+  // device plugged in after its strip was made.
+  void syncExternals();
   // Rebuilds one row's InsertDetailsRole and announces it if it changed.
   // The fingerprint is what the poll compares each tick; the list of maps
   // is only built when the fingerprint moved.
@@ -907,6 +914,16 @@ class MixerModel : public QAbstractListModel {
     std::unique_ptr<PluginWindow> window;
   };
   std::vector<OpenEditor> editors_;
+  struct AttachedExternal {
+    ExternalMidi* device = nullptr;
+    size_t slot = 0;
+    // The strip's input was set once (to the device's audio, or found already
+    // chosen): never again, or a strip set to "no input" on purpose would be
+    // wired back every two seconds.
+    bool audio_settled = false;
+  };
+  std::vector<AttachedExternal> externals_;
+  int externals_rewire_ = 0;  // polls until the next rewiring
   qreal master_peak_[2] = {0.0, 0.0};
   qreal master_position_[2] = {0.0, 0.0};
   qreal master_hold_[2] = {0.0, 0.0};

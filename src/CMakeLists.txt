@@ -18,6 +18,7 @@ add_library(nirbija_core
   core/drone.cpp
   core/ble_midi.cpp
   core/fm1_link.cpp
+  core/fm1.cpp
 )
 target_include_directories(nirbija_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 find_package(Threads REQUIRED)

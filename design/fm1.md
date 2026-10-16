@@ -29,7 +29,7 @@ o resto do documento é como cumpri-lo.
 ## Vocabulário
 
 - **FM-1**: o aparelho com a Jangada (USB `1209:0001`; as portas aparecem
-  com o nome que o firmware dá a elas, hoje "Felucca"). Firmware sem o
+  com o nome de produto que o firmware dá, "Jangada"). Firmware sem o
   protocolo v8 é tratado como desconectado, com o motivo escrito na strip.
 - **Projeto do FM-1**: o objeto 0 do backup da Jangada (`JNG2`, ~3–4 KB):
   as quatro tracks com sons, padrões, mix, e o patch FM6 de cada uma. É o que
@@ -191,7 +191,11 @@ A tabela de sons vai no blob da sessão junto do projeto.
    `Engine::attach_external` (portas `extN_out`/`extN_in`), `core/fm1_link.*`;
    `tests/fake_fm1.h`, `tests/fm1_link_test.cpp` (quick) e
    `tests/ext_midi_jack.cpp` (jack).
-3. `Fm1Instance` com áudio, notas e relógio, sem editor: já é útil.
+3. ~~`Fm1Instance` com áudio, notas e relógio, sem editor~~ feito:
+   `core/fm1.*` (`nirbija.fm1`), `MixerModel::syncExternals` (liga ao pôr,
+   desliga antes do reclaim, religa a cada ~2 s, o áudio da strip uma vez
+   só); `tests/fm1_strip.cpp` (ui). As portas casam por "Jangada", o nome
+   USB do aparelho.
 4. Sessão: pegar, guardar, devolver, song tocando, desconectado.
 5. Parâmetros e `Fm1Editor.qml`, o visual do mockup.
 6. SOM nas cenas.

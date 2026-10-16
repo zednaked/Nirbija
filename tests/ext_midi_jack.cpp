@@ -19,6 +19,7 @@
 
 #include "core/engine.h"
 #include "core/external_midi.h"
+#include "core/fm1.h"
 
 namespace {
 
@@ -116,7 +117,8 @@ int main() {
   const size_t slot = engine.attach_external(&device);
   expect(slot < nirbija::kMaxExternal && !engine.external_port_name(slot, true).empty(),
          "attach: a slot and its two ports");
-  expect(device_ports.connections() == 2, "attach: wired both ways to the device's ports, found by name");
+  expect(device_ports.connections() == 3,
+         "attach: wired both ways to the device's ports, found by name, the clock along");
 
   std::vector<uint8_t> sysex{0xf0, 0x7d, 0x46, 0x4c, 96};
   for (int i = 0; i < 494; ++i) sysex.push_back(static_cast<uint8_t>(i & 0x7f));
@@ -150,6 +152,31 @@ int main() {
 
   expect(engine.attach_external(&device) == slot, "attach again: the same slot, its ports reused");
   engine.detach_external(slot);
+
+  // A strip with the FM-1 in it: what the strip's MIDI plays reaches the device.
+  const size_t channel = engine.add_channel("FM-1", 2);
+  auto fm1 = std::make_unique<nirbija::Fm1Instance>();
+  nirbija::Fm1Instance* raw = fm1.get();
+  raw->external_midi()->match = device.match;
+  expect(channel < nirbija::kMaxChannels && engine.graph().channel(channel).add_insert(std::move(fm1)),
+         "strip: the FM-1 in a strip");
+  const size_t fm1_slot = engine.attach_external(raw->external_midi());
+  nirbija::MidiEvent note;
+  note.size = 3;
+  note.data[0] = 0x92;
+  note.data[1] = 64;
+  note.data[2] = 90;
+  engine.inject_midi(channel, note);
+  std::vector<uint8_t> heard(64);
+  size_t k = 0;
+  within(2000, [&] {
+    while ((k = device_ports.heard.pop(heard.data(), heard.size())) > 0)
+      if (k == 3 && heard[0] == 0x92) return true;
+    return false;
+  });
+  expect(k == 3 && heard[0] == 0x92 && heard[1] == 64 && heard[2] == 90,
+         "strip: a note into the strip comes out to the FM-1, channel 3 as sent");
+  engine.detach_external(fm1_slot);
 
   device_ports.stop();
   engine.stop();

@@ -22,6 +22,7 @@
 #include "core/sampler.h"
 #include "core/chord.h"
 #include "core/drone.h"
+#include "core/fm1.h"
 
 
 namespace nirbija {
@@ -53,7 +54,8 @@ class InternalBackend : public PluginBackend {
             KeyboardInstrumentInstance::make_descriptor(),
             SamplerInstance::make_descriptor(),
             ChordInstance::make_descriptor(),
-            DroneInstance::make_descriptor()};
+            DroneInstance::make_descriptor(),
+            Fm1Instance::make_descriptor()};
   }
 
   std::unique_ptr<PluginInstance> instantiate(
@@ -75,6 +77,7 @@ class InternalBackend : public PluginBackend {
     if (desc.uid == "nirbija.chord")
       return std::make_unique<ChordInstance>();
     if (desc.uid == "nirbija.drone") return std::make_unique<DroneInstance>();
+    if (desc.uid == "nirbija.fm1") return std::make_unique<Fm1Instance>();
     return nullptr;
   }
 };

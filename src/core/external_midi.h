@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Nirbija contributors
 #pragma once
 
+#include <atomic>
 #include <string>
 
 #include "core/midi_out.h"
@@ -35,6 +36,12 @@ struct ExternalMidi {
   // Audio thread only: the instrument emits into it while the graph renders,
   // the engine sends and clears it right after.
   MidiOutBlock<128> notes;
+
+  // Whether the engine services this device: set by attach_external() once
+  // `notes` is empty, cleared by detach_external(). The instrument emits only
+  // while it is set, or an unattached instrument would fill `notes` and the
+  // next attach would send that stale block at once.
+  std::atomic<bool> serviced{false};
 };
 
 }  // namespace nirbija

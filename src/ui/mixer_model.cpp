@@ -11,6 +11,7 @@
 #include "core/looper.h"
 #include "core/fx_pad.h"
 #include "core/drone.h"
+#include "core/external_midi.h"
 #include "core/keyboard_instrument.h"
 #include "core/sampler.h"
 
@@ -883,6 +884,7 @@ int MixerModel::placeInsert(int row, int pluginIndex, int targetSlot,
   // The chain's latency moved with it; JACK asks again and downstream
   // clients line up.
   engine_.latency_changed();
+  syncExternals();
   markDirty();
   return static_cast<int>(label_at);
 }
@@ -1951,8 +1953,66 @@ void MixerModel::advanceMeter(qreal peak, qreal& position, qreal& hold,
   }
 }
 
+void MixerModel::syncExternals() {
+  if (!engine_.running()) return;
+  struct Present {
+    ExternalMidi* device;
+    int row;
+  };
+  std::vector<Present> present;
+  for (size_t row = 0; row < channels_.size(); ++row) {
+    if (channels_[row].is_bus) continue;
+    ChannelStrip* strip = stripFor(static_cast<int>(row));
+    if (strip == nullptr) continue;
+    for (size_t slot = 0; slot < strip->insert_count(); ++slot) {
+      PluginInstance* insert = strip->insert_at(slot);
+      if (insert == nullptr) continue;
+      if (ExternalMidi* device = insert->external_midi())
+        present.push_back({device, static_cast<int>(row)});
+    }
+  }
+  std::erase_if(externals_, [&](const AttachedExternal& attached) {
+    const bool kept = std::any_of(present.begin(), present.end(), [&](const Present& p) {
+      return p.device == attached.device;
+    });
+    if (!kept) engine_.detach_external(attached.slot);
+    return !kept;
+  });
+  const bool rewire = --externals_rewire_ <= 0;
+  if (rewire) externals_rewire_ = 60;  // ~2 s of polls
+  for (const Present& p : present) {
+    auto known = std::find_if(externals_.begin(), externals_.end(),
+                              [&](const AttachedExternal& a) { return a.device == p.device; });
+    const bool fresh = known == externals_.end();
+    if (fresh) {
+      const size_t slot = engine_.attach_external(p.device);
+      if (slot >= kMaxExternal) continue;
+      externals_.push_back({p.device, slot});
+      known = std::prev(externals_.end());
+    } else if (rewire) {
+      engine_.reconnect_external(known->slot);
+    }
+    if ((!fresh && !rewire) || known->audio_settled) continue;
+    // The strip hears the device: its USB audio, unless something was chosen.
+    const size_t channel = channels_[p.row].slot;
+    if (!engine_.current_source(channel, false).empty()) {
+      known->audio_settled = true;
+      continue;
+    }
+    for (const std::string& port : engine_.available_sources(false)) {
+      if (QString::fromStdString(port).contains(QString::fromStdString(p.device->match),
+                                                Qt::CaseInsensitive)) {
+        known->audio_settled = engine_.connect_source(channel, port, false);
+        refreshRouting(p.row);
+        break;
+      }
+    }
+  }
+}
+
 void MixerModel::pollLevels() {
   if (!engine_.running()) return;
+  syncExternals();  // before the reclaim below: detach, then free
 
   // Controller messages ride the same poll as the meters: 30 Hz is fine for a
   // knob, and the audio thread stays out of the mapping table entirely.

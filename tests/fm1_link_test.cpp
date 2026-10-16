@@ -15,6 +15,7 @@
 #include <thread>
 
 #include "core/external_midi.h"
+#include "core/fm1.h"
 #include "core/fm1_link.h"
 #include "fake_fm1.h"
 
@@ -208,6 +209,44 @@ void params() {
   fm1.stop();
 }
 
+void instance() {
+  bool listed = false;
+  for (auto& backend : nirbija::make_all_backends())
+    for (const auto& d : backend->scan())
+      if (d.uid == "nirbija.fm1" && d.kind == nirbija::PluginKind::Instrument && d.has_midi_input)
+        listed = backend->instantiate(d) != nullptr;
+  expect(listed, "instance: FM-1 in the picker, an instrument with MIDI in");
+
+  nirbija::Fm1Instance fm1;
+  fm1.set_channel_layout(2);
+  fm1.activate(48000.0, 256);
+  float in_l[4] = {0.1f, 0.2f, 0.3f, 0.4f}, in_r[4] = {-0.1f, -0.2f, -0.3f, -0.4f};
+  float out_l[4] = {}, out_r[4] = {};
+  const float* ins[2] = {in_l, in_r};
+  float* outs[2] = {out_l, out_r};
+  fm1.process(ins, outs, 4);
+  expect(out_l[3] == 0.4f && out_r[0] == -0.1f, "instance: the strip's input (the FM-1's USB audio) passes");
+  float shared[2] = {0.5f, 0.6f};
+  const float* same_in[2] = {shared, shared};
+  float* same_out[2] = {shared, shared};
+  fm1.process(same_in, same_out, 2);
+  expect(shared[1] == 0.6f, "instance: in place too");
+
+  nirbija::ExternalMidi* device = fm1.external_midi();
+  nirbija::MidiEvent note;
+  note.size = 3;
+  note.data[0] = 0x91;
+  note.data[1] = 60;
+  note.data[2] = 100;
+  fm1.queue_midi(note);
+  expect(device != nullptr && device->match == "Jangada" && device->notes.empty(),
+         "instance: matches the ports by \"Jangada\"; a note while unattached is not kept");
+  device->serviced = true;
+  fm1.queue_midi(note);
+  expect(device->notes.count() == 1 && device->notes.begin()->data[0] == 0x91,
+         "instance: attached, the note goes to the FM-1 on its own channel (2: track 2)");
+}
+
 }  // namespace
 
 int main() {
@@ -217,6 +256,7 @@ int main() {
   requests();
   cable();
   params();
+  instance();
   std::printf("%s\n", failures ? "FAILED" : "all ok");
   return failures ? 1 : 0;
 }
