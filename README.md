@@ -42,8 +42,11 @@ USB audio is the strip's input, what the strip plays goes to its tracks, the
 clock goes along. Its editor shows the four tracks as the device has them -
 each engine's own parameters, read from it, moving both ways. The session keeps
 the FM-1's whole project and gives it back when it is opened; a scene can hold
-a track's whole sound and change it on the bar line. How it works:
-[design/fm1.md](design/fm1.md).
+a track's whole sound and change it on the bar line. Stack a Step Sequencer
+per track above it: each one's header picks the track it plays, and **DRUMS**
+names the grid's rows after the kit (kick, snare, hats…). How it works:
+[design/fm1.md](design/fm1.md); a strip ready to play:
+`sessions/run-jam.sh jam-fm1-full`.
 
 ![The FM-1 in Nirbija, a step sequencer playing it](docs/fm1.png)
 

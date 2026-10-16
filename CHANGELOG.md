@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.6.0 — 2026-10-16
+
+The FM-1: a hardware synth as an instrument of the mixer.
+
+![The FM-1 in Nirbija: a step sequencer playing it, and its four tracks read from the device](docs/fm1.png)
+
+### The FM-1 strip
+
+**FM-1** is in the picker, next to the Drone and the Sampler. It is the FM-1
+synthesizer with [Jangada](https://github.com/zednaked/jangada) 1.0.1 or later
+on USB, and a strip with it finds the device by itself: the strip's input is
+the FM-1's USB audio, what the strip plays goes to the FM-1 (MIDI channel n to
+track n), and the clock goes along (set the FM-1 to GLO > CLK USB to follow
+it). Plug it in after the strip was made and the strip finds it within two
+seconds.
+
+- **The editor** shows the four tracks as the device has them, read from it:
+  each track's engine and its eight EDIT parameters by their own names
+  (ANALOG's WAVE, CUT, RES…; FM6's ALG, FB…), the envelope, the sends and the
+  LFO, as bars that move the FM-1 as they move. A knob turned on the FM-1
+  moves its bar here; an engine changed there changes the bars.
+- **The session keeps the FM-1's whole project** - sounds, patterns and mix
+  of the four tracks - read after the device changes and settles, or with
+  Read from FM-1. Opening the session gives it back, before anything is read:
+  with the FM-1's song playing it waits for it to stop, with the FM-1 away it
+  waits for it to come back. Send back does it by hand.
+- **Scenes change the FM-1's sounds.** CAPTURE keeps the sound a track plays
+  now (engine, every value, an FM6 track's own patch) as one of the session's
+  sounds and puts it on the track's SOUND; with Record scene lit the scene
+  takes it and plays it whole on its bar line. Entering the scene again
+  plays it again, over whatever the hand did meanwhile. The editor's bars
+  are scene targets like any plugin's knobs.
+
+### One step sequencer per track
+
+A Step Sequencer above the FM-1 plays one of its tracks: the header says
+which (→ FM-1 · T2), and a button next to it picks it - every lane onto that
+track's channel at once. **DRUMS** puts the lanes on channel 10 and tunes the
+eight of them to kick, snare, closed and open hat, clap, tom, crash and ride,
+with the grid's rows named after the kit's pieces. Stack four sequencers above
+the FM-1, one per track, each with its own sixteen patterns.
+`sessions/build-fm1-full.py` builds that strip: `sessions/run-jam.sh jam-fm1-full`.
+
+### Underneath
+
+- The engine gives a hardware instrument a pair of MIDI ports that carry
+  SysEx (`extN_out` / `extN_in`); the audio thread only moves bytes, and a
+  thread of the FM-1's own talks to the device: one request at a time,
+  pushes apart from replies, SysEx reassembled from pieces, values from the
+  scenes gathered into one frame (Jangada's editor protocol v8).
+- PipeWire names the FM-1's USB audio after its USB ids ("pid.codes Test
+  PID"), with "Jangada" only in the node name: the strip asks PipeWire which
+  source is the FM-1.
+- Fixed: the port lists hid every JACK client whose name only began with
+  ours ("nirbija-something"), as if it were Nirbija itself.
+
 ## 0.5.1 — 2026-09-29
 
 - Scenes are a switch in the session menu (**Scenes: on/off**), off in a new
