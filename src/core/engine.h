@@ -224,6 +224,11 @@ class Engine {
   bool reconnect_external(size_t slot);
   // JACK port names, for tests and the strip's routing view.
   std::string external_port_name(size_t slot, bool out) const;
+  // Sources (audio or MIDI) whose name or any alias contains `part`, without
+  // case. PipeWire names an audio device's JACK client by its description -
+  // for the FM-1, "pid.codes Test PID ..." from the USB ids - and keeps the
+  // node name with the product in it ("..._Jangada-00...") as an alias.
+  std::vector<std::string> sources_matching(const std::string& part, bool midi) const;
 
  private:
   static int jack_process_trampoline(jack_nframes_t frames, void* arg);

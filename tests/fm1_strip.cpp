@@ -100,6 +100,12 @@ int main(int argc, char* argv[]) {
     std::printf("no audio server available, skipping\n");
     return 77;
   }
+  // A real FM-1 on the bus would be a second "Jangada", and which of the two
+  // a strip takes depends on the order the server lists them in.
+  if (!mixer.engineForTests().sources_matching("Jangada", true).empty()) {
+    std::printf("a real FM-1 is plugged in; this test needs the bus to itself, skipping\n");
+    return 77;
+  }
   FakeUsb usb;
   if (!usb.start()) {
     std::printf("could not open a second JACK client, skipping\n");

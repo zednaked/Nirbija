@@ -33,8 +33,19 @@ instruments below ship with the binary.
 | **Script** | a MIDI plugin you write in Lua, in the mixer |
 | **File Player** | a file into a strip |
 | **Computer Keyboard** | GarageBand-style typing keyboard; no MIDI hardware needed |
+| **FM-1** | the FM-1 with [Jangada](https://github.com/zednaked/jangada) 1.0.1 over USB, as an instrument |
 
 They sit in the picker with everything else you have installed.
+
+**The FM-1.** Put it on a strip and the strip finds the device by itself: its
+USB audio is the strip's input, what the strip plays goes to its tracks, the
+clock goes along. Its editor shows the four tracks as the device has them -
+each engine's own parameters, read from it, moving both ways. The session keeps
+the FM-1's whole project and gives it back when it is opened; a scene can hold
+a track's whole sound and change it on the bar line. How it works:
+[design/fm1.md](design/fm1.md).
+
+![The FM-1 in Nirbija, a step sequencer playing it](docs/fm1.png)
 
 The **Drone** also builds as a standalone CLAP (`build/clap/Nirbija Drone.clap`)
 for other hosts. Copy it into `~/.clap`; it is not part of the install.

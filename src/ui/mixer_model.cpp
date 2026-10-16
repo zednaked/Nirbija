@@ -2000,13 +2000,12 @@ void MixerModel::syncExternals() {
       known->audio_settled = true;
       continue;
     }
-    for (const std::string& port : engine_.available_sources(false)) {
-      if (QString::fromStdString(port).contains(QString::fromStdString(p.device->match),
-                                                Qt::CaseInsensitive)) {
-        known->audio_settled = engine_.connect_source(channel, port, false);
-        refreshRouting(p.row);
-        break;
-      }
+    // By name or alias: PipeWire names the FM-1's audio after its USB ids and
+    // keeps "Jangada" only in the alias (Engine::sources_matching).
+    const std::vector<std::string> found = engine_.sources_matching(p.device->match, false);
+    if (!found.empty()) {
+      known->audio_settled = engine_.connect_source(channel, found.front(), false);
+      refreshRouting(p.row);
     }
   }
 }

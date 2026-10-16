@@ -1075,7 +1075,29 @@ bool contains_nocase(const std::string& text, const std::string& part) {
   return a.find(b) != std::string::npos;
 }
 
+// A port's name or one of its aliases contains `part`.
+bool port_matches(jack_client_t* client, const std::string& name, const std::string& part) {
+  if (contains_nocase(name, part)) return true;
+  jack_port_t* port = jack_port_by_name(client, name.c_str());
+  if (port == nullptr) return false;
+  const int size = jack_port_name_size();
+  std::vector<char> a(static_cast<size_t>(size)), b(static_cast<size_t>(size));
+  char* aliases[2] = {a.data(), b.data()};
+  const int n = jack_port_get_aliases(port, aliases);
+  for (int i = 0; i < n; ++i)
+    if (contains_nocase(aliases[i], part)) return true;
+  return false;
+}
+
 }  // namespace
+
+std::vector<std::string> Engine::sources_matching(const std::string& part, bool midi) const {
+  std::vector<std::string> out;
+  if (client_ == nullptr) return out;
+  for (const std::string& port : available_sources(midi))
+    if (port_matches(client_, port, part)) out.push_back(port);
+  return out;
+}
 
 size_t Engine::attach_external(ExternalMidi* device) {
   if (client_ == nullptr || device == nullptr) return kMaxExternal;
@@ -1119,7 +1141,7 @@ void Engine::detach_external(size_t slot) {
   jack_port_disconnect(client_, record.in);
   if (clock_out_ != nullptr)
     for (const std::string& port : ports_matching(JackPortIsInput, JACK_DEFAULT_MIDI_TYPE, false))
-      if (contains_nocase(port, device->match))
+      if (port_matches(client_, port, device->match))
         jack_disconnect(client_, jack_port_name(clock_out_), port.c_str());
   // A pass that loaded the pointer before it was cleared may still be inside
   // the device. Two finished passes from here mean one started after the
@@ -1143,13 +1165,13 @@ bool Engine::reconnect_external(size_t slot) {
   // The clock goes along: the device follows it when set to (the FM-1's GLO >
   // CLK USB), and the top bar's clock switch decides whether it runs at all.
   for (const std::string& port : ports_matching(JackPortIsInput, JACK_DEFAULT_MIDI_TYPE, false)) {
-    if (!contains_nocase(port, device->match)) continue;
+    if (!port_matches(client_, port, device->match)) continue;
     const int rc = jack_connect(client_, jack_port_name(record.out), port.c_str());
     sent = sent || rc == 0 || rc == EEXIST;
     if (clock_out_ != nullptr) jack_connect(client_, jack_port_name(clock_out_), port.c_str());
   }
   for (const std::string& port : ports_matching(JackPortIsOutput, JACK_DEFAULT_MIDI_TYPE, false)) {
-    if (!contains_nocase(port, device->match)) continue;
+    if (!port_matches(client_, port, device->match)) continue;
     const int rc = jack_connect(client_, port.c_str(), jack_port_name(record.in));
     heard = heard || rc == 0 || rc == EEXIST;
   }
