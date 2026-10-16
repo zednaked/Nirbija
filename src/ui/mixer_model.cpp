@@ -19,6 +19,7 @@
 #include <unistd.h>
 
 #include <QDateTime>
+#include <QProcess>
 #include <QDir>
 #include <QEvent>
 #include <QFile>
@@ -2000,14 +2001,58 @@ void MixerModel::syncExternals() {
       known->audio_settled = true;
       continue;
     }
-    // By name or alias: PipeWire names the FM-1's audio after its USB ids and
-    // keeps "Jangada" only in the alias (Engine::sources_matching).
-    const std::vector<std::string> found = engine_.sources_matching(p.device->match, false);
-    if (!found.empty()) {
-      known->audio_settled = engine_.connect_source(channel, found.front(), false);
-      refreshRouting(p.row);
+    // By name or alias first; else by the PipeWire node the client stands
+    // for, whose name carries the product ("..._Jangada-00...").
+    std::vector<std::string> found = engine_.sources_matching(p.device->match, false);
+    if (found.empty())
+      for (const std::string& port : engine_.available_sources(false)) {
+        const QString client = QString::fromStdString(port.substr(0, port.find(':')));
+        if (pw_audio_clients_.contains(client) && port.find(":monitor_") == std::string::npos)
+          found.push_back(port);
+      }
+    if (found.empty()) {
+      probePipewire(QString::fromStdString(p.device->match));
+      continue;
     }
+    known->audio_settled = engine_.connect_source(channel, found.front(), false);
+    refreshRouting(p.row);
   }
+}
+
+void MixerModel::probePipewire(const QString& part) {
+  const qint64 now = QDateTime::currentMSecsSinceEpoch();
+  if (pw_probe_ != nullptr || (part == pw_probe_part_ && now - pw_probe_at_ < 10000)) return;
+  pw_probe_at_ = now;
+  pw_probe_part_ = part;
+  pw_probe_ = new QProcess(this);
+  connect(pw_probe_, &QProcess::finished, this, [this, part](int code, QProcess::ExitStatus status) {
+    QStringList clients;
+    if (status == QProcess::NormalExit && code == 0) {
+      const QJsonArray objects = QJsonDocument::fromJson(pw_probe_->readAllStandardOutput()).array();
+      for (const QJsonValue& value : objects) {
+        const QJsonObject object = value.toObject();
+        if (object[QStringLiteral("type")].toString() != QStringLiteral("PipeWire:Interface:Node")) continue;
+        const QJsonObject props =
+            object[QStringLiteral("info")].toObject()[QStringLiteral("props")].toObject();
+        if (!props[QStringLiteral("media.class")].toString().startsWith(QStringLiteral("Audio/Source"))) continue;
+        const QString name = props[QStringLiteral("node.name")].toString() + QLatin1Char(' ') +
+                             props[QStringLiteral("node.nick")].toString();
+        if (name.contains(part, Qt::CaseInsensitive))
+          clients.append(props[QStringLiteral("node.description")].toString());
+      }
+    }
+    pw_audio_clients_ = clients;
+    pw_probe_->deleteLater();
+    pw_probe_ = nullptr;
+    externals_rewire_ = 0;  // try the strips again on the next poll
+  });
+  // No pw-dump (not PipeWire, or not installed): the strip keeps "no input".
+  connect(pw_probe_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
+    if (error != QProcess::FailedToStart || pw_probe_ == nullptr) return;
+    pw_probe_->deleteLater();
+    pw_probe_ = nullptr;
+  });
+  pw_probe_->start(QStringLiteral("pw-dump"), {});
 }
 
 void MixerModel::pollLevels() {

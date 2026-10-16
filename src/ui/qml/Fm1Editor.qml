@@ -33,6 +33,12 @@ EditorPopup {
     readonly property var tracks: root.snap.tracks || []
     readonly property var current: root.tracks.length > root.track ? root.tracks[root.track] : null
     readonly property bool connected: root.snap.state === "connected"
+    readonly property var groups: [
+        { engine: true, sends: false, title: "", keys: [49, 50, 51, 52, 53, 54, 55, 56], tall: true },
+        { engine: false, sends: false, title: qsTr("ENVELOPE"), keys: [1, 2, 3, 4], tall: false },
+        { engine: false, sends: true, title: qsTr("FX SENDS"), keys: [33, 34, 35, 36], tall: false },
+        { engine: false, sends: false, title: qsTr("LFO"), keys: [9, 10], tall: false }
+    ]
     readonly property int soundNow: root.current ? (root.current.sound || 0) : 0
 
     function soundLabel(index) {
@@ -311,20 +317,24 @@ EditorPopup {
                                          : qsTr("The bars appear when the FM-1 is connected.")
                 }
 
+                // The models here never change while the editor is open: the
+                // snapshot is new on every tick, and a Repeater handed a new
+                // array rebuilds its items - the bar under the hand vanished
+                // mid-drag and the drag fell through to the window behind it.
                 Repeater {
-                    model: [
-                        { title: root.current && root.current.drum ? "" : (root.current ? root.current.name : ""),
-                          note: qsTr("the eight of EDIT, as on the device"), keys: [49, 50, 51, 52, 53, 54, 55, 56], tall: true },
-                        { title: qsTr("ENVELOPE"), note: "", keys: [1, 2, 3, 4], tall: false },
-                        { title: qsTr("FX SENDS"), note: root.current && root.current.drum
-                              ? qsTr("the drum track: its kit levels are not on the protocol yet") : "",
-                          keys: [33, 34, 35, 36], tall: false },
-                        { title: qsTr("LFO"), note: "", keys: [9, 10], tall: false }
-                    ]
+                    model: root.groups
                     delegate: ColumnLayout {
                         id: groupBox
                         required property var modelData
                         readonly property var params: root.group(groupBox.modelData.keys)
+                        readonly property bool drum: root.current !== null && root.current.drum === true
+                        readonly property string title: groupBox.modelData.engine
+                            ? (root.current && !groupBox.drum ? root.current.name : "")
+                            : groupBox.modelData.title
+                        readonly property string note: groupBox.modelData.engine
+                            ? qsTr("the eight of EDIT, as on the device")
+                            : (groupBox.modelData.sends && groupBox.drum
+                               ? qsTr("the drum track: its kit levels are not on the protocol yet") : "")
                         visible: groupBox.params.length > 0
                         Layout.fillWidth: true
                         spacing: Skin.spacingXS
@@ -332,14 +342,14 @@ EditorPopup {
                         Row {
                             spacing: Skin.spacing
                             Text {
-                                text: groupBox.modelData.title
+                                text: groupBox.title
                                 color: Skin.textDim
                                 font.pixelSize: Skin.fontXS
                                 font.bold: true
                                 font.letterSpacing: Px.px(1.5)
                             }
                             Text {
-                                text: groupBox.modelData.note
+                                text: groupBox.note
                                 color: Skin.disabled
                                 font.pixelSize: Skin.fontXS
                             }
@@ -348,10 +358,12 @@ EditorPopup {
                             Layout.fillWidth: true
                             spacing: Skin.spacingS
                             Repeater {
-                                model: groupBox.params
+                                model: groupBox.params.length
                                 delegate: ParamBar {
                                     id: bar
-                                    required property var modelData
+                                    required property int index
+                                    readonly property var modelData: groupBox.params[bar.index]
+                                        || ({ id: -1, name: "", min: 0, max: 1, value: 0, names: [], mapped: false })
                                     Layout.fillWidth: true
                                     Layout.maximumWidth: Px.px(96)
                                     Layout.preferredHeight: groupBox.modelData.tall ? Px.px(128) : Px.px(76)

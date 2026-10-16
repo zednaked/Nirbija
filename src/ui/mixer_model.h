@@ -776,6 +776,13 @@ class MixerModel : public QAbstractListModel {
   // is freed. Every ~2 s it also wires again the ones not yet wired, for a
   // device plugged in after its strip was made.
   void syncExternals();
+  // The JACK clients of the PipeWire audio sources whose node name or nick
+  // contains `part`. pipewire-jack names a client after the node's
+  // description - for the FM-1 "pid.codes Test PID ...", from the USB ids -
+  // with no alias, so only PipeWire itself knows it is the "Jangada" node.
+  // Asked of pw-dump in the background, at most every 10 s; the answer
+  // serves the next round of syncExternals.
+  void probePipewire(const QString& part);
   // Rebuilds one row's InsertDetailsRole and announces it if it changed.
   // The fingerprint is what the poll compares each tick; the list of maps
   // is only built when the fingerprint moved.
@@ -938,6 +945,10 @@ class MixerModel : public QAbstractListModel {
   };
   std::vector<AttachedExternal> externals_;
   int externals_rewire_ = 0;  // polls until the next rewiring
+  class QProcess* pw_probe_ = nullptr;
+  qint64 pw_probe_at_ = 0;        // ms since the epoch of the last probe
+  QString pw_probe_part_;
+  QStringList pw_audio_clients_;  // its answer
   qreal master_peak_[2] = {0.0, 0.0};
   qreal master_position_[2] = {0.0, 0.0};
   qreal master_hold_[2] = {0.0, 0.0};
