@@ -20,6 +20,10 @@
 namespace nirbija {
 
 class BleMidi;
+struct ExternalMidi;
+
+// How many hardware instruments can be attached at once (FM-1 strips).
+inline constexpr size_t kMaxExternal = 4;
 
 // A parameter edit travelling from the UI thread to the audio thread. Anything
 // that would allocate is built before the message is pushed.
@@ -204,6 +208,23 @@ class Engine {
   // stalled — the caller should surface that, not silently retry.
   bool post(const EngineCommand& command);
 
+  // --- hardware instruments ---------------------------------------------------
+  // UI thread. Gives `device` a pair of MIDI ports, `extN_out` and `extN_in`,
+  // wires them to the JACK ports whose names contain device->match, and
+  // starts servicing it every block (core/external_midi.h). Returns the slot,
+  // or kMaxExternal when none is free or the ports could not be registered.
+  // The ports stay registered when the slot is freed, as a channel's do.
+  size_t attach_external(ExternalMidi* device);
+  // UI thread. Stops servicing the slot and returns once the audio thread can
+  // no longer be inside it, so `device` may be destroyed right after.
+  void detach_external(size_t slot);
+  // UI thread. Wires the slot to the device's ports again, for when the
+  // device was plugged in after attaching. True when both directions are
+  // connected.
+  bool reconnect_external(size_t slot);
+  // JACK port names, for tests and the strip's routing view.
+  std::string external_port_name(size_t slot, bool out) const;
+
  private:
   static int jack_process_trampoline(jack_nframes_t frames, void* arg);
   static int jack_xrun_trampoline(void* arg);
@@ -299,6 +320,19 @@ class Engine {
   bool transport_changed_ = true;
   RtQueue<EngineCommand, 1024> commands_;
   SceneConductor scenes_;
+
+  // Hardware instruments. The UI publishes the device pointer after its ports;
+  // process() services what it finds. `cycles_` counts finished process()
+  // calls, so detach_external() can wait for one that started after the
+  // pointer was cleared.
+  struct ExternalPorts {
+    std::atomic<ExternalMidi*> device{nullptr};
+    jack_port_t* out = nullptr;
+    jack_port_t* in = nullptr;
+  };
+  void service_external(uint32_t frames);
+  std::array<ExternalPorts, kMaxExternal> external_{};
+  std::atomic<uint64_t> cycles_{0};
 };
 
 }  // namespace nirbija

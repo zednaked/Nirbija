@@ -2,11 +2,14 @@
 // Copyright (C) 2026 Nirbija contributors
 #include "core/engine.h"
 #include "core/ble_midi.h"
+#include "core/external_midi.h"
 
 #include <jack/midiport.h>
 #include <sys/mman.h>
 
 #include <algorithm>
+#include <cctype>
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <ctime>
@@ -269,6 +272,10 @@ void Engine::stop() {
   if (client_ == nullptr) return;
   jack_client_close(client_);
   client_ = nullptr;
+  for (ExternalPorts& slot : external_) {
+    slot.device.store(nullptr, std::memory_order_release);
+    slot.out = slot.in = nullptr;
+  }
   master_out_[0] = master_out_[1] = nullptr;
   control_in_ = nullptr;
   clock_out_ = nullptr;
@@ -984,6 +991,8 @@ int Engine::process(jack_nframes_t frames) {
       recorder_.mark_cycle(cycle_usecs);
   }
   graph_->render(master, frames);
+  // Right after the render: the instruments filled their notes in it.
+  service_external(frames);
 
   const size_t channels = graph_->channel_count();
   for (size_t i = 0; i < channels; ++i) {
@@ -1046,7 +1055,141 @@ int Engine::process(jack_nframes_t frames) {
       transport_beats_ += static_cast<double>(frames) / sample_rate_ * tempo / 60.0;
   }
   published_beats_.store(transport_beats_, std::memory_order_relaxed);
+  cycles_.fetch_add(1, std::memory_order_release);
   return 0;
+}
+
+// --- hardware instruments -----------------------------------------------------
+
+namespace {
+
+bool contains_nocase(const std::string& text, const std::string& part) {
+  if (part.empty()) return false;
+  auto lower = [](unsigned char c) { return static_cast<char>(std::tolower(c)); };
+  std::string a(text.size(), 0), b(part.size(), 0);
+  std::transform(text.begin(), text.end(), a.begin(), lower);
+  std::transform(part.begin(), part.end(), b.begin(), lower);
+  return a.find(b) != std::string::npos;
+}
+
+}  // namespace
+
+size_t Engine::attach_external(ExternalMidi* device) {
+  if (client_ == nullptr || device == nullptr) return kMaxExternal;
+  for (size_t i = 0; i < kMaxExternal; ++i) {
+    ExternalPorts& slot = external_[i];
+    if (slot.device.load(std::memory_order_acquire) != nullptr) continue;
+    if (slot.out == nullptr) {
+      const std::string base = "ext" + std::to_string(i + 1);
+      jack_port_t* out = jack_port_register(client_, (base + "_out").c_str(),
+                                            JACK_DEFAULT_MIDI_TYPE, JackPortIsOutput, 0);
+      jack_port_t* in = jack_port_register(client_, (base + "_in").c_str(),
+                                           JACK_DEFAULT_MIDI_TYPE, JackPortIsInput, 0);
+      if (out == nullptr || in == nullptr) {
+        if (out != nullptr) jack_port_unregister(client_, out);
+        if (in != nullptr) jack_port_unregister(client_, in);
+        return kMaxExternal;
+      }
+      slot.out = out;
+      slot.in = in;
+    }
+    // The ports are set before the device is published, and never change
+    // after: a pass that sees the device sees them.
+    slot.device.store(device, std::memory_order_release);
+    reconnect_external(i);
+    return i;
+  }
+  return kMaxExternal;
+}
+
+void Engine::detach_external(size_t slot) {
+  if (slot >= kMaxExternal) return;
+  ExternalPorts& record = external_[slot];
+  if (record.device.exchange(nullptr, std::memory_order_acq_rel) == nullptr) return;
+  if (client_ == nullptr) return;
+  jack_port_disconnect(client_, record.out);
+  jack_port_disconnect(client_, record.in);
+  // A pass that loaded the pointer before it was cleared may still be inside
+  // the device. Two finished passes from here mean one started after the
+  // clear. A server that stopped calling never gets there; a second is far
+  // longer than any period, and then nothing is calling process() anyway.
+  const uint64_t start = cycles_.load(std::memory_order_acquire);
+  for (int waited = 0; waited < 1000; ++waited) {
+    if (cycles_.load(std::memory_order_acquire) >= start + 2) return;
+    timespec pause{0, 1000000};
+    nanosleep(&pause, nullptr);
+  }
+}
+
+bool Engine::reconnect_external(size_t slot) {
+  if (slot >= kMaxExternal || client_ == nullptr) return false;
+  ExternalPorts& record = external_[slot];
+  ExternalMidi* device = record.device.load(std::memory_order_acquire);
+  if (device == nullptr || record.out == nullptr) return false;
+  bool sent = false, heard = false;
+  // The device's input takes what we send; its output is what we read.
+  for (const std::string& port : ports_matching(JackPortIsInput, JACK_DEFAULT_MIDI_TYPE, false)) {
+    if (!contains_nocase(port, device->match)) continue;
+    const int rc = jack_connect(client_, jack_port_name(record.out), port.c_str());
+    sent = sent || rc == 0 || rc == EEXIST;
+  }
+  for (const std::string& port : ports_matching(JackPortIsOutput, JACK_DEFAULT_MIDI_TYPE, false)) {
+    if (!contains_nocase(port, device->match)) continue;
+    const int rc = jack_connect(client_, port.c_str(), jack_port_name(record.in));
+    heard = heard || rc == 0 || rc == EEXIST;
+  }
+  return sent && heard;
+}
+
+std::string Engine::external_port_name(size_t slot, bool out) const {
+  if (slot >= kMaxExternal) return {};
+  jack_port_t* port = out ? external_[slot].out : external_[slot].in;
+  return port != nullptr ? jack_port_name(port) : std::string();
+}
+
+// Audio thread. Moves bytes only: each event in from the device goes into its
+// ring as it came, the instrument's notes go out in time order, then whole
+// frames from the worker, each as one event at the end of the block.
+void Engine::service_external(uint32_t frames) {
+  static uint8_t scratch[ExternalMidi::kRingBytes / 2];  // audio thread only
+  for (ExternalPorts& slot : external_) {
+    ExternalMidi* device = slot.device.load(std::memory_order_acquire);
+    if (device == nullptr) continue;
+
+    if (void* in = jack_port_get_buffer(slot.in, frames)) {
+      const uint32_t count = jack_midi_get_event_count(in);
+      for (uint32_t i = 0; i < count; ++i) {
+        jack_midi_event_t event;
+        if (jack_midi_event_get(&event, in, i) == 0 && event.size > 0)
+          device->from_device.push(event.buffer, event.size);  // full: the worker is gone; drop
+      }
+    }
+
+    void* out = jack_port_get_buffer(slot.out, frames);
+    if (out == nullptr) {
+      device->notes.clear();
+      continue;
+    }
+    jack_midi_clear_buffer(out);
+    device->notes.sort();
+    for (const MidiEvent& event : device->notes) {
+      const uint32_t at = std::min<uint32_t>(event.frame, frames > 0 ? frames - 1 : 0);
+      jack_midi_event_write(out, at, event.data, event.size);
+    }
+    device->notes.clear();
+    const uint32_t last = frames > 0 ? frames - 1 : 0;
+    bool wrote = false;
+    while (size_t n = device->to_device.front()) {
+      if (n > jack_midi_max_event_size(out)) {
+        // Never fits even an empty buffer: drop it rather than wedge the ring.
+        if (!wrote && jack_midi_get_event_count(out) == 0)
+          device->to_device.pop(scratch, 0);
+        break;
+      }
+      n = device->to_device.pop(scratch, sizeof scratch);
+      if (n > 0 && jack_midi_event_write(out, last, scratch, n) == 0) wrote = true;
+    }
+  }
 }
 
 // Reads MIDI beat clock off `clock_in` and makes the transport follow it.

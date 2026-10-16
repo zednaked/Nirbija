@@ -186,9 +186,11 @@ A tabela de sons vai no blob da sessão junto do projeto.
 
 1. ~~Jangada: `TRACK_PARAMS` e `ENG_DESC`~~ feitos no protocolo v8 da
    Jangada 1.0.1 (cmds 97 e 98), com teste de host.
-2. `ExternalMidi` no engine e um FM-1 de mentira nos testes (o protocolo
-   num objeto C++, respondendo pelas filas), com os testes do Link:
-   aperto de mão, timeout, desconexão, pushes no meio de uma resposta.
+2. ~~`ExternalMidi` no engine e um FM-1 de mentira nos testes, com os
+   testes do Link~~ feito: `core/rt_byte_ring.h`, `core/external_midi.h`,
+   `Engine::attach_external` (portas `extN_out`/`extN_in`), `core/fm1_link.*`;
+   `tests/fake_fm1.h`, `tests/fm1_link_test.cpp` (quick) e
+   `tests/ext_midi_jack.cpp` (jack).
 3. `Fm1Instance` com áudio, notas e relógio, sem editor: já é útil.
 4. Sessão: pegar, guardar, devolver, song tocando, desconectado.
 5. Parâmetros e `Fm1Editor.qml`, o visual do mockup.

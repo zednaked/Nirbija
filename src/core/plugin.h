@@ -143,6 +143,8 @@ bool parse_number(std::string_view text, double* out);
 // next save.
 std::string format_number(double value, int decimals);
 
+struct ExternalMidi;
+
 // A plugin's own editor window, embedded into one of ours. Every format that
 // ships a Linux editor draws it with X11, so the parent handle is an X11
 // Window id and the host has to be running on X11 or XWayland for any of this
@@ -299,6 +301,11 @@ class PluginInstance {
     (void)capacity;
     return 0;
   }
+
+  // A hardware instrument this plugin stands for, reached through a pair of
+  // the engine's MIDI ports (core/external_midi.h). Null for every plugin that
+  // is only software, which is all of them but the FM-1. UI thread.
+  virtual ExternalMidi* external_midi() { return nullptr; }
 };
 
 // One per format. Scanning walks the disk, so it never runs on the audio thread.
