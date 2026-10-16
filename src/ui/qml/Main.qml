@@ -427,6 +427,10 @@ ApplicationWindow {
             window.openOrToggle(droneLoader, row, slot)
             return
         }
+        if (Mixer.insertIsFm1(row, slot)) {
+            window.openOrToggle(fm1Loader, row, slot)
+            return
+        }
         if (Mixer.insertIsKeyboardInstrument(row, slot)) {
             window.openOrToggle(keyboardLoader, row, slot)
             return
@@ -794,6 +798,12 @@ ApplicationWindow {
         id: droneLoader
         active: false
         sourceComponent: DroneEditor {}
+    }
+
+    Loader {
+        id: fm1Loader
+        active: false
+        sourceComponent: Fm1Editor {}
     }
 
     Loader {

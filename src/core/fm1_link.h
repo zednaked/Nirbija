@@ -31,6 +31,24 @@ struct Fm1Info {
   int protocol = 0;  // 8 and up: TRACK_SOUND, TRACK_PARAMS, ENG_DESC
 };
 
+// One parameter of a track as the editor shows it, from ENG_DESC.
+struct Fm1Param {
+  uint8_t key = 0;  // its stable key (Jangada's keys.h): what ids and sessions use
+  std::string name;
+  int min = 0;
+  int max = 127;
+  int def = 0;
+  std::vector<std::string> names;  // an enum's value names, else empty
+};
+
+// What the editor shows of one track: its engine and its parameters, in the
+// order they are drawn. Empty `params` until the device was read.
+struct Fm1Track {
+  int engine = -1;  // NENGINES (info().engines) = the drum track
+  std::string engine_name;
+  std::vector<Fm1Param> params;
+};
+
 // Something the FM-1 told us without being asked: CHANGED (23), RELOAD (24),
 // STEP_CHANGED (26), TRACK_CHANGED (32). `args` are the bytes after the cmd.
 struct Fm1Push {
@@ -80,11 +98,33 @@ class Fm1Link {
   // not connected, or when the device never answered.
   std::optional<std::vector<uint8_t>> call(uint8_t cmd, const std::vector<uint8_t>& args);
 
-  // Audio thread. A track's parameter (its index on the device) moves. Only
+  // Audio thread. A track's parameter, named by its stable key, moves. Only
   // the latest value of each goes out, in one TRACK_PARAMS with every other
-  // that moved, as soon as the previous request is answered. False when the
-  // queue is full, which the next block's value makes good.
-  bool set_param_rt(uint8_t track, uint8_t id, int value);
+  // that moved, as soon as the previous request is answered (the Link turns
+  // the key into the device's index). False when the queue is full, which the
+  // next block's value makes good.
+  bool set_param_rt(uint8_t track, uint8_t key, int value);
+  // The same from any other thread (the UI).
+  void set_param(uint8_t track, uint8_t key, int value);
+
+  // --- the tracks as the editor shows them -----------------------------------
+  // Read on connecting and after every RELOAD (an engine, a preset or a
+  // project loaded on the device): each track's engine and parameters.
+  // `board_generation()` moves each time the list changed. Any thread.
+  std::array<Fm1Track, kMaxTracks> board() const;
+  uint64_t board_generation() const { return board_gen_.load(std::memory_order_acquire); }
+  // The track selected on the device (its CHANGED pushes are about it).
+  int selected_track() const { return selected_.load(std::memory_order_relaxed); }
+  // A value as last known: read from the device, pushed by it, or set here.
+  // Any thread, the audio one too. 0 for a key never seen.
+  int value(uint8_t track, uint8_t key) const;
+  // Values the player turned on the device since the last call (CHANGED
+  // pushes), as (track, key, value). UI thread.
+  struct Touch {
+    uint8_t track, key;
+    int value;
+  };
+  std::vector<Touch> take_touches();
 
   // UI thread. The pushes since the last call, oldest first.
   std::vector<Fm1Push> take_pushes();
@@ -100,6 +140,12 @@ class Fm1Link {
   // replaces one not yet done.
   void put_project(std::vector<uint8_t> project);
   PutState put_state() const { return put_state_.load(std::memory_order_acquire); }
+  // Any thread. Read the project now instead of waiting for a quiet spell
+  // (the editor's "Read from FM-1").
+  void read_project_now() {
+    read_now_.store(true, std::memory_order_release);
+    wake_.notify_all();
+  }
 
   // For tests and the strip's status line.
   uint64_t params_frames_sent() const { return params_frames_.load(std::memory_order_relaxed); }
@@ -131,6 +177,8 @@ class Fm1Link {
   void gather_params();
   std::vector<uint8_t> take_params_frame();
   std::optional<std::vector<uint8_t>> read_project();
+  bool read_board();
+  void note_push(uint8_t cmd, const std::vector<uint8_t>& args);
   // 0 done, 3 the song plays, anything else refused or lost.
   int write_project(const std::vector<uint8_t>& project);
 
@@ -147,6 +195,7 @@ class Fm1Link {
   std::vector<Fm1Push> pushes_;
 
   RtQueue<ParamMove, 1024> param_moves_;
+  std::vector<ParamMove> ui_moves_;  // under mutex_
   // Link thread only: the latest value of each parameter not yet sent.
   std::array<std::array<int16_t, kMaxParams>, kMaxTracks> pending_{};
   std::array<std::array<bool, kMaxParams>, kMaxTracks> dirty_{};
@@ -158,6 +207,19 @@ class Fm1Link {
   std::atomic<PutState> put_state_{PutState::None};
   std::atomic<uint64_t> projects_read_{0};
   bool project_stale_ = true;  // changed (or never read) since the last read
+  std::atomic<bool> read_now_{false};
+
+  // The board. `board_` and `touches_` under mutex_; values atomic; the maps
+  // and the description cache Link thread only.
+  std::array<Fm1Track, kMaxTracks> board_{};
+  std::atomic<uint64_t> board_gen_{0};
+  std::atomic<int> selected_{0};
+  std::array<std::array<std::atomic<int16_t>, kMaxParams>, kMaxTracks> values_{};
+  std::vector<Touch> touches_;
+  std::array<int16_t, kMaxParams> key_to_index_{};  // -1: unknown
+  std::array<int16_t, 256> index_to_key_{};
+  std::vector<std::pair<int, std::vector<Fm1Param>>> descs_;  // per engine
+  bool board_stale_ = true;
   std::chrono::steady_clock::time_point changed_at_{};
   std::chrono::steady_clock::time_point put_after_{};
 

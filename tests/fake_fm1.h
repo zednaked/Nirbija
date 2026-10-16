@@ -76,6 +76,33 @@ class FakeFm1 {
   }
   int largest_params_frame() const { return largest_params_.load(); }
 
+  // Keys are not indices on the real device either: index i carries key
+  // (i * 37 + 11) % 105, a permutation, so a Link that sends a key where an
+  // index belongs lands on the wrong parameter here.
+  static int key_of(int index) { return (index * 37 + 11) % kParams; }
+  static int index_of(int key) {
+    for (int i = 0; i < kParams; ++i)
+      if (key_of(i) == key) return i;
+    return -1;
+  }
+  int param_key(int track, int key) { return param(track, index_of(key)); }
+  void set_param_key(int track, int key, int value) { set(track, index_of(key), value); }
+  // Engines of the tracks: 0 ANALOG, 1 FM6, 2 (NENGINES) the drum track.
+  std::atomic<int> engine[kTracks] = {0, 1, 0, 2};
+  std::atomic<int> selected{0};
+  int desc_requests() { return received(98); }
+  // As loading a preset on the device: the track's engine changes, RELOAD.
+  void reload_soon(int track, int new_engine) {
+    engine[track] = new_engine;
+    selected = track;
+    reload_ = true;
+  }
+  // As turning a knob of the selected track: CHANGED with its index.
+  void turn_soon(int key, int value) {
+    set_param_key(selected, key, value);
+    push_changed_soon(index_of(key), value);
+  }
+
   // A push of its own, as when a knob turns on the device. It leaves from the
   // device's own thread, the one producer of `from_device`.
   void push_changed_soon(int id, int value) {
@@ -135,6 +162,10 @@ class FakeFm1 {
     while (running_) {
       const int id = push_id_.exchange(-1);
       if (id >= 0 && !unplugged) push_changed(id, push_value_);
+      if (reload_.exchange(false) && !unplugged) {
+        const int t = selected;
+        send(24, {static_cast<uint8_t>(engine[t].load()), 0, static_cast<uint8_t>(t)});
+      }
       size_t n = device_.to_device.pop(in, sizeof in);
       if (n == 0) {
         std::this_thread::sleep_for(std::chrono::microseconds(300));
@@ -198,6 +229,41 @@ class FakeFm1 {
           r.push_back(q[0]);
           r.push_back(q[1]);
           v14(r, param(q[0], q[1]));
+        }
+        break;
+      }
+      case 27:  // TRACK: selected, NTRK, per track: engine, preset, level v14, mute, armed
+        r = {static_cast<uint8_t>(selected.load()), kTracks};
+        for (int t = 0; t < kTracks; ++t) {
+          r.push_back(static_cast<uint8_t>(engine[t].load()));
+          r.push_back(0);
+          v14(r, 100);
+          r.push_back(0);
+          r.push_back(0);
+        }
+        break;
+      case 96: {  // TRACK_SOUND get: track, engine, count, count x (key, v14)
+        if (na != 1 || a[0] >= kTracks) return;
+        r = {a[0], static_cast<uint8_t>(engine[a[0]].load()), kParams, 0};
+        for (int i = 0; i < kParams; ++i) {
+          r.push_back(static_cast<uint8_t>(key_of(i)));
+          v14(r, param(a[0], i));
+        }
+        break;
+      }
+      case 98: {  // ENG_DESC: engine, id -> engine, id, fmt, min, max, def, label, unit, names
+        if (na < 2 || a[0] >= 2 || a[1] >= kParams) return;
+        const Desc d = describe(a[0], key_of(a[1]));
+        r = {a[0], a[1], static_cast<uint8_t>(d.names.empty() ? 0 : 8)};
+        v14(r, d.min);
+        v14(r, d.max);
+        v14(r, d.def);
+        for (char c : d.label) r.push_back(static_cast<uint8_t>(c));
+        r.push_back(0);
+        r.push_back(0);  // no unit
+        for (const std::string& name : d.names) {
+          for (char c : name) r.push_back(static_cast<uint8_t>(c));
+          r.push_back(0);
         }
         break;
       }
@@ -277,9 +343,43 @@ class FakeFm1 {
     send(cmd, r);
   }
 
+  // Jangada's own names and ranges for what the editor shows (engines.c,
+  // eng_analog.c, eng_fm6.c, params.c), the rest as "K<key>".
+  struct Desc {
+    std::string label;
+    int min = 0, max = 127, def = 64;
+    std::vector<std::string> names;
+  };
+  static Desc describe(int engine, int key) {
+    static const char* const analog[] = {"WAVE", "DTN", "MIX", "NOIS", "CUT", "RES", "DRV", "KTR"};
+    static const char* const fm6[] = {"ALG", "FB", "MLVL", "MRAT", "MEG", "VMOD", "DTUN", "PTCH"};
+    if (key >= 49 && key <= 56) {
+      const int e = key - 49;
+      if (engine == 1) {
+        static const int lo[] = {0, -7, -64, -16, -64, -7, 0, 0}, hi[] = {32, 7, 63, 16, 63, 7, 127, 71};
+        return {fm6[e], lo[e], hi[e], 0, {}};
+      }
+      if (e == 0) return {"WAVE", 0, 4, 0, {"SAW", "SQR", "TRI", "SIN", "PWM"}};
+      return {analog[e], 0, 127, 64, {}};
+    }
+    switch (key) {
+      case 1: return {"ATK", 0, 127, 10, {}};
+      case 2: return {"DEC", 0, 127, 70, {}};
+      case 3: return {"SUS", 0, 127, 90, {}};
+      case 4: return {"REL", 0, 127, 60, {}};
+      case 33: return {"DST", 0, 127, 0, {}};
+      case 34: return {"CHO", 0, 127, 0, {}};
+      case 35: return {"DLY", 0, 127, 0, {}};
+      case 36: return {"REV", 0, 127, 0, {}};
+      case 9: return {"RATE", 0, 127, 60, {}};
+      case 10: return {"WAVE", 0, 5, 0, {"SIN", "TRI", "SAW", "SQR", "S&H", "RND"}};
+      default: return {"K" + std::to_string(key), 0, 127, 0, {}};
+    }
+  }
+
   void set(int track, int id, int value) {
     std::lock_guard<std::mutex> lock(mutex_);
-    params_[track][id] = value < 0 ? 0 : value > 127 ? 127 : value;
+    params_[track][id] = value < -64 ? -64 : value > 127 ? 127 : value;  // FB, MEG go below 0
   }
 
   void send(uint8_t cmd, const std::vector<uint8_t>& args) {
@@ -304,6 +404,7 @@ class FakeFm1 {
   std::atomic<int> watch_{0};
   std::atomic<int> largest_params_{0};
   std::atomic<int> push_id_{-1};
+  std::atomic<bool> reload_{false};
   std::vector<uint8_t> project_, snapshot_, staging_;
   uint32_t staged_len_ = 0, staged_crc_ = 0;
   bool staging_on_ = false;

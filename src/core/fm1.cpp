@@ -3,6 +3,8 @@
 #include "core/fm1.h"
 
 #include <algorithm>
+#include <cmath>
+#include <ctime>
 
 namespace nirbija {
 
@@ -112,10 +114,67 @@ bool Fm1Instance::load_state(const std::vector<uint8_t>& blob) {
 bool Fm1Instance::take_state_dirty() {
   auto project = link_.take_project();
   if (!project) return false;
+  read_at_.store(static_cast<int64_t>(std::time(nullptr)), std::memory_order_relaxed);
   std::lock_guard<std::mutex> lock(mutex_);
   if (*project == project_) return false;
   project_ = std::move(*project);
   return true;
+}
+
+void Fm1Instance::send_project_again() {
+  std::vector<uint8_t> project;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    project = project_;
+  }
+  if (!project.empty()) link_.put_project(std::move(project));
+}
+
+size_t Fm1Instance::project_bytes() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return project_.size();
+}
+
+std::vector<ParameterInfo> Fm1Instance::parameters() const {
+  std::vector<ParameterInfo> out;
+  const auto board = link_.board();
+  for (size_t t = 0; t < board.size(); ++t) {
+    for (const Fm1Param& p : board[t].params) {
+      ParameterInfo info;
+      info.id = param_id(static_cast<int>(t), p.key);
+      info.name = "T" + std::to_string(t + 1) + " " + p.name;
+      info.min_value = p.min;
+      info.max_value = p.max;
+      info.default_value = p.def;
+      // An enum (a wave, a filter type) jumps on the bar line; a level walks.
+      info.stepped = !p.names.empty();
+      out.push_back(std::move(info));
+    }
+  }
+  return out;
+}
+
+double Fm1Instance::parameter_value(uint32_t id) const {
+  return link_.value(static_cast<uint8_t>(id >> 8), static_cast<uint8_t>(id & 0xff));
+}
+
+void Fm1Instance::set_parameter(uint32_t id, double value) {
+  link_.set_param(static_cast<uint8_t>(id >> 8), static_cast<uint8_t>(id & 0xff),
+                  static_cast<int>(std::lround(value)));
+}
+
+void Fm1Instance::set_parameter_rt(uint32_t id, double value) {
+  link_.set_param_rt(static_cast<uint8_t>(id >> 8), static_cast<uint8_t>(id & 0xff),
+                     static_cast<int>(std::lround(value)));
+}
+
+size_t Fm1Instance::take_touched(TouchedParam* out, size_t capacity) {
+  for (const Fm1Link::Touch& t : link_.take_touches())
+    touched_.push_back({param_id(t.track, t.key), static_cast<double>(t.value)});
+  const size_t n = std::min(capacity, touched_.size());
+  std::copy_n(touched_.begin(), n, out);
+  touched_.erase(touched_.begin(), touched_.begin() + static_cast<std::ptrdiff_t>(n));
+  return n;
 }
 
 void Fm1Instance::queue_midi(const MidiEvent& event) {

@@ -119,6 +119,10 @@ if(NIRBIJA_UI)
     PRIVATE nirbija_ui nirbija_uiplugin Qt6::Quick Qt6::QuickControls2 Qt6::Widgets)
 endif()
 
+# Manual tool, not a test: the simulated FM-1 on the JACK bus (fake_fm1_jack.cpp).
+add_executable(nirbija_fake_fm1_jack fake_fm1_jack.cpp)
+target_link_libraries(nirbija_fake_fm1_jack PRIVATE nirbija_core)
+
 add_executable(nirbija_midi_synth midi_synth.cpp)
 target_link_libraries(nirbija_midi_synth PRIVATE nirbija_core)
 add_test(NAME midi_synth COMMAND nirbija_midi_synth)

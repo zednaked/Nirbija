@@ -201,7 +201,12 @@ A tabela de sons vai no blob da sessão junto do projeto.
    antes de qualquer leitura), o blob "NFM1" com seções em `Fm1Instance`;
    testes em `fm1_link`. Falta: ler de novo ao salvar a sessão à mão (hoje
    lê ao conectar e 30 s depois de o FM-1 mudar e ficar quieto).
-5. Parâmetros e `Fm1Editor.qml`, o visual do mockup.
+5. ~~Parâmetros e `Fm1Editor.qml`, o visual do mockup~~ feito: o Link lê
+   o quadro (TRACK, TRACK_SOUND, ENG_DESC por engine, em cache) ao conectar
+   e a cada RELOAD, e os CHANGED viram a mão do jogador; `Fm1Editor.qml`
+   com as quatro tracks, os botões Read from FM-1 / Send back e o estado
+   da devolução. `tests/fake_fm1_jack.cpp` põe o FM-1 de mentira no JACK
+   para o `nirbija_editor_probe nirbija.fm1` fotografar o editor.
 6. SOM nas cenas.
 7. No FM-1 de verdade: latência das notas, cliques na troca de som, o
    projeto devolvido depois de desligar e ligar.

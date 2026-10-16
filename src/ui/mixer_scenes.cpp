@@ -310,8 +310,9 @@ bool MixerModel::sceneParamAllowed(const PluginInstance* insert) {
   // scene that pressed them again on every bar line would be a bug, and the
   // sequencer's part in a scene is its pattern. The script recompiles its
   // tables on the UI thread when a knob moves, which the audio thread cannot.
+  // The FM-1's values travel to the device from its Link, never from here.
   static const char* const kAllowed[] = {"nirbija.fxpad", "nirbija.drone",
-                                         "nirbija.arp", "nirbija.chord"};
+                                         "nirbija.arp", "nirbija.chord", "nirbija.fm1"};
   for (const char* uid : kAllowed)
     if (descriptor.uid == uid) return true;
   return false;

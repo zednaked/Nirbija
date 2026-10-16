@@ -323,6 +323,15 @@ class MixerModel : public QAbstractListModel {
   // separate reads. Writes go by parameter id; the swell is performance and
   // does not schedule a save, everything else is the drone and does.
   Q_INVOKABLE bool insertIsDrone(int row, int slot) const;
+  // The FM-1 (design/fm1.md). The snapshot is what Fm1Editor draws, read on
+  // every tick: the connection, the session's copy of the project, and the
+  // four tracks with their shown parameters (id, key, name, min, max, value,
+  // value names, mapped).
+  Q_INVOKABLE bool insertIsFm1(int row, int slot) const;
+  Q_INVOKABLE QVariantMap insertFm1Snapshot(int row, int slot) const;
+  Q_INVOKABLE void setFm1Param(int row, int slot, int id, qreal value);
+  Q_INVOKABLE void fm1ReadNow(int row, int slot);
+  Q_INVOKABLE void fm1SendProject(int row, int slot);
   Q_INVOKABLE QVariantMap insertDroneSnapshot(int row, int slot) const;
   Q_INVOKABLE void setDroneParam(int row, int slot, int id, qreal value);
   Q_INVOKABLE QStringList dronePresetNames() const;

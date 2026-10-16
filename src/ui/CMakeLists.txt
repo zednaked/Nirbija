@@ -45,6 +45,7 @@ set(nirbija_qml
   qml/LooperEditor.qml
   qml/FxPad.qml
   qml/DroneEditor.qml
+  qml/Fm1Editor.qml
   qml/StepGrid.qml
   qml/KeyboardEditor.qml
   qml/SamplerEditor.qml

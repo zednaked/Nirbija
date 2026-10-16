@@ -8,6 +8,7 @@
 // cable pulled and put back, the keepalive, and parameter moves from the
 // audio thread arriving coalesced in TRACK_PARAMS. And the byte ring itself.
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <functional>
@@ -192,9 +193,10 @@ void params() {
   });
   audio.join();
   expect(within(1000, [&] {
-           return fm1.param(0, 64) == 127 && fm1.param(1, 65) == 0 && fm1.param(3, 70) == 299 % 128;
+           return fm1.param_key(0, 64) == 127 && fm1.param_key(1, 65) == 0 &&
+                  fm1.param_key(3, 70) == 299 % 128;
          }),
-         "params: the last value of each fade arrives");
+         "params: the last value of each fade arrives, on the index the device gave each key");
   const uint64_t frames = link.params_frames_sent();
   expect(frames > 3 && frames < 150,
          "params: 900 moves over 300 blocks, ~5 ms a reply, went out coalesced in " +
@@ -202,7 +204,7 @@ void params() {
   // 200 parameters at once: two frames, none over 127.
   for (int t = 0; t < 2; ++t)
     for (int id = 0; id < 100; ++id) link.set_param_rt(static_cast<uint8_t>(t), static_cast<uint8_t>(id), 50);
-  expect(within(1000, [&] { return fm1.param(1, 99) == 50 && fm1.param(0, 0) == 50; }) &&
+  expect(within(1000, [&] { return fm1.param_key(1, 99) == 50 && fm1.param_key(0, 0) == 50; }) &&
              fm1.largest_params_frame() <= 127,
          "params: 200 at once arrive, no frame over 127 entries");
   link.stop();
@@ -335,6 +337,55 @@ void session_restore() {
   device.stop();
 }
 
+void board() {
+  nirbija::Fm1Instance fm1(session_timing());
+  FakeFm1 device(*fm1.external_midi());
+  device.set_param_key(0, 53, 99);  // track 1's CUT
+  device.set_param_key(1, 50, -3);  // track 2's FB (FM6)
+  device.start();
+  fm1.activate(48000.0, 256);
+  nirbija::Fm1Link& link = fm1.link();
+  expect(within(2000, [&] { return link.board_generation() >= 1; }), "board: read on connecting");
+  auto b = link.board();
+  expect(b[0].engine_name == "ANALOG" && b[0].params.size() == 18 && b[0].params[0].name == "WAVE" &&
+             b[0].params[0].names.size() == 5 && b[0].params[4].name == "CUT",
+         "board: track 1 ANALOG, 18 shown, WAVE an enum with its five names, CUT fifth");
+  expect(b[1].engine_name == "FM6" && b[1].params[1].name == "FB" && b[1].params[1].min == -7,
+         "board: track 2 FM6, its own EDIT (FB -7..7)");
+  expect(b[3].engine_name == "DRUMS" && b[3].params.size() == 4 && b[3].params[0].name == "DST",
+         "board: the drum track, its four sends only");
+  expect(link.value(0, 53) == 99 && link.value(1, 50) == -3,
+         "board: values by key, from the index the device gave each");
+  expect(device.desc_requests() == 36, "board: two engines described, 18 each (the drum track's sends reuse ANALOG's)");
+
+  const auto params = fm1.parameters();
+  bool ids = params.size() == 18 * 3 + 4;
+  for (const auto& p : params)
+    if ((p.id >> 8) > 3 || (p.id & 0xff) >= 128) ids = false;
+  const auto wave = std::find_if(params.begin(), params.end(),
+                                 [](const nirbija::ParameterInfo& p) { return p.id == (0u << 8 | 49u); });
+  expect(ids && wave != params.end() && wave->stepped && wave->name == "T1 WAVE" &&
+             fm1.parameter_value(0u << 8 | 53u) == 99.0,
+         "instance: 58 parameters, id = track << 8 | key, enums stepped, values read");
+
+  fm1.set_parameter(2u << 8 | 36u, 77);  // track 3's REV from the editor
+  expect(within(1000, [&] { return device.param_key(2, 36) == 77; }), "instance: a bar moved here reaches the device");
+
+  device.turn_soon(53, 12);  // CUT turned on the device (track 1 is selected)
+  nirbija::TouchedParam touched[8];
+  size_t n = 0;
+  within(1000, [&] { return (n = fm1.take_touched(touched, 8)) > 0; });
+  expect(n == 1 && touched[0].id == (0u << 8 | 53u) && touched[0].value == 12.0 && link.value(0, 53) == 12,
+         "instance: a knob turned on the FM-1 is the player's hand, for the scenes");
+
+  const uint64_t gen = link.board_generation();
+  device.reload_soon(2, 1);  // track 3 loads an FM6 preset on the device
+  expect(within(2000, [&] { return link.board_generation() > gen; }) && link.board()[2].engine_name == "FM6" &&
+             link.board()[2].params[0].name == "ALG" && device.desc_requests() == 36 && link.selected_track() == 2,
+         "board: RELOAD after an engine change, read again; FM6 already described, no new ENG_DESC");
+  device.stop();
+}
+
 void session_blobs() {
   const auto p = some_project(100, 4);
   auto blob = nirbija::Fm1Instance::pack_state(p);
@@ -363,6 +414,7 @@ int main() {
   cable();
   params();
   instance();
+  board();
   session_blobs();
   session_read();
   session_restore();

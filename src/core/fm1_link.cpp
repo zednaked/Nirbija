@@ -19,6 +19,21 @@ constexpr uint8_t kBackupList = 34;
 constexpr uint8_t kBackupGet = 35;
 constexpr uint8_t kBackupPut = 36;
 constexpr size_t kChunk = 256;  // the most one BK_GET / BK_PUT carries
+constexpr uint8_t kTrack = 27;
+constexpr uint8_t kTrackSound = 96;
+constexpr uint8_t kEngineDesc = 98;
+constexpr int kEnumFormat = 8;
+
+// What the editor shows, by stable key (Jangada's keys.h): the engine's eight
+// EDIT parameters, the envelope, the sends, the LFO. The drum track has no
+// engine: its sends only.
+constexpr uint8_t kSynthKeys[] = {49, 50, 51, 52, 53, 54, 55, 56,  // E0..E7
+                                  1, 2, 3, 4,                      // ATK DEC SUS REL
+                                  33, 34, 35, 36,                  // DST CHO DLY REV
+                                  9, 10};                          // LFO RATE, WAVE
+constexpr uint8_t kDrumKeys[] = {33, 34, 35, 36};
+
+int v14(const uint8_t* p) { return (p[0] | p[1] << 7) - 8192; }
 constexpr size_t kMaxFrame = 1024;  // the device's largest reply is under 900
 constexpr size_t kMaxPushes = 1024;
 
@@ -97,7 +112,10 @@ std::optional<Fm1Info> parse_info(const std::vector<uint8_t>& a) {
 }  // namespace
 
 Fm1Link::Fm1Link(ExternalMidi& device) : Fm1Link(device, Timing{}) {}
-Fm1Link::Fm1Link(ExternalMidi& device, Timing timing) : device_(device), timing_(timing) {}
+Fm1Link::Fm1Link(ExternalMidi& device, Timing timing) : device_(device), timing_(timing) {
+  key_to_index_.fill(-1);
+  index_to_key_.fill(-1);
+}
 Fm1Link::~Fm1Link() { stop(); }
 
 void Fm1Link::start() {
@@ -131,12 +149,145 @@ std::optional<std::vector<uint8_t>> Fm1Link::call(uint8_t cmd,
   return request.reply;
 }
 
-bool Fm1Link::set_param_rt(uint8_t track, uint8_t id, int value) {
+bool Fm1Link::set_param_rt(uint8_t track, uint8_t key, int value) {
+  if (track >= kMaxTracks || key >= kMaxParams) return false;
   ParamMove move;
   move.track = track;
-  move.id = id;
+  move.id = key;
   move.value = static_cast<int16_t>(value < -8192 ? -8192 : value > 8191 ? 8191 : value);
+  values_[track][key].store(move.value, std::memory_order_relaxed);
   return param_moves_.push(move);
+}
+
+void Fm1Link::set_param(uint8_t track, uint8_t key, int value) {
+  if (track >= kMaxTracks || key >= kMaxParams) return;
+  ParamMove move;
+  move.track = track;
+  move.id = key;
+  move.value = static_cast<int16_t>(value < -8192 ? -8192 : value > 8191 ? 8191 : value);
+  values_[track][key].store(move.value, std::memory_order_relaxed);
+  std::lock_guard<std::mutex> lock(mutex_);
+  ui_moves_.push_back(move);
+  wake_.notify_all();
+}
+
+int Fm1Link::value(uint8_t track, uint8_t key) const {
+  if (track >= kMaxTracks || key >= kMaxParams) return 0;
+  return values_[track][key].load(std::memory_order_relaxed);
+}
+
+std::array<Fm1Track, Fm1Link::kMaxTracks> Fm1Link::board() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return board_;
+}
+
+std::vector<Fm1Link::Touch> Fm1Link::take_touches() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<Touch> out;
+  out.swap(touches_);
+  return out;
+}
+
+// Link thread: what a push says about the board.
+void Fm1Link::note_push(uint8_t cmd, const std::vector<uint8_t>& a) {
+  if (cmd == 24) {  // RELOAD: engine, preset, the selected track
+    if (a.size() >= 3) selected_.store(a[2], std::memory_order_relaxed);
+    board_stale_ = true;
+    return;
+  }
+  int track = -1, id = -1, value = 0;
+  if (cmd == 23 && a.size() >= 4 && a[0] == 0) {  // CHANGED of the selected track
+    track = selected_.load(std::memory_order_relaxed);
+    id = a[1];
+    value = v14(a.data() + 2);
+  } else if (cmd == 32 && a.size() >= 4) {  // TRACK_CHANGED: another track's mix
+    track = a[0];
+    id = a[1];
+    value = v14(a.data() + 2);
+  }
+  if (track < 0 || track >= static_cast<int>(kMaxTracks) || id < 0 || id >= 256) return;
+  const int key = index_to_key_[static_cast<size_t>(id)];
+  if (key < 0 || key >= static_cast<int>(kMaxParams)) return;
+  values_[static_cast<size_t>(track)][static_cast<size_t>(key)].store(
+      static_cast<int16_t>(value), std::memory_order_relaxed);
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (touches_.size() < 1024)
+    touches_.push_back({static_cast<uint8_t>(track), static_cast<uint8_t>(key), value});
+}
+
+// TRACK (the selected track), TRACK_SOUND of each track (its engine and every
+// value by key, which also gives the device's index of each key), then
+// ENG_DESC of the shown parameters of any engine not described yet.
+bool Fm1Link::read_board() {
+  auto tracks = exchange(kTrack, {});
+  if (!tracks || tracks->size() < 2) return false;
+  selected_.store((*tracks)[0], std::memory_order_relaxed);
+  const int ntrk = std::min<int>((*tracks)[1], kMaxTracks);
+  const Fm1Info info = this->info();
+  std::array<Fm1Track, kMaxTracks> board{};
+  for (int t = 0; t < ntrk; ++t) {
+    auto sound = exchange(kTrackSound, {static_cast<uint8_t>(t)});
+    if (!sound || sound->size() < 4) return false;
+    const int engine = (*sound)[1];
+    const size_t count = (*sound)[2] | (*sound)[3] << 7;
+    if (sound->size() < 4 + 3 * count) return false;
+    for (size_t i = 0; i < count && i < index_to_key_.size(); ++i) {
+      const uint8_t* q = sound->data() + 4 + 3 * i;
+      if (q[0] >= kMaxParams) continue;
+      key_to_index_[q[0]] = static_cast<int16_t>(i);
+      index_to_key_[i] = q[0];
+      values_[t][q[0]].store(static_cast<int16_t>(v14(q + 1)), std::memory_order_relaxed);
+    }
+    const bool drum = engine >= info.engines;
+    const int described = drum ? 0 : engine;  // the sends read the same on any engine
+    auto cached = std::find_if(descs_.begin(), descs_.end(),
+                               [&](const auto& e) { return e.first == described; });
+    if (cached == descs_.end()) {
+      std::vector<Fm1Param> params;
+      for (uint8_t key : kSynthKeys) {
+        const int index = key_to_index_[key];
+        if (index < 0) continue;
+        auto d = exchange(kEngineDesc, {static_cast<uint8_t>(described), static_cast<uint8_t>(index)});
+        // engine, id, fmt, min, max, def, label, unit, enum names
+        if (!d || d->size() < 10) return false;
+        Fm1Param p;
+        p.key = key;
+        const int format = (*d)[2];
+        p.min = v14(d->data() + 3);
+        p.max = v14(d->data() + 5);
+        p.def = v14(d->data() + 7);
+        size_t at = 9;
+        auto text = [&]() {
+          std::string out;
+          while (at < d->size() && (*d)[at] != 0) out.push_back(static_cast<char>((*d)[at++]));
+          ++at;
+          return out;
+        };
+        p.name = text();
+        text();  // the unit
+        if (format == kEnumFormat)
+          for (int v = p.min; v <= p.max && at < d->size(); ++v) p.names.push_back(text());
+        params.push_back(std::move(p));
+      }
+      descs_.emplace_back(described, std::move(params));
+      cached = std::prev(descs_.end());
+    }
+    Fm1Track& track = board[static_cast<size_t>(t)];
+    track.engine = engine;
+    track.engine_name = drum ? "DRUMS"
+                        : engine < static_cast<int>(info.engine_names.size()) ? info.engine_names[engine]
+                                                                               : "?";
+    for (uint8_t key : drum ? std::vector<uint8_t>(std::begin(kDrumKeys), std::end(kDrumKeys))
+                            : std::vector<uint8_t>(std::begin(kSynthKeys), std::end(kSynthKeys)))
+      for (const Fm1Param& p : cached->second)
+        if (p.key == key) track.params.push_back(p);
+  }
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    board_ = std::move(board);
+  }
+  board_gen_.fetch_add(1, std::memory_order_acq_rel);
+  return true;
 }
 
 std::optional<std::vector<uint8_t>> Fm1Link::take_project() {
@@ -234,6 +385,7 @@ void Fm1Link::go_disconnected() {
   fail_requests();
   project_stale_ = true;  // read again on the way back, unless a put waits
   changed_at_ = {};
+  board_stale_ = true;
 }
 
 bool Fm1Link::send_frame(uint8_t cmd, const std::vector<uint8_t>& args) {
@@ -271,6 +423,7 @@ std::optional<std::vector<uint8_t>> Fm1Link::read_incoming(uint8_t waiting) {
         if (is_push(cmd)) {
           project_stale_ = true;  // something changed on the device
           changed_at_ = Clock::now();
+          note_push(cmd, args);
           std::lock_guard<std::mutex> lock(mutex_);
           if (pushes_.size() >= kMaxPushes) pushes_.erase(pushes_.begin());
           pushes_.push_back(Fm1Push{cmd, std::move(args)});
@@ -325,6 +478,16 @@ bool Fm1Link::try_connect() {
 }
 
 void Fm1Link::gather_params() {
+  std::vector<ParamMove> from_ui;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    from_ui.swap(ui_moves_);
+  }
+  for (const ParamMove& move : from_ui) {
+    if (move.track >= kMaxTracks || move.id >= kMaxParams) continue;
+    pending_[move.track][move.id] = move.value;
+    dirty_[move.track][move.id] = true;
+  }
   ParamMove move;
   while (param_moves_.pop(move)) {
     if (move.track >= kMaxTracks || move.id >= kMaxParams) continue;
@@ -333,17 +496,20 @@ void Fm1Link::gather_params() {
   }
 }
 
-// TRACK_PARAMS: n, n x (track, id, value + 8192 as two 7-bit bytes). At most
-// 127 a frame; the rest wait for the next.
+// TRACK_PARAMS: n, n x (track, index, value + 8192 as two 7-bit bytes). At
+// most 127 a frame; the rest wait for the next. A key the device has not told
+// us the index of yet (before the first board read) is dropped.
 std::vector<uint8_t> Fm1Link::take_params_frame() {
   std::vector<uint8_t> args{0};
   for (size_t t = 0; t < kMaxTracks; ++t) {
-    for (size_t id = 0; id < kMaxParams && args[0] < 127; ++id) {
-      if (!dirty_[t][id]) continue;
-      dirty_[t][id] = false;
-      const int v = pending_[t][id] + 8192;
+    for (size_t key = 0; key < kMaxParams && args[0] < 127; ++key) {
+      if (!dirty_[t][key]) continue;
+      dirty_[t][key] = false;
+      const int index = key_to_index_[key];
+      if (index < 0) continue;
+      const int v = pending_[t][key] + 8192;
       args.push_back(static_cast<uint8_t>(t));
-      args.push_back(static_cast<uint8_t>(id));
+      args.push_back(static_cast<uint8_t>(index));
       args.push_back(static_cast<uint8_t>(v & 0x7f));
       args.push_back(static_cast<uint8_t>((v >> 7) & 0x7f));
       ++args[0];
@@ -409,6 +575,20 @@ void Fm1Link::thread_main() {
         next_connect = Clock::now() + std::chrono::milliseconds(timing_.reconnect_ms);
       }
       continue;
+    }
+    if (board_stale_) {  // connected, or the device loaded something
+      board_stale_ = !read_board();
+      last_sent = Clock::now();
+      misses = board_stale_ ? misses + 1 : 0;
+      if (misses >= timing_.missed_pings) {
+        go_disconnected();
+        next_connect = Clock::now() + std::chrono::milliseconds(timing_.reconnect_ms);
+      }
+      continue;
+    }
+    if (read_now_.exchange(false, std::memory_order_acq_rel)) {
+      project_stale_ = true;
+      changed_at_ = {};
     }
     bool put_waiting;
     {

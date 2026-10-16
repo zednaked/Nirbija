@@ -12,6 +12,7 @@
 #include "core/fx_pad.h"
 #include "core/drone.h"
 #include "core/external_midi.h"
+#include "core/fm1.h"
 #include "core/keyboard_instrument.h"
 #include "core/sampler.h"
 
@@ -2498,6 +2499,84 @@ bool MixerModel::fxPadHold(int row, int slot) const {
 bool MixerModel::insertIsDrone(int row, int slot) const {
   PluginInstance* insert = insertFor(row, slot);
   return insert != nullptr && insert->descriptor().uid == "nirbija.drone";
+}
+
+bool MixerModel::insertIsFm1(int row, int slot) const {
+  PluginInstance* insert = insertFor(row, slot);
+  return insert != nullptr && insert->descriptor().uid == "nirbija.fm1";
+}
+
+QVariantMap MixerModel::insertFm1Snapshot(int row, int slot) const {
+  QVariantMap out;
+  auto* fm1 = dynamic_cast<Fm1Instance*>(insertFor(row, slot));
+  if (fm1 == nullptr) return out;
+  const Fm1Link& link = fm1->link();
+  const Fm1Info info = link.info();
+  switch (link.state()) {
+    case Fm1Link::State::Connected: out[QStringLiteral("state")] = QStringLiteral("connected"); break;
+    case Fm1Link::State::Outdated: out[QStringLiteral("state")] = QStringLiteral("outdated"); break;
+    default: out[QStringLiteral("state")] = QStringLiteral("disconnected"); break;
+  }
+  out[QStringLiteral("version")] = QString::fromStdString(info.version);
+  out[QStringLiteral("protocol")] = info.protocol;
+  switch (link.put_state()) {
+    case Fm1Link::PutState::Pending: out[QStringLiteral("put")] = QStringLiteral("pending"); break;
+    case Fm1Link::PutState::WaitingForStop: out[QStringLiteral("put")] = QStringLiteral("waiting"); break;
+    case Fm1Link::PutState::Done: out[QStringLiteral("put")] = QStringLiteral("done"); break;
+    case Fm1Link::PutState::Refused: out[QStringLiteral("put")] = QStringLiteral("refused"); break;
+    default: out[QStringLiteral("put")] = QStringLiteral("none"); break;
+  }
+  out[QStringLiteral("bytes")] = static_cast<qlonglong>(fm1->project_bytes());
+  const int64_t read_at = fm1->read_at();
+  out[QStringLiteral("readAt")] =
+      read_at > 0 ? QDateTime::fromSecsSinceEpoch(read_at).toString(QStringLiteral("HH:mm")) : QString();
+  out[QStringLiteral("selected")] = link.selected_track();
+  out[QStringLiteral("generation")] = static_cast<qreal>(link.board_generation());
+  QVariantList tracks;
+  const auto board = link.board();
+  for (size_t t = 0; t < board.size(); ++t) {
+    QVariantMap track;
+    track[QStringLiteral("engine")] = board[t].engine;
+    track[QStringLiteral("name")] = QString::fromStdString(board[t].engine_name);
+    track[QStringLiteral("drum")] = board[t].engine >= info.engines && info.engines > 0;
+    QVariantList params;
+    for (const Fm1Param& p : board[t].params) {
+      QVariantMap param;
+      const uint32_t id = Fm1Instance::param_id(static_cast<int>(t), p.key);
+      param[QStringLiteral("id")] = static_cast<int>(id);
+      param[QStringLiteral("key")] = p.key;
+      param[QStringLiteral("name")] = QString::fromStdString(p.name);
+      param[QStringLiteral("min")] = p.min;
+      param[QStringLiteral("max")] = p.max;
+      param[QStringLiteral("value")] = link.value(static_cast<uint8_t>(t), p.key);
+      QStringList names;
+      for (const std::string& n : p.names) names.append(QString::fromStdString(n));
+      param[QStringLiteral("names")] = names;
+      param[QStringLiteral("mapped")] = insertParamMapped(row, slot, static_cast<int>(id));
+      params.append(param);
+    }
+    track[QStringLiteral("params")] = params;
+    tracks.append(track);
+  }
+  out[QStringLiteral("tracks")] = tracks;
+  return out;
+}
+
+void MixerModel::setFm1Param(int row, int slot, int id, qreal value) {
+  auto* fm1 = dynamic_cast<Fm1Instance*>(insertFor(row, slot));
+  if (fm1 == nullptr || id < 0) return;
+  fm1->set_parameter(static_cast<uint32_t>(id), value);
+  // The session keeps the device's project, read from it after it settles:
+  // nothing here to write yet.
+  sceneParamTouched(row, slot, static_cast<uint32_t>(id), static_cast<float>(value));
+}
+
+void MixerModel::fm1ReadNow(int row, int slot) {
+  if (auto* fm1 = dynamic_cast<Fm1Instance*>(insertFor(row, slot))) fm1->read_project_now();
+}
+
+void MixerModel::fm1SendProject(int row, int slot) {
+  if (auto* fm1 = dynamic_cast<Fm1Instance*>(insertFor(row, slot))) fm1->send_project_again();
 }
 
 QVariantMap MixerModel::insertDroneSnapshot(int row, int slot) const {

@@ -35,9 +35,17 @@ class Fm1Instance : public PluginInstance {
   void process(const float* const* inputs, float* const* outputs, uint32_t frames) override;
   void queue_midi(const MidiEvent& event) override;
 
-  std::vector<ParameterInfo> parameters() const override { return {}; }
-  double parameter_value(uint32_t) const override { return 0.0; }
-  void set_parameter(uint32_t, double) override {}
+  // The shown parameters of the four tracks (design/fm1.md, "Os parâmetros"):
+  // id = track << 8 | the stable key, so a session or a scene names the same
+  // parameter after a firmware update. The list follows the device: it is
+  // empty before the first read and changes with a track's engine.
+  static uint32_t param_id(int track, int key) { return static_cast<uint32_t>(track) << 8 | static_cast<uint32_t>(key); }
+  std::vector<ParameterInfo> parameters() const override;
+  double parameter_value(uint32_t id) const override;
+  void set_parameter(uint32_t id, double value) override;
+  void set_parameter_rt(uint32_t id, double value) override;
+  // Knobs turned on the device itself: the player's hand, for the scenes.
+  size_t take_touched(TouchedParam* out, size_t capacity) override;
 
   // The session keeps the FM-1's working project (design/fm1.md, "A
   // sessão"): the copy the Link last read, never read on the spot. Loading
@@ -52,6 +60,16 @@ class Fm1Instance : public PluginInstance {
   ExternalMidi* external_midi() override { return &device_; }
 
   Fm1Link& link() { return link_; }
+  const Fm1Link& link() const { return link_; }
+
+  // The editor's two buttons: read the device's project now; give it the
+  // session's project again.
+  void read_project_now() { link_.read_project_now(); }
+  void send_project_again();
+  size_t project_bytes() const;
+  // When the session's copy was last read from the device (seconds since the
+  // epoch), 0 for never.
+  int64_t read_at() const { return read_at_.load(std::memory_order_relaxed); }
 
   // The blob: "NFM1", a version byte, then sections (tag, length u32 LE,
   // bytes). Section 1 is the project, as the device gave it ("JNG2").
@@ -61,6 +79,8 @@ class Fm1Instance : public PluginInstance {
  private:
   mutable std::mutex mutex_;
   std::vector<uint8_t> project_;  // what the session gets; empty until first read
+  std::vector<TouchedParam> touched_;  // UI thread: device touches not taken yet
+  std::atomic<int64_t> read_at_{0};
 
   PluginDescriptor descriptor_;
   ExternalMidi device_;
