@@ -137,6 +137,11 @@ EditorPopup {
     // hits. Empty name means nothing sits there. Pads are that chip's own
     // named keys, not General MIDI.
     property string targetName: ""
+    // The FM-1 below plays four tracks, one a MIDI channel; which one this
+    // sequencer plays (0..2 tracks 1..3, 3 the drums, -1 lanes on mixed
+    // channels). Only meaningful while targetFm1.
+    property bool targetFm1: false
+    property int targetFm1Track: -1
     property var targetPads: []
     // Pitches the grid can show, low to high: the chip's pads, the eight
     // lane notes, anything Skyline has painted, and (with no chip map) the
@@ -518,6 +523,8 @@ EditorPopup {
         const t = Mixer.insertSequencerTarget(root.targetRow, root.targetSlot)
         const name = t.name || ""
         const pads = t.pads || []
+        root.targetFm1 = t.fm1 === true
+        root.targetFm1Track = t.fm1Track !== undefined ? t.fm1Track : -1
         let same = name === root.targetName
                    && pads.length === root.targetPads.length
         for (let i = 0; same && i < pads.length; ++i)
@@ -1058,6 +1065,36 @@ EditorPopup {
                     font.pixelSize: Skin.fontS
                     elide: Text.ElideRight
                 }
+            }
+
+            // Which FM-1 track the lanes play: every lane onto its channel at
+            // once, and for the drums the eight lanes onto the kit's pieces.
+            HeaderButton {
+                id: fm1TrackButton
+                visible: root.targetFm1
+                Layout.preferredWidth: Px.px(72)
+                label: root.targetFm1Track === 3 ? qsTr("DRUMS")
+                     : root.targetFm1Track >= 0 ? qsTr("T%1").arg(root.targetFm1Track + 1)
+                     : qsTr("TRACK")
+                active: root.targetFm1Track >= 0
+                tip: qsTr("Which track of the FM-1 this sequencer plays. Every lane goes to that track's MIDI channel; DRUMS also tunes the eight lanes to kick, snare, hats, clap, tom, crash and ride. One sequencer per track: stack them above the FM-1.")
+                onClicked: {
+                    const entries = []
+                    const names = [qsTr("Track 1 · channel 1"), qsTr("Track 2 · channel 2"),
+                                   qsTr("Track 3 · channel 3"), qsTr("Drums · channel 10")]
+                    for (let i = 0; i < 4; ++i) {
+                        const track = i
+                        entries.push({ label: names[i], action: () => {
+                            Mixer.setSequencerFm1Track(root.targetRow, root.targetSlot, track)
+                            root.readAll()
+                        } })
+                    }
+                    fm1TrackMenu.openAt(fm1TrackButton, entries, qsTr("FM-1 track"))
+                }
+            }
+            SlotMenu {
+                id: fm1TrackMenu
+                parent: Overlay.overlay
             }
 
             Item { Layout.preferredWidth: Skin.spacing }

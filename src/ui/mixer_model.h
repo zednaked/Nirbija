@@ -494,6 +494,11 @@ class MixerModel : public QAbstractListModel {
   // name list. `{name, pads:[{note,name},...]}`; empty when nothing sits
   // below, or the chip published no named keys.
   Q_INVOKABLE QVariantMap insertSequencerTarget(int row, int slot) const;
+  // A sequencer aimed at the FM-1 plays one of its tracks: every lane on
+  // that track's MIDI channel (0..2: tracks 1..3, 3: the drums on channel
+  // 10). The drums also tune the eight lanes to kick, snare, hats, clap, tom,
+  // crash, ride; a synth track keeps the lanes' notes.
+  Q_INVOKABLE void setSequencerFm1Track(int row, int slot, int track);
   Q_INVOKABLE void setSequencerCell(int row, int slot, int pattern, int lane,
                                     int step, int note, int velocity, bool on,
                                     qreal chance, bool accent, bool tie);

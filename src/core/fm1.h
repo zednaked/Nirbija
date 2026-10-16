@@ -68,6 +68,15 @@ class Fm1Instance : public PluginInstance {
   Fm1Link& link() { return link_; }
   const Fm1Link& link() const { return link_; }
 
+  // The drum track (track 4) listens on MIDI channel 10 and plays General
+  // MIDI notes, every one of them a piece of the kit (Jangada's drum kits).
+  // A sequencer aimed at it names its rows with these, and a fresh drum
+  // sequencer's eight lanes take the first eight: kick, snare, hats, clap,
+  // a tom, crash, ride.
+  static constexpr int kDrumChannel = 9;  // 0-based: MIDI channel 10
+  static const std::vector<NoteName>& drum_names();
+  static constexpr int kDrumLaneNotes[8] = {36, 38, 42, 46, 39, 45, 49, 51};
+
   // Takes the sound track `track` plays now on the device into the table and
   // returns its number (1-based), the one already there when it is the same;
   // 0 when the device did not answer or the table is full. UI thread: it

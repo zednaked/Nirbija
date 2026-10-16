@@ -1415,6 +1415,24 @@ QVariantMap MixerModel::insertSequencerTarget(int row, int slot) const {
       QString::fromStdString(target->descriptor().name);
 
   std::vector<NoteName> named = target->note_names();
+  // The FM-1 is four instruments, one a channel: the lanes' channel says
+  // which one this sequencer plays. All on one: "FM-1 · T2"; on 10, the
+  // drums, whose rows take the kit's names.
+  if (dynamic_cast<Fm1Instance*>(target) != nullptr) {
+    auto* seq = dynamic_cast<StepSequencerInstance*>(insertFor(row, slot));
+    const int channel = seq->lane_channel(0);
+    bool same = true;
+    for (int lane = 1; lane < 8; ++lane) same = same && seq->lane_channel(lane) == channel;
+    int track = -1;
+    if (same && channel == Fm1Instance::kDrumChannel) track = 3;
+    else if (same && channel >= 0 && channel < 3) track = channel;
+    out[QStringLiteral("fm1")] = true;
+    out[QStringLiteral("fm1Track")] = track;
+    if (track >= 0)
+      out[QStringLiteral("name")] = track == 3 ? QStringLiteral("FM-1 · DRUMS")
+                                               : QStringLiteral("FM-1 · T%1").arg(track + 1);
+    if (track == 3) named = Fm1Instance::drum_names();
+  }
   std::stable_sort(named.begin(), named.end(),
                     [](const NoteName& a, const NoteName& b) { return a.key < b.key; });
 
@@ -1451,6 +1469,17 @@ void MixerModel::setSequencerTrig(int row, int slot, int pattern, int lane,
   if (seq == nullptr) return;
   seq->set_trig(pattern, lane, step, static_cast<float>(micro), ratchet, cond,
                 condArg);
+  markDirty();
+}
+
+void MixerModel::setSequencerFm1Track(int row, int slot, int track) {
+  auto* seq = dynamic_cast<StepSequencerInstance*>(insertFor(row, slot));
+  if (seq == nullptr || track < 0 || track > 3) return;
+  const int channel = track == 3 ? Fm1Instance::kDrumChannel : track;
+  for (int lane = 0; lane < 8; ++lane)
+    seq->set_lane(lane, track == 3 ? Fm1Instance::kDrumLaneNotes[lane] : seq->lane_note(lane),
+                  seq->lane_length(lane), seq->lane_division(lane), seq->lane_direction(lane),
+                  channel, seq->lane_muted(lane), seq->lane_gate(lane));
   markDirty();
 }
 

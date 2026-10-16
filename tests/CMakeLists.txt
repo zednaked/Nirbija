@@ -149,6 +149,10 @@ if(NIRBIJA_UI)
     NIRBIJA_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
   add_test(NAME session_roundtrip COMMAND nirbija_session_roundtrip)
 
+  add_executable(nirbija_fm1_sequencer fm1_sequencer.cpp)
+  target_link_libraries(nirbija_fm1_sequencer PRIVATE nirbija_ui)
+  add_test(NAME fm1_sequencer COMMAND nirbija_fm1_sequencer)
+
   add_executable(nirbija_fm1_strip fm1_strip.cpp)
   target_link_libraries(nirbija_fm1_strip PRIVATE nirbija_ui)
   add_test(NAME fm1_strip COMMAND nirbija_fm1_strip)
@@ -286,7 +290,8 @@ foreach(test IN ITEMS engine_smoke midi_jack midi_clock_follow recorder_take ext
   endif()
 endforeach()
 foreach(test IN ITEMS ui_smoke session_dirty session_autosave_live session_undo_live
-                      session_roundtrip session_quarantine session_scenes fm1_strip)
+                      session_roundtrip session_quarantine session_scenes fm1_strip
+                      fm1_sequencer)
   if(TEST ${test})
     set_tests_properties(${test} PROPERTIES LABELS "quick;ui" TIMEOUT 300
                          SKIP_RETURN_CODE 77)

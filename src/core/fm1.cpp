@@ -273,6 +273,22 @@ size_t Fm1Instance::take_touched(TouchedParam* out, size_t capacity) {
   return n;
 }
 
+const std::vector<NoteName>& Fm1Instance::drum_names() {
+  static const std::vector<NoteName> names = {
+      {35, "Kick 2"},     {36, "Kick"},       {37, "Side stick"}, {38, "Snare"},
+      {39, "Clap"},       {40, "Snare 2"},    {41, "Low tom 2"},  {42, "Closed hat"},
+      {43, "Low tom"},    {44, "Pedal hat"},  {45, "Mid tom 2"},  {46, "Open hat"},
+      {47, "Mid tom"},    {48, "High tom 2"}, {49, "Crash"},      {50, "High tom"},
+      {51, "Ride"},       {52, "China"},      {53, "Ride bell"},  {54, "Tambourine"},
+      {55, "Splash"},     {56, "Cowbell"},    {57, "Crash 2"},    {58, "Vibraslap"},
+      {59, "Ride 2"},     {60, "High bongo"}, {61, "Low bongo"},  {62, "Mute conga"},
+      {63, "High conga"}, {64, "Low conga"},  {65, "High timbale"}, {66, "Low timbale"},
+      {67, "High agogo"}, {68, "Low agogo"},  {69, "Cabasa"},     {70, "Maracas"},
+      {75, "Claves"},     {76, "High block"}, {77, "Low block"},  {81, "Open triangle"},
+  };
+  return names;
+}
+
 void Fm1Instance::queue_midi(const MidiEvent& event) {
   if (device_.serviced.load(std::memory_order_acquire)) device_.notes.push(event);
 }
