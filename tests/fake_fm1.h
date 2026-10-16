@@ -11,6 +11,7 @@
 //
 // The knobs make it misbehave the way a real one on a real cable does.
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -48,6 +49,20 @@ class FakeFm1 {
   std::atomic<int> chunk{0};             // replies cut into events of n bytes (0: whole)
   std::atomic<bool> clock_inside{false}; // a MIDI clock byte in the middle of each reply
   std::atomic<int> reply_delay_us{0};    // the USB round trip and the device's main loop
+  std::atomic<bool> playing{false};      // the song plays: a project commit answers 3
+  std::atomic<bool> corrupt_next_get{false};  // one BK_GET answers with a byte changed
+
+  // The working project, object 0 of the backup. The test sets it and reads
+  // it back; a commit replaces it.
+  void set_project(const std::vector<uint8_t>& p) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    project_ = p;
+  }
+  std::vector<uint8_t> project() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return project_;
+  }
+  int commits() const { return commits_.load(); }
 
   // --- what it saw ------------------------------------------------------------
   int received(uint8_t cmd) {
@@ -81,6 +96,39 @@ class FakeFm1 {
     out.push_back(static_cast<uint8_t>((v >> 7) & 0x7f));
   }
   static int rv(const uint8_t* p) { return (p[0] | p[1] << 7) - 8192; }
+  static void put35(std::vector<uint8_t>& out, uint32_t v) {
+    for (int i = 0; i < 5; ++i) out.push_back(static_cast<uint8_t>((v >> (7 * i)) & 0x7f));
+  }
+  static uint32_t get35(const uint8_t* a) {
+    return a[0] | a[1] << 7 | a[2] << 14 | static_cast<uint32_t>(a[3]) << 21 |
+           static_cast<uint32_t>(a[4]) << 28;
+  }
+  static uint32_t crc32(const std::vector<uint8_t>& v) {
+    uint32_t c = 0xffffffffu;
+    for (uint8_t b : v) {
+      c ^= b;
+      for (int k = 0; k < 8; ++k) c = (c >> 1) ^ (0xedb88320u & (0u - (c & 1u)));
+    }
+    return ~c;
+  }
+  static void pack7(std::vector<uint8_t>& out, const std::vector<uint8_t>& in) {
+    for (size_t at = 0; at < in.size(); at += 7) {
+      const size_t k = std::min<size_t>(7, in.size() - at);
+      uint8_t top = 0;
+      for (size_t i = 0; i < k; ++i) top |= static_cast<uint8_t>((in[at + i] >> 7) << i);
+      out.push_back(top);
+      for (size_t i = 0; i < k; ++i) out.push_back(in[at + i] & 0x7f);
+    }
+  }
+  static std::vector<uint8_t> unpack7(const uint8_t* a, size_t n) {
+    std::vector<uint8_t> out;
+    while (n > 0) {
+      const uint8_t top = *a++;
+      --n;
+      for (size_t j = 0; j < 7 && n > 0; ++j, --n) out.push_back(static_cast<uint8_t>(*a++ | ((top >> j) & 1) << 7));
+    }
+    return out;
+  }
 
   void run() {
     uint8_t in[4096];
@@ -153,6 +201,70 @@ class FakeFm1 {
         }
         break;
       }
+      case 34: {  // BK_LIST: rc, count, per object: id, length u35, CRC u35 (only object 0 here)
+        std::lock_guard<std::mutex> lock(mutex_);
+        snapshot_ = project_;
+        r = {0, 1, 0};
+        put35(r, static_cast<uint32_t>(snapshot_.size()));
+        put35(r, crc32(snapshot_));
+        break;
+      }
+      case 35: {  // BK_GET: id, offset u35, count -> id, rc, offset, count, pack7
+        if (na != 8) return;
+        const uint32_t off = get35(a + 1), count = a[6] | a[7] << 7;
+        std::vector<uint8_t> bytes;
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+          if (a[0] != 0 || count == 0 || count > 256 || off > snapshot_.size() ||
+              count > snapshot_.size() - off) {
+            r = {a[0], 1};
+            put35(r, off);
+            r.insert(r.end(), {0, 0});
+            break;
+          }
+          bytes.assign(snapshot_.begin() + off, snapshot_.begin() + off + count);
+        }
+        if (corrupt_next_get.exchange(false)) bytes[0] ^= 1;
+        r = {0, 0};
+        put35(r, off);
+        r.push_back(static_cast<uint8_t>(count & 127));
+        r.push_back(static_cast<uint8_t>(count >> 7));
+        pack7(r, bytes);
+        break;
+      }
+      case 36: {  // BK_PUT: op, id, ... -> op, id, rc
+        if (na < 2) return;
+        const uint8_t op = a[0];
+        uint8_t rc = 1;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (op == 0 && na == 12 && a[1] == 0) {
+          staging_.clear();
+          staged_len_ = get35(a + 2);
+          staged_crc_ = get35(a + 7);
+          staging_on_ = true;
+          rc = 0;
+        } else if (!staging_on_) {
+          rc = 5;
+        } else if (op == 1 && na >= 9 && get35(a + 2) == staging_.size()) {
+          const std::vector<uint8_t> bytes = unpack7(a + 7, na - 7);
+          staging_.insert(staging_.end(), bytes.begin(), bytes.end());
+          rc = staging_.size() <= staged_len_ ? 0 : 1;
+        } else if (op == 2 && na == 2) {
+          staging_on_ = false;
+          if (staging_.size() != staged_len_ || crc32(staging_) != staged_crc_) rc = 2;
+          else if (playing) rc = 3;
+          else {
+            project_ = staging_;
+            ++commits_;
+            rc = 0;
+          }
+        } else if (op == 3) {
+          staging_on_ = false;
+          rc = 0;
+        }
+        r = {a[0], a[1], rc};
+        break;
+      }
       default:
         return;  // not understood: no reply, as the device does
     }
@@ -192,5 +304,9 @@ class FakeFm1 {
   std::atomic<int> watch_{0};
   std::atomic<int> largest_params_{0};
   std::atomic<int> push_id_{-1};
+  std::vector<uint8_t> project_, snapshot_, staging_;
+  uint32_t staged_len_ = 0, staged_crc_ = 0;
+  bool staging_on_ = false;
+  std::atomic<int> commits_{0};
   std::atomic<int> push_value_{0};
 };

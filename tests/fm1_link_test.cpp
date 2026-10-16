@@ -247,6 +247,112 @@ void instance() {
          "instance: attached, the note goes to the FM-1 on its own channel (2: track 2)");
 }
 
+nirbija::Fm1Link::Timing session_timing() {
+  nirbija::Fm1Link::Timing t = quick();
+  t.project_quiet_ms = 150;
+  t.put_retry_ms = 50;
+  return t;
+}
+
+std::vector<uint8_t> some_project(size_t n, uint32_t seed) {  // every byte value, top bits too
+  std::vector<uint8_t> p(n);
+  for (size_t i = 0; i < n; ++i) {
+    seed = seed * 1664525u + 1013904223u;
+    p[i] = static_cast<uint8_t>(seed >> 24);
+  }
+  return p;
+}
+
+std::vector<uint8_t> saved_project(const nirbija::Fm1Instance& fm1) {
+  std::vector<uint8_t> project;
+  nirbija::Fm1Instance::unpack_state(fm1.save_state(), &project);
+  return project;
+}
+
+void session_read() {
+  nirbija::Fm1Instance fm1(session_timing());
+  FakeFm1 device(*fm1.external_midi());
+  const auto first = some_project(3000, 1);
+  device.set_project(first);
+  device.start();
+  fm1.activate(48000.0, 256);
+  expect(fm1.save_state().empty(), "session: nothing to save before the device was ever read");
+  expect(within(2000, [&] { return fm1.take_state_dirty(); }) && saved_project(fm1) == first,
+         "session: read on connecting, 3000 bytes in 12 pieces, every byte value, the session dirty");
+
+  const auto second = some_project(3100, 2);
+  device.set_project(second);
+  device.push_changed_soon(5, 1);
+  expect(within(2000, [&] { return fm1.take_state_dirty(); }) && saved_project(fm1) == second,
+         "session: changed on the device, quiet, read again");
+  const uint64_t reads = fm1.link().projects_read();
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
+  expect(fm1.link().projects_read() == reads && !fm1.take_state_dirty(),
+         "session: nothing changed, nothing read");
+
+  const auto third = some_project(2900, 3);
+  device.set_project(third);
+  device.corrupt_next_get = true;
+  device.push_changed_soon(5, 2);
+  expect(within(3000, [&] { return fm1.take_state_dirty(); }) && saved_project(fm1) == third &&
+             fm1.link().projects_read() == reads + 1,
+         "session: a piece that changed on the way fails the CRC; read again, whole");
+  device.stop();
+}
+
+void session_restore() {
+  const auto session = some_project(3500, 7);
+  const auto stale = some_project(3000, 8);
+  nirbija::Fm1Instance fm1(session_timing());
+  FakeFm1 device(*fm1.external_midi());
+  device.set_project(stale);
+  device.unplugged = true;
+  expect(fm1.load_state(nirbija::Fm1Instance::pack_state(session)), "restore: the session's blob taken");
+  device.start();
+  fm1.activate(48000.0, 256);
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  expect(saved_project(fm1) == session && fm1.link().put_state() == nirbija::Fm1Link::PutState::Pending,
+         "restore: the FM-1 away; the session keeps its project, the put waits");
+  device.unplugged = false;
+  expect(within(2000, [&] { return fm1.link().put_state() == nirbija::Fm1Link::PutState::Done; }) &&
+             device.project() == session && device.commits() == 1,
+         "restore: the FM-1 back; it gets the session's project");
+  std::this_thread::sleep_for(std::chrono::milliseconds(400));
+  fm1.take_state_dirty();
+  expect(saved_project(fm1) == session, "restore: the FM-1's old project never replaced the session's");
+
+  const auto next = some_project(1000, 9);
+  device.playing = true;
+  fm1.load_state(nirbija::Fm1Instance::pack_state(next));
+  expect(within(1000, [&] {
+           return fm1.link().put_state() == nirbija::Fm1Link::PutState::WaitingForStop;
+         }) && device.project() == session,
+         "restore: the song plays; the put waits for it to stop");
+  device.playing = false;
+  expect(within(1000, [&] { return fm1.link().put_state() == nirbija::Fm1Link::PutState::Done; }) &&
+             device.project() == next,
+         "restore: stopped; the project goes in");
+  device.stop();
+}
+
+void session_blobs() {
+  const auto p = some_project(100, 4);
+  auto blob = nirbija::Fm1Instance::pack_state(p);
+  std::vector<uint8_t> out;
+  expect(nirbija::Fm1Instance::unpack_state(blob, &out) && out == p, "blob: round trip");
+  auto later = blob;
+  later.insert(later.end(), {9, 3, 0, 0, 0, 1, 2, 3});  // a section from a later Nirbija
+  expect(nirbija::Fm1Instance::unpack_state(later, &out) && out == p, "blob: an unknown section skipped");
+  auto cut = blob;
+  cut.resize(cut.size() - 1);
+  auto bad = blob;
+  bad[0] = 'X';
+  nirbija::Fm1Instance fm1(session_timing());
+  expect(!fm1.load_state(cut) && !fm1.load_state(bad) && fm1.save_state().empty() &&
+             fm1.link().put_state() == nirbija::Fm1Link::PutState::None,
+         "blob: cut short or not ours, refused whole; nothing sent");
+}
+
 }  // namespace
 
 int main() {
@@ -257,6 +363,9 @@ int main() {
   cable();
   params();
   instance();
+  session_blobs();
+  session_read();
+  session_restore();
   std::printf("%s\n", failures ? "FAILED" : "all ok");
   return failures ? 1 : 0;
 }

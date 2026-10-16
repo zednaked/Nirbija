@@ -4,6 +4,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -55,7 +56,12 @@ class Fm1Link {
     int ping_ms = 1000;      // the device drops WATCH after 3 s of silence
     int reconnect_ms = 2000;
     int missed_pings = 2;    // this many in a row: disconnected
+    int project_quiet_ms = 30000;  // changed, then quiet this long: read the project
+    int put_retry_ms = 1000;       // a project waiting for the song to stop asks again
   };
+
+  // Where giving the device a project stands (put_project).
+  enum class PutState { None, Pending, WaitingForStop, Done, Refused };
 
   enum class State { Disconnected, Outdated, Connected };
 
@@ -83,8 +89,21 @@ class Fm1Link {
   // UI thread. The pushes since the last call, oldest first.
   std::vector<Fm1Push> take_pushes();
 
+  // --- the project (design/fm1.md, "A sessão") ---------------------------------
+  // The FM-1's working project, object 0 of Jangada's backup ("JNG2"). The
+  // Link reads it on connecting and after the device changed and went quiet
+  // for project_quiet_ms; each read lands here, newest only. Any thread.
+  std::optional<std::vector<uint8_t>> take_project();
+  // Any thread. Gives the device this project (BK_PUT), as soon as it is
+  // connected and its song is stopped, before any read: a session opened with
+  // the FM-1 away must not be overwritten by what the FM-1 held. A newer put
+  // replaces one not yet done.
+  void put_project(std::vector<uint8_t> project);
+  PutState put_state() const { return put_state_.load(std::memory_order_acquire); }
+
   // For tests and the strip's status line.
   uint64_t params_frames_sent() const { return params_frames_.load(std::memory_order_relaxed); }
+  uint64_t projects_read() const { return projects_read_.load(std::memory_order_relaxed); }
 
  private:
   struct Request {
@@ -111,6 +130,9 @@ class Fm1Link {
   void fail_requests();
   void gather_params();
   std::vector<uint8_t> take_params_frame();
+  std::optional<std::vector<uint8_t>> read_project();
+  // 0 done, 3 the song plays, anything else refused or lost.
+  int write_project(const std::vector<uint8_t>& project);
 
   ExternalMidi& device_;
   const Timing timing_;
@@ -129,6 +151,15 @@ class Fm1Link {
   std::array<std::array<int16_t, kMaxParams>, kMaxTracks> pending_{};
   std::array<std::array<bool, kMaxParams>, kMaxTracks> dirty_{};
   std::atomic<uint64_t> params_frames_{0};
+
+  // The project. `put_` and `got_` under mutex_; the rest Link thread only.
+  std::optional<std::vector<uint8_t>> put_;
+  std::optional<std::vector<uint8_t>> got_;
+  std::atomic<PutState> put_state_{PutState::None};
+  std::atomic<uint64_t> projects_read_{0};
+  bool project_stale_ = true;  // changed (or never read) since the last read
+  std::chrono::steady_clock::time_point changed_at_{};
+  std::chrono::steady_clock::time_point put_after_{};
 
   // Link thread only: the SysEx being assembled from the incoming chunks.
   std::vector<uint8_t> partial_;

@@ -196,7 +196,11 @@ A tabela de sons vai no blob da sessão junto do projeto.
    desliga antes do reclaim, religa a cada ~2 s, o áudio da strip uma vez
    só); `tests/fm1_strip.cpp` (ui). As portas casam por "Jangada", o nome
    USB do aparelho.
-4. Sessão: pegar, guardar, devolver, song tocando, desconectado.
+4. ~~Sessão: pegar, guardar, devolver, song tocando, desconectado~~ feito:
+   `Fm1Link::take_project`/`put_project` (na thread do Link, a devolução
+   antes de qualquer leitura), o blob "NFM1" com seções em `Fm1Instance`;
+   testes em `fm1_link`. Falta: ler de novo ao salvar a sessão à mão (hoje
+   lê ao conectar e 30 s depois de o FM-1 mudar e ficar quieto).
 5. Parâmetros e `Fm1Editor.qml`, o visual do mockup.
 6. SOM nas cenas.
 7. No FM-1 de verdade: latência das notas, cliques na troca de som, o

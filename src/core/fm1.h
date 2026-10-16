@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Nirbija contributors
 #pragma once
 
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -25,6 +26,7 @@ class Fm1Instance : public PluginInstance {
   static PluginDescriptor make_descriptor();
 
   Fm1Instance();
+  explicit Fm1Instance(Fm1Link::Timing timing);  // tests: short times
   ~Fm1Instance() override;
 
   void set_channel_layout(int channels) override { channels_ = channels; }
@@ -37,18 +39,32 @@ class Fm1Instance : public PluginInstance {
   double parameter_value(uint32_t) const override { return 0.0; }
   void set_parameter(uint32_t, double) override {}
 
-  std::vector<uint8_t> save_state() const override { return {}; }
-  bool load_state(const std::vector<uint8_t>&) override { return true; }
+  // The session keeps the FM-1's working project (design/fm1.md, "A
+  // sessão"): the copy the Link last read, never read on the spot. Loading
+  // gives it to the device as soon as the device can take it.
+  std::vector<uint8_t> save_state() const override;
+  bool load_state(const std::vector<uint8_t>& blob) override;
+  // A newer read of the device's project arrived: the session is worth
+  // writing again.
+  bool take_state_dirty() override;
 
   const PluginDescriptor& descriptor() const override { return descriptor_; }
   ExternalMidi* external_midi() override { return &device_; }
 
   Fm1Link& link() { return link_; }
 
+  // The blob: "NFM1", a version byte, then sections (tag, length u32 LE,
+  // bytes). Section 1 is the project, as the device gave it ("JNG2").
+  static std::vector<uint8_t> pack_state(const std::vector<uint8_t>& project);
+  static bool unpack_state(const std::vector<uint8_t>& blob, std::vector<uint8_t>* project);
+
  private:
+  mutable std::mutex mutex_;
+  std::vector<uint8_t> project_;  // what the session gets; empty until first read
+
   PluginDescriptor descriptor_;
   ExternalMidi device_;
-  Fm1Link link_{device_};
+  Fm1Link link_;
   int channels_ = 2;
 };
 

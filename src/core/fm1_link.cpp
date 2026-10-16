@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Nirbija contributors
 #include "core/fm1_link.h"
 
+#include <algorithm>
 #include <chrono>
 
 namespace nirbija {
@@ -14,10 +15,57 @@ constexpr uint8_t kInfo = 1;
 constexpr uint8_t kWatch = 22;
 constexpr uint8_t kPing = 25;
 constexpr uint8_t kTrackParams = 97;
+constexpr uint8_t kBackupList = 34;
+constexpr uint8_t kBackupGet = 35;
+constexpr uint8_t kBackupPut = 36;
+constexpr size_t kChunk = 256;  // the most one BK_GET / BK_PUT carries
 constexpr size_t kMaxFrame = 1024;  // the device's largest reply is under 900
 constexpr size_t kMaxPushes = 1024;
 
 bool is_push(uint8_t cmd) { return cmd == 23 || cmd == 24 || cmd == 26 || cmd == 32; }
+
+// CRC-32 as zlib and the device (storage.c st_crc32) count it.
+uint32_t crc32(const uint8_t* p, size_t n) {
+  uint32_t c = 0xffffffffu;
+  while (n--) {
+    c ^= *p++;
+    for (int k = 0; k < 8; ++k) c = (c >> 1) ^ (0xedb88320u & (0u - (c & 1u)));
+  }
+  return ~c;
+}
+
+// Numbers as five 7-bit bytes, LSB first (u35).
+void put35(std::vector<uint8_t>& out, uint32_t v) {
+  for (int i = 0; i < 5; ++i) out.push_back(static_cast<uint8_t>((v >> (7 * i)) & 0x7f));
+}
+uint32_t get35(const uint8_t* a) {
+  return static_cast<uint32_t>(a[0]) | static_cast<uint32_t>(a[1]) << 7 |
+         static_cast<uint32_t>(a[2]) << 14 | static_cast<uint32_t>(a[3]) << 21 |
+         static_cast<uint32_t>(a[4]) << 28;
+}
+
+// pack7: groups of up to 7 bytes, each behind a byte holding their top bits.
+void pack7(std::vector<uint8_t>& out, const uint8_t* p, size_t n) {
+  while (n > 0) {
+    const size_t k = std::min<size_t>(n, 7);
+    uint8_t top = 0;
+    for (size_t i = 0; i < k; ++i) top |= static_cast<uint8_t>((p[i] >> 7) << i);
+    out.push_back(top);
+    for (size_t i = 0; i < k; ++i) out.push_back(p[i] & 0x7f);
+    p += k;
+    n -= k;
+  }
+}
+std::vector<uint8_t> unpack7(const uint8_t* a, size_t n) {
+  std::vector<uint8_t> out;
+  while (n > 0) {
+    const uint8_t top = *a++;
+    --n;
+    for (size_t j = 0; j < 7 && n > 0; ++j, --n)
+      out.push_back(static_cast<uint8_t>(*a++ | ((top >> j) & 1u) << 7));
+  }
+  return out;
+}
 
 // INFO's reply: version, NENGINES, P_COUNT, G_COUNT, NSTEP, P_E0, the engine
 // names, NTRK, the protocol version (and more, which is not needed here).
@@ -91,6 +139,79 @@ bool Fm1Link::set_param_rt(uint8_t track, uint8_t id, int value) {
   return param_moves_.push(move);
 }
 
+std::optional<std::vector<uint8_t>> Fm1Link::take_project() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::optional<std::vector<uint8_t>> out;
+  out.swap(got_);
+  return out;
+}
+
+void Fm1Link::put_project(std::vector<uint8_t> project) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  put_ = std::move(project);
+  put_after_ = {};
+  put_state_.store(PutState::Pending, std::memory_order_release);
+  wake_.notify_all();
+}
+
+// BK_LIST (which takes the snapshot of the working project), then BK_GET of
+// object 0 in pieces, checked against the CRC the list gave.
+std::optional<std::vector<uint8_t>> Fm1Link::read_project() {
+  auto list = exchange(kBackupList, {});
+  if (!list || list->size() < 2 || (*list)[0] != 0) return std::nullopt;
+  uint32_t length = 0, crc = 0;
+  bool found = false;
+  for (size_t i = 0; i < (*list)[1] && 2 + 11 * i + 11 <= list->size(); ++i) {
+    const uint8_t* entry = list->data() + 2 + 11 * i;
+    if (entry[0] != 0) continue;
+    length = get35(entry + 1);
+    crc = get35(entry + 6);
+    found = true;
+  }
+  if (!found || length == 0 || length > 65536) return std::nullopt;
+  std::vector<uint8_t> project;
+  while (project.size() < length) {
+    const uint32_t at = static_cast<uint32_t>(project.size());
+    const uint32_t count = std::min<uint32_t>(kChunk, length - at);
+    std::vector<uint8_t> args{0};
+    put35(args, at);
+    args.push_back(static_cast<uint8_t>(count & 0x7f));
+    args.push_back(static_cast<uint8_t>(count >> 7));
+    auto got = exchange(kBackupGet, args);
+    // id, rc, offset, count, the bytes
+    if (!got || got->size() < 9 || (*got)[0] != 0 || (*got)[1] != 0 || get35(got->data() + 2) != at)
+      return std::nullopt;
+    std::vector<uint8_t> bytes = unpack7(got->data() + 9, got->size() - 9);
+    if (bytes.size() != count) return std::nullopt;
+    project.insert(project.end(), bytes.begin(), bytes.end());
+  }
+  if (crc32(project.data(), project.size()) != crc) return std::nullopt;  // changed while read
+  return project;
+}
+
+// BK_PUT of object 0: begin, the bytes in order, commit (the device checks the
+// CRC and the project, then loads it). A put lost part way is aborted, so the
+// device does not hold its buffer for the 15 s a staging lasts.
+int Fm1Link::write_project(const std::vector<uint8_t>& project) {
+  auto rc_of = [](const std::optional<std::vector<uint8_t>>& r) {
+    return r && r->size() >= 3 ? static_cast<int>((*r)[2]) : -1;
+  };
+  std::vector<uint8_t> begin{0, 0};
+  put35(begin, static_cast<uint32_t>(project.size()));
+  put35(begin, crc32(project.data(), project.size()));
+  int rc = rc_of(exchange(kBackupPut, begin));
+  if (rc != 0) return rc;
+  for (size_t at = 0; at < project.size() && rc == 0; at += kChunk) {
+    std::vector<uint8_t> data{1, 0};
+    put35(data, static_cast<uint32_t>(at));
+    pack7(data, project.data() + at, std::min(kChunk, project.size() - at));
+    rc = rc_of(exchange(kBackupPut, data));
+  }
+  if (rc == 0) return rc_of(exchange(kBackupPut, {2, 0}));
+  exchange(kBackupPut, {3, 0});
+  return rc;
+}
+
 std::vector<Fm1Push> Fm1Link::take_pushes() {
   std::lock_guard<std::mutex> lock(mutex_);
   std::vector<Fm1Push> out;
@@ -111,6 +232,8 @@ void Fm1Link::fail_requests() {
 void Fm1Link::go_disconnected() {
   state_.store(State::Disconnected, std::memory_order_release);
   fail_requests();
+  project_stale_ = true;  // read again on the way back, unless a put waits
+  changed_at_ = {};
 }
 
 bool Fm1Link::send_frame(uint8_t cmd, const std::vector<uint8_t>& args) {
@@ -146,6 +269,8 @@ std::optional<std::vector<uint8_t>> Fm1Link::read_incoming(uint8_t waiting) {
         const uint8_t cmd = partial_[3];
         std::vector<uint8_t> args(partial_.begin() + 4, partial_.end());
         if (is_push(cmd)) {
+          project_stale_ = true;  // something changed on the device
+          changed_at_ = Clock::now();
           std::lock_guard<std::mutex> lock(mutex_);
           if (pushes_.size() >= kMaxPushes) pushes_.erase(pushes_.begin());
           pushes_.push_back(Fm1Push{cmd, std::move(args)});
@@ -247,6 +372,61 @@ void Fm1Link::thread_main() {
         std::unique_lock<std::mutex> lock(mutex_);
         wake_.wait_for(lock, std::chrono::milliseconds(5));
       }
+      continue;
+    }
+
+    // The project first: a put waiting, else a read when one is due. Each
+    // counts as a request for the keepalive and the miss count.
+    std::optional<std::vector<uint8_t>> to_put;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (put_ && now >= put_after_) to_put = put_;
+    }
+    if (to_put) {
+      const int rc = write_project(*to_put);
+      std::lock_guard<std::mutex> lock(mutex_);
+      const bool same = put_ && *put_ == *to_put;  // not replaced meanwhile
+      // 3: the song plays; 5: the staging lapsed (a USB reset); -1: lost. Again later.
+      if (rc == 0 || rc == 1 || rc == 2 || rc == 4) {
+        if (same) {
+          put_.reset();
+          put_state_.store(rc == 0 ? PutState::Done : PutState::Refused, std::memory_order_release);
+        }
+        if (rc == 0) {
+          project_stale_ = false;  // the device holds what the session holds
+          changed_at_ = Clock::now();
+        }
+      } else {
+        if (same) {
+          put_after_ = Clock::now() + std::chrono::milliseconds(timing_.put_retry_ms);
+          if (rc == 3) put_state_.store(PutState::WaitingForStop, std::memory_order_release);
+        }
+      }
+      last_sent = Clock::now();
+      misses = rc >= 0 ? 0 : misses + 1;
+      if (misses >= timing_.missed_pings) {
+        go_disconnected();
+        next_connect = Clock::now() + std::chrono::milliseconds(timing_.reconnect_ms);
+      }
+      continue;
+    }
+    bool put_waiting;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      put_waiting = put_.has_value();
+    }
+    if (project_stale_ && !put_waiting &&
+        now - changed_at_ >= std::chrono::milliseconds(timing_.project_quiet_ms)) {
+      auto project = read_project();
+      if (project) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        got_ = std::move(project);
+        projects_read_.fetch_add(1, std::memory_order_relaxed);
+        project_stale_ = false;
+      } else {
+        changed_at_ = Clock::now();  // try again after another quiet spell
+      }
+      last_sent = Clock::now();
       continue;
     }
 
