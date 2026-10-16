@@ -16,6 +16,11 @@ have. Each strip is a chain: an instrument, then effects, then a fader with
 sends. MIDI made by one plugin joins what the next one in the chain receives,
 so a step sequencer above a synth plays it.
 
+It also plays hardware from the inside. An M-VAVE FM-1 running
+[Jangada](https://github.com/zednaked/jangada) (alternative firmware, same author) is a strip like any other:
+the mixer reads the device's four tracks, edits them, saves its project with the session and hands it back.
+Both ends speak Jangada's own SysEx protocol. [The FM-1, below](#built-in).
+
 The difference from the other hosts is that a session does not start empty. The
 instruments below ship with the binary.
 
